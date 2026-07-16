@@ -41,6 +41,12 @@ float deg_to_rad = M_PI / 180.0;
 int cur_sum = 0;
 int clear_countdown = -1;
 int scan_count = 0;
+// The scan matcher pose belongs to this scan timestamp.  Never combine it
+// with a newer odom pose while the chassis is rotating.
+ros::Time last_match_stamp;
+double tf_publish_tolerance = 0.15;
+tf2::Transform last_odom_to_base;
+bool have_last_odom_to_base = false;
 
 
 // 初始姿态回调函数
@@ -74,6 +80,8 @@ void initialPoseCallback(const geometry_msgs::PoseWithCovarianceStamped::ConstPt
     // 6. 设置倒计时
     clear_countdown = 30;
     initial_pose_initialized = true;
+    // A new global pose invalidates the old odometry prediction baseline.
+    have_last_odom_to_base = false;
 }
 
 void crop_map();
@@ -175,6 +183,50 @@ void crop_map()
 
 static bool lidar_is_inverted = false;
 bool check(float x, float y, float yaw);
+
+// The scan matcher searches only a small neighbourhood (+/- one pixel and
+// degree per iteration).  Seed it with the odometry increment between two
+// scan timestamps so normal turns are already close before laser refinement.
+void predictPoseFromOdom(const tf2::Transform& odom_to_base)
+{
+    if (have_last_odom_to_base)
+    {
+        const tf2::Transform delta = last_odom_to_base.inverse() * odom_to_base;
+        const tf2::Vector3 translation = delta.getOrigin();
+        const double dx_body = translation.x();
+        const double dy_body = translation.y();
+
+        double roll = 0.0;
+        double pitch = 0.0;
+        double delta_yaw = 0.0;
+        tf2::Matrix3x3(delta.getRotation()).getRPY(roll, pitch, delta_yaw);
+
+        // Do not let a wheel-odometry NaN/reset fling the scan matcher across
+        // the map.  These limits are far above a normal 12 Hz chassis update.
+        if (std::isfinite(dx_body) && std::isfinite(dy_body) &&
+            std::isfinite(delta_yaw) &&
+            std::hypot(dx_body, dy_body) <= 0.25 && std::abs(delta_yaw) <= 0.50)
+        {
+            const double map_yaw = -lidar_yaw;
+            const double dx_map = std::cos(map_yaw) * dx_body -
+                                  std::sin(map_yaw) * dy_body;
+            const double dy_map = std::sin(map_yaw) * dx_body +
+                                  std::cos(map_yaw) * dy_body;
+            lidar_x += dx_map / map_msg.info.resolution;
+            lidar_y += dy_map / map_msg.info.resolution;
+            lidar_yaw -= delta_yaw;
+        }
+        else
+        {
+            ROS_WARN_THROTTLE(1.0,
+                              "lidar_loc: ignoring implausible odom delta between scans");
+        }
+    }
+
+    last_odom_to_base = odom_to_base;
+    have_last_odom_to_base = true;
+}
+
 void scanCallback(const sensor_msgs::LaserScan::ConstPtr& msg)
 {
     scan_points.clear();
@@ -209,6 +261,10 @@ void scanCallback(const sensor_msgs::LaserScan::ConstPtr& msg)
         if (msg->ranges[i] >= msg->range_min && msg->ranges[i] <= msg->range_max)
         {
             // 1. 首先在激光雷达坐标系下计算点的坐标
+            // The YDLidar task map and this OpenCV matcher use image-row Y
+            // internally.  Preserve the original mirror here: removing it
+            // makes a stationary scan miss the static walls and causes the
+            // matcher to select the opposite yaw while rotating.
             float x_laser = msg->ranges[i] * cos(angle);
             float y_laser = -msg->ranges[i] * sin(angle);
 
@@ -240,6 +296,24 @@ void scanCallback(const sensor_msgs::LaserScan::ConstPtr& msg)
     }
     if(scan_count == 0)
         scan_count ++;
+
+    // Predict from odometry at this scan's timestamp before the small local
+    // scan-to-map search.  Without this, a rotation can outrun the +/- 1 deg
+    // matcher and the transformed scan visibly follows the chassis.
+    if (!map_cropped.empty() && map_msg.info.resolution > 0.0)
+    {
+        try {
+            geometry_msgs::TransformStamped odom_to_base_msg = tfBuffer.lookupTransform(
+                odom_frame, base_frame, msg->header.stamp, ros::Duration(0.05));
+            tf2::Transform odom_to_base;
+            tf2::fromMsg(odom_to_base_msg.transform, odom_to_base);
+            predictPoseFromOdom(odom_to_base);
+        }
+        catch (tf2::TransformException &ex) {
+            ROS_WARN_THROTTLE(1.0,
+                              "lidar_loc: cannot predict scan pose from odom: %s", ex.what());
+        }
+    }
 
     while (ros::ok())
     {
@@ -316,6 +390,10 @@ void scanCallback(const sensor_msgs::LaserScan::ConstPtr& msg)
             break;
         }
     }
+
+    // lidar_x/lidar_y/lidar_yaw now describe this scan, not a later control
+    // cycle.  pose_tf() must use odom at the identical timestamp.
+    last_match_stamp = msg->header.stamp.isZero() ? ros::Time::now() : msg->header.stamp;
 
     if(clear_countdown > -1)
         clear_countdown --;
@@ -419,6 +497,7 @@ void pose_tf()
     // 如果没有收到过雷达数据或地图，则不进行任何操作
     if (scan_count == 0) return;
     if (map_cropped.empty() || map_msg.data.empty() || map_msg.info.resolution <= 0) return;
+    if (last_match_stamp.isZero()) return;
 
     // TF listener只需要一个静态实例
     static tf2_ros::Buffer tfBuffer;
@@ -455,8 +534,12 @@ void pose_tf()
     // ---------------------------------------------------------------------------------
     geometry_msgs::TransformStamped odom_to_base_msg;
     try {
-        // 使用ros::Time(0)来获取最新的可用变换
-        odom_to_base_msg = tfBuffer.lookupTransform(odom_frame, base_frame, ros::Time(0));
+        // The matched map pose comes from last_match_stamp.  Looking up the
+        // newest odom here mixed two different poses and made map->odom jump
+        // during a turn, so RViz and the local costmap appeared to rotate with
+        // the chassis.
+        odom_to_base_msg = tfBuffer.lookupTransform(
+            odom_frame, base_frame, last_match_stamp, ros::Duration(0.05));
     }
     catch (tf2::TransformException &ex) {
         ROS_WARN("无法获取从 '%s' 到 '%s' 的变换: %s", odom_frame.c_str(), base_frame.c_str(), ex.what());
@@ -479,7 +562,10 @@ void pose_tf()
     static tf2_ros::TransformBroadcaster br;
     geometry_msgs::TransformStamped map_to_odom_msg;
 
-    map_to_odom_msg.header.stamp = ros::Time::now(); // 使用当前时间
+    // Match AMCL's TF convention: the scan-derived correction is valid a
+    // short time into the future, giving scan/costmap consumers a coherent
+    // map->odom transform at the laser stamp without accepting an old pose.
+    map_to_odom_msg.header.stamp = last_match_stamp + ros::Duration(tf_publish_tolerance);
     map_to_odom_msg.header.frame_id = "map";
     map_to_odom_msg.child_frame_id = odom_frame;
     map_to_odom_msg.transform = tf2::toMsg(map_to_odom);
@@ -501,6 +587,8 @@ int main(int argc, char** argv)
     private_nh.param("initial_pose_x", initial_pose_x, 0.0);
     private_nh.param("initial_pose_y", initial_pose_y, 0.0);
     private_nh.param("initial_pose_a", initial_pose_a, 0.0);
+    private_nh.param("tf_publish_tolerance", tf_publish_tolerance, 0.15);
+    tf_publish_tolerance = std::max(0.05, std::min(0.30, tf_publish_tolerance));
 
     ros::NodeHandle nh;
     ros::Subscriber map_sub = nh.subscribe("map", 1, mapCallback);
@@ -512,8 +600,10 @@ int main(int argc, char** argv)
 
     while (ros::ok())
     {
-        pose_tf();
+        // Publish the correction immediately after a scan callback updates
+        // the matched pose.  The old order delayed it by one control cycle.
         ros::spinOnce();
+        pose_tf();
         rate.sleep();
     }
 

@@ -1,6 +1,6 @@
 <launch>
     <!-- 真机运行：use_sim_time 必须为 false。此处不再声明，
-         交由 ucar_bringup.launch 设为 false（避免 ROS 时间卡在 0 导致 TF/AMCL 停摆）。 -->
+         交由 ucar_bringup.launch 设为 false（避免 ROS 时间卡在 0 导致 TF/定位停摆）。 -->
 
     <!--起始点（2026 warehouse 区，车头朝 +X）-->
     <arg name="initial_pose_x" default="-0.25"/>
@@ -26,8 +26,9 @@
         <param name="frame_id" value="map" />
     </node>
 
-    <!-- 使用 jie_ware 激光定位替代 AMCL。启动初值与原 AMCL 一致，RViz 仍可用 2D Pose Estimate 重定位。 -->
-    <node pkg="jie_ware" type="lidar_loc" name="lidar_loc" output="screen">
+    <!-- The scan matcher is the sole publisher of map -> odom.  It derives
+         the correction from lidar and odom at the same scan timestamp. -->
+    <node pkg="jie_ware" type="lidar_loc" name="lidar_loc" output="screen" respawn="false">
         <param name="base_frame" value="base_link"/>
         <param name="odom_frame" value="odom"/>
         <param name="laser_frame" value="laser_frame"/>
@@ -35,7 +36,16 @@
         <param name="initial_pose_x" value="$(arg initial_pose_x)"/>
         <param name="initial_pose_y" value="$(arg initial_pose_y)"/>
         <param name="initial_pose_a" value="$(arg initial_pose_a)"/>
-        <!-- lidar_loc 是激光定位节点，不使用 AMCL 专属的 odom_model_type 参数；全向控制由 CymPlanner 输出 linear.y 实现。 -->
+        <param name="tf_publish_tolerance" value="0.15"/>
+    </node>
+
+    <!-- Reject isolated single-beam returns for the local obstacle layer.
+         lidar_loc remains on raw /scan so scan-to-map localization keeps the
+         separately verified Y-sign convention and all wall observations. -->
+    <node pkg="jie_ware" type="lidar_filter_node" name="lidar_filter_node" output="screen" respawn="false">
+        <param name="source_topic" value="/scan"/>
+        <param name="pub_topic" value="/scan_filtered"/>
+        <param name="outlier_threshold" value="0.10"/>
     </node>
 
     <!-- 启动 CymPlanner / move_base：CymPlanner 直接发布 /cmd_vel，由 base_driver 消费。 -->
@@ -51,8 +61,9 @@
 
     <!-- 仅转发激光并按需发送一个默认目标；手动导航由 RViz 直接发送给 move_base。 -->
     <node pkg="yolo2025" name="navigation_2026" type="2026.py" output="screen" respawn="false">
-        <!-- /scan stays unfiltered for lidar_loc and the local costmap. Only
-             the global obstacle layer consumes the static-wall-filtered topic. -->
+        <!-- lidar_loc consumes raw /scan.  lidar_filter_node publishes the
+             isolated-return-filtered /scan_filtered for the local costmap;
+             only the global obstacle layer consumes /scan_global_obstacles. -->
         <param name="global_obstacle_filter_enabled" value="true"/>
         <param name="global_static_filter_radius" value="0.22"/>
         <param name="global_static_filter_threshold" value="65"/>
@@ -76,23 +87,28 @@
         <param name="qr_scan_timeout" value="40.0"/>
         <!-- 单个二维码朝向目标最多等待 6 秒；超时后取消旋转并在当前位置继续短暂扫描。 -->
         <param name="qr_heading_goal_timeout" value="6.0"/>
-        <!-- 三码完成后的第一点：非全向、限速 0.1 m/s。 -->
-        <param name="post_qr_goal_enabled" value="true"/>
-        <param name="post_qr_goal_x" value="-1.737"/>
-        <param name="post_qr_goal_y" value="1.003"/>
-        <param name="post_qr_goal_yaw" value="3.140"/>
-        <!-- 第二点：固定地图坐标，非全向。 -->
-        <param name="second_goal_enabled" value="true"/>
-        <param name="second_goal_x" value="-1.722"/>
-        <param name="second_goal_y" value="-0.269"/>
-        <param name="second_goal_yaw" value="-3.140"/>
-        <!-- 第三点：固定全向目标；到位置后才对准最终朝向。 -->
-        <param name="next_goal_enabled" value="true"/>
-        <param name="next_goal_x" value="-2.265"/>
-        <param name="next_goal_y" value="-0.001"/>
-        <param name="next_goal_yaw" value="-1.557"/>
+        <!-- 扫码后仍用 move_base；对角目标自动插入格心，逐段规划。 -->
+        <param name="production_route_enabled" value="true"/>
+        <param name="production_square_centers_path"
+               value="$(find yolo2025)/config/production_square_centers.json"/>
+        <rosparam param="production_route_numbers">[2, 12, 22, 32, 31, 21, 11, 1]</rosparam>
+        <!-- 每段平移交给 move_base；抵达格心后才原地对准下一段。 -->
+        <param name="production_linear_speed" value="0.25"/>
+        <param name="production_arrival_tolerance" value="0.05"/>
+        <!-- lidar_loc may refresh after the 5 cm move_base completion; this
+             audit guard avoids treating a few millimetres of post-result TF
+             motion as a failed centre goal. -->
+        <param name="production_arrival_verification_tolerance" value="0.08"/>
+        <param name="production_heading_tolerance" value="0.07"/>
+        <param name="production_alignment_timeout" value="8.0"/>
+        <param name="production_alignment_control_rate" value="20.0"/>
+        <param name="production_alignment_kp" value="1.2"/>
+        <param name="production_alignment_max_angular_speed" value="0.5"/>
+        <!-- 中部阶段关闭局部障碍叠加；全局层保留已有代价，仅冻结新激光输入。 -->
+        <param name="local_obstacle_layer" value="/move_base/local_costmap/obstacle_layer"/>
+        <rosparam param="robot_footprint">[[0.171, -0.128], [0.171, 0.128], [-0.171, 0.128], [-0.171, -0.128]]</rosparam>
+        <param name="footprint_safety_margin" value="0.05"/>
         <param name="cym_holonomic_mode_param" value="/move_base/cym_planner/CymPlanner/holonomic_mode"/>
-        <param name="task_linear_speed" value="0.1"/>
         <param name="cym_task_max_vel_param" value="/move_base/cym_planner/CymPlanner/task_max_vel"/>
     </node>
 

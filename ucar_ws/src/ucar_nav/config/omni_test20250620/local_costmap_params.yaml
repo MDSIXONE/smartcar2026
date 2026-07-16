@@ -1,5 +1,8 @@
 local_costmap:
-   global_frame: odom
+   # lidar_loc continuously aligns map -> base_link.  Keeping this rolling
+   # costmap in map prevents a changing map -> odom correction from rotating
+   # live laser obstacles in RViz and in CymPlanner's collision check.
+   global_frame: map
    robot_base_frame: base_link
    # Eight updates per second lets the local collision gate react to 12 Hz lidar.
    update_frequency: 8.0
@@ -9,13 +12,13 @@ local_costmap:
    width: 1.8
    height: 1.8
    resolution: 0.01
-   transform_tolerance: 1.2 #1.2 
+   # Do not accept a stale pose while the chassis is rotating; scan frames are
+   # stamped at roughly 12 Hz and the local costmap updates at 8 Hz.
+   transform_tolerance: 0.30
    cost_scaling_factor:  5 #50 # exponential rate at which the obstacle cost drops off (default: 10)
    inflation_radius:     0.05 # Keep only 5 cm clearance beyond the robot footprint.
-# plugins:
-#       - {name: static_layer,       type: "costmap_2d::StaticLayer"}
-#       - {name: inflation_layer,    type: "costmap_2d::InflationLayer"}
-plugins:
-      - {name: static_layer,        type: "costmap_2d::StaticLayer"}
-      - {name: obstacle_layer,      type: "costmap_2d::VoxelLayer"}
-      - {name: inflation_layer,     type: "costmap_2d::InflationLayer"}
+   # Must stay inside local_costmap.  A local layer is driven by immediate
+   # lidar safety returns; static-map walls belong to the global costmap.
+   plugins:
+      - {name: obstacle_layer,  type: "costmap_2d::ObstacleLayer"}
+      - {name: inflation_layer, type: "costmap_2d::InflationLayer"}

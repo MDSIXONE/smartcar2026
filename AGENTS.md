@@ -1,5 +1,8 @@
 # Workspace Rules
 
+- 小车端的 ROS 节点、诊断终端和启动命令必须以本机 WSL Ubuntu 20.04 的 ROS Master `http://192.168.8.197:11311` 为唯一 Master；所有 `source` 完成后均须显式设置该 `ROS_MASTER_URI`，不得使用或启动小车本机 `192.168.8.231:11311` 的 `roscore`。
+- 小车诊断或运动前，若日志中出现 `wheelodom`、`/odom_raw` 的位置为 `NaN`，或 TF 报 `TF_NAN_INPUT`，必须先发布零速度并重启导航/底盘里程计链路；仅在 `/odom_raw` 为有限值且 `odom -> base_link`、`map -> base_link` TF 均恢复后，才允许继续定位、导航或旋转测试。
+
 - 每次完成代码、配置或资源文件改动后，必须在 `docs/changes/` 新增或更新对应的本地改动文档，记录目的、涉及文件、验证结果和已知限制。
 - 每次改动涉及构建、启动、部署、验证或回滚命令时，必须同步更新 `docs/operations.md` 中的本地操作命令文档。
 - 每次需要备份时，只能在本地 `back/` 下创建备份；小车端不得保留备份目录或归档文件。

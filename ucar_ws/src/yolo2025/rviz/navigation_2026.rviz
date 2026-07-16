@@ -15,14 +15,17 @@ Visualization Manager:
       Value: true
     - Class: rviz/TF
       Enabled: true
-      Frame Timeout: 15
+      # Hides the heading arrow quickly if its TF stream becomes stale.
+      Frame Timeout: 0.3
       Frames:
-        All Enabled: true
+        All Enabled: false
+        base_link:
+          Value: true
       Marker Scale: 0.35
-      Name: TF
+      Name: Robot Heading (base_link, 0.3 s)
       Show Arrows: true
       Show Axes: true
-      Show Names: true
+      Show Names: false
       Update Interval: 0
       Value: true
     - Alpha: 1
@@ -30,7 +33,7 @@ Visualization Manager:
       Color Scheme: map
       Draw Behind: false
       Enabled: true
-      Name: Static Map
+      Name: Static Map (/map)
       Topic: /map
       Value: true
     - Alpha: 0.45
@@ -58,15 +61,20 @@ Visualization Manager:
       Class: rviz/LaserScan
       Color: 255; 80; 80
       Color Transformer: FlatColor
-      Decay Time: 0
+      Decay Time: 0.3
       Enabled: true
-      Name: LaserScan
+      Name: Lidar Points (/scan, 0.3 s)
       Position Transformer: XYZ
       Queue Size: 10
       Size (Pixels): 3
       Size (m): 0.03
       Style: Points
       Topic: /scan
+      Value: true
+    - Class: rviz/Marker
+      Enabled: true
+      Marker Topic: /navigation_2026/footprint
+      Name: Robot Footprint (red) + 5 cm Margin (yellow)
       Value: true
     - Alpha: 1
       Buffer Length: 1

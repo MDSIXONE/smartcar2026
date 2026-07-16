@@ -38,7 +38,9 @@
     <!--include file="$(find ucar_controller)/launch/tf_server.launch" /-->
 
     <node pkg="tf" type="static_transform_publisher" name="base_link_to_imu" args="0.05 -0.05 0.05 0 0 0 /base_link /imu 40"/>
-    <node pkg="tf" type="static_transform_publisher" name="base_link_to_laser" args="-0.11 0.0 0.165 -0.07 0.0  0.0 /base_link /laser_frame 40" />
+    <!-- The lidar is mounted parallel to base_link.  A previous -0.07 rad
+         yaw rotated every RViz scan clockwise by about four degrees. -->
+    <node pkg="tf" type="static_transform_publisher" name="base_link_to_laser" args="-0.11 0.0 0.165 0.0 0.0 0.0 /base_link /laser_frame 40" />
     <node pkg="tf" type="static_transform_publisher" name="base_link_to_camera" args="0.15 0.0 0.15 -1.570795 0.0  -2.007126944 /base_link /camera_link 40" />
 
 </launch>

@@ -14,6 +14,7 @@ find_package(catkin REQUIRED COMPONENTS
   rospy
   sensor_msgs
   std_msgs
+  visualization_msgs
 )
 
 ## System dependencies are found with CMake's conventions
@@ -208,6 +209,7 @@ include_directories(
 ## Add folders to be run by python nosetests
 # catkin_add_nosetests(test)
 catkin_install_python(PROGRAMS
+  scripts/2026.py
   scripts/mapping_keyboard.py
   scripts/mapping_scan_relay.py
   scripts/run.py
@@ -216,6 +218,10 @@ catkin_install_python(PROGRAMS
   scripts/venv.py
   scripts/qrcode_scanner.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
+install(DIRECTORY config/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/config
 )
 
 

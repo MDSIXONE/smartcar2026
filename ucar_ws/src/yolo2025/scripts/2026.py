@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """2026 navigation startup task, scan forwarding, and post-goal QR sweep."""
 
+import json
 import math
 import sys
 
@@ -9,12 +10,14 @@ import actionlib
 import rospy
 import tf
 from actionlib_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped
+from dynamic_reconfigure.client import Client as DynamicReconfigureClient
+from geometry_msgs.msg import Point, PoseStamped, Twist
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
 from nav_msgs.msg import OccupancyGrid
 from nav_msgs.srv import GetPlan
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
+from visualization_msgs.msg import Marker
 
 
 class Navigation2026(object):
@@ -40,28 +43,47 @@ class Navigation2026(object):
         self.qr_scan_timeout = float(rospy.get_param("~qr_scan_timeout", 40.0))
         self.qr_heading_goal_timeout = float(
             rospy.get_param("~qr_heading_goal_timeout", 6.0))
-        self.post_qr_goal_enabled = rospy.get_param("~post_qr_goal_enabled", True)
-        self.post_qr_goal_x = float(rospy.get_param("~post_qr_goal_x", -1.737))
-        self.post_qr_goal_y = float(rospy.get_param("~post_qr_goal_y", 1.003))
-        self.post_qr_goal_yaw = float(rospy.get_param("~post_qr_goal_yaw", 3.140))
-        self.second_goal_enabled = rospy.get_param("~second_goal_enabled", True)
-        self.second_goal_x = float(rospy.get_param("~second_goal_x", -1.722))
-        self.second_goal_y = float(rospy.get_param("~second_goal_y", -0.269))
-        self.second_goal_yaw = float(rospy.get_param("~second_goal_yaw", -3.140))
-        self.next_goal_enabled = rospy.get_param("~next_goal_enabled", True)
-        self.next_goal_x = float(rospy.get_param("~next_goal_x", -2.265))
-        self.next_goal_y = float(rospy.get_param("~next_goal_y", -0.001))
-        self.next_goal_yaw = float(rospy.get_param("~next_goal_yaw", -1.557))
+        self.production_route_enabled = rospy.get_param("~production_route_enabled", True)
+        self.production_square_centers_path = rospy.get_param(
+            "~production_square_centers_path", "")
+        self.production_route_numbers = rospy.get_param(
+            "~production_route_numbers", [2, 12, 22, 32, 31, 21, 11, 1])
+        self.production_linear_speed = float(rospy.get_param(
+            "~production_linear_speed", 0.25))
+        self.production_arrival_tolerance = float(rospy.get_param(
+            "~production_arrival_tolerance", 0.05))
+        self.production_arrival_verification_tolerance = max(
+            self.production_arrival_tolerance,
+            float(rospy.get_param("~production_arrival_verification_tolerance", 0.08)))
+        self.production_heading_tolerance = float(
+            rospy.get_param("~production_heading_tolerance", 0.07))
+        self.production_alignment_timeout = float(
+            rospy.get_param("~production_alignment_timeout", 8.0))
+        self.production_alignment_control_rate = float(
+            rospy.get_param("~production_alignment_control_rate", 20.0))
+        self.production_alignment_kp = float(
+            rospy.get_param("~production_alignment_kp", 1.2))
+        self.production_alignment_max_angular_speed = float(
+            rospy.get_param("~production_alignment_max_angular_speed", 0.5))
+        self.local_obstacle_layer = rospy.get_param(
+            "~local_obstacle_layer", "/move_base/local_costmap/obstacle_layer")
         self.cym_holonomic_mode_param = rospy.get_param(
             "~cym_holonomic_mode_param",
             "/move_base/cym_planner/CymPlanner/holonomic_mode")
-        self.task_linear_speed = float(rospy.get_param("~task_linear_speed", 0.1))
         self.cym_task_max_vel_param = rospy.get_param(
             "~cym_task_max_vel_param",
             "/move_base/cym_planner/CymPlanner/task_max_vel")
 
         self.tf_listener = tf.TransformListener()
         self.make_plan = rospy.ServiceProxy("move_base/make_plan", GetPlan)
+        self.cmd_vel_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
+        self.footprint_marker_pub = rospy.Publisher(
+            "/navigation_2026/footprint", Marker, queue_size=2, latch=True)
+        self.robot_footprint = rospy.get_param(
+            "~robot_footprint",
+            [[0.171, -0.128], [0.171, 0.128], [-0.171, 0.128], [-0.171, -0.128]])
+        self.footprint_safety_margin = float(
+            rospy.get_param("~footprint_safety_margin", 0.05))
 
         self.scan_scale = 1.0
         self.scan_pub = rospy.Publisher("/scan", LaserScan, queue_size=1)
@@ -87,7 +109,22 @@ class Navigation2026(object):
         self.qr_scan_hold_timer = None
         self.qr_heading_goal_timer = None
         self.qr_scan_timeout_timer = None
-        self.post_qr_start_timer = None
+        self.production_start_timer = None
+        self.production_alignment_timer = None
+        self.production_active = False
+        self.production_phase = None
+        self.production_alignment_yaw = None
+        self.production_alignment_deadline = None
+        self.production_waypoint_index = 0
+        self.production_local_obstacle_layer_disabled = False
+        self.production_global_obstacles_frozen = False
+        self.production_centres = {}
+        self.production_requested_route = self.load_production_route()
+        self.production_route = self.expand_production_route(
+            self.production_requested_route)
+
+        rospy.on_shutdown(self.shutdown)
+        self.publish_footprint_markers()
 
         if self.startup_goal_enabled:
             rospy.Timer(rospy.Duration(self.startup_goal_delay), self.startup_goal_cb, oneshot=True)
@@ -105,7 +142,8 @@ class Navigation2026(object):
         out.ranges = [distance * self.scan_scale for distance in msg.ranges]
         out.intensities = msg.intensities
         self.scan_pub.publish(out)
-        self.global_scan_pub.publish(self.filtered_global_scan(out))
+        if not self.production_global_obstacles_frozen:
+            self.global_scan_pub.publish(self.filtered_global_scan(out))
 
     @staticmethod
     def clone_scan(scan):
@@ -120,6 +158,13 @@ class Navigation2026(object):
         out.range_max = scan.range_max
         out.intensities = scan.intensities
         out.ranges = list(scan.ranges)
+        return out
+
+    @classmethod
+    def empty_scan(cls, scan):
+        """Return a scan that cannot mark or clear a costmap obstacle layer."""
+        out = cls.clone_scan(scan)
+        out.ranges = [float("inf")] * len(scan.ranges)
         return out
 
     def map_cb(self, msg):
@@ -169,15 +214,19 @@ class Navigation2026(object):
             # Never mark the raw scan before the static mask is available:
             # those mapped-wall returns would survive in the global obstacle
             # layer and temporarily close the narrow doorway.
-            filtered = self.clone_scan(scan)
-            filtered.ranges = [float("inf")] * len(scan.ranges)
-            return filtered
+            return self.empty_scan(scan)
 
         try:
             translation, rotation = self.tf_listener.lookupTransform(
                 "map", scan.header.frame_id, scan.header.stamp)
-        except tf.Exception:
-            return scan
+        except tf.Exception as exc:
+            # A scan without a map-frame pose is unsafe for global marking:
+            # forwarding it would place vehicle-frame returns in map space.
+            rospy.logwarn_throttle(
+                5.0,
+                "Global obstacle scan dropped: no map<-%s TF at scan stamp: %s" %
+                (scan.header.frame_id, exc))
+            return self.empty_scan(scan)
 
         info = self.global_static_filter_info
         mask = self.global_static_filter_mask
@@ -309,11 +358,337 @@ class Navigation2026(object):
         rospy.set_param(self.cym_task_max_vel_param, max(0.0, float(speed)))
         rospy.loginfo("CYM_PLANNER_TASK_SPEED stage=%s linear_max=%.3f", stage, speed)
 
-    @staticmethod
-    def post_qr_status(message):
-        """Report task progress without placing control after a ROS log call."""
-        sys.stdout.write("[POST_QR] %s\n" % message)
+    def load_production_route(self):
+        """Resolve the user-selected production route from numbered grid centres."""
+        if not self.production_route_enabled:
+            return []
+        try:
+            with open(self.production_square_centers_path, "r") as handle:
+                data = json.load(handle)
+            centres = {}
+            for point in data["points"]:
+                centres[int(point["number"])] = (
+                    float(point["x_m"]), float(point["y_m"]))
+            self.production_centres = centres
+            route_numbers = [int(number) for number in self.production_route_numbers]
+            if not route_numbers:
+                raise ValueError("production_route_numbers is empty")
+            route = []
+            for number in route_numbers:
+                if number not in centres:
+                    raise ValueError("production point %d is not in the centres file" % number)
+                x, y = centres[number]
+                route.append((number, x, y))
+            rospy.loginfo("Production route loaded: %s", route_numbers)
+            return route
+        except (IOError, ValueError, KeyError, TypeError) as exc:
+            rospy.logerr("Production route is unavailable: %s", exc)
+            return []
+
+    def production_centre_at(self, x, y):
+        """Return the numbered centre at an exact grid intersection, if any."""
+        for number, point in self.production_centres.items():
+            if abs(point[0] - x) < 1e-6 and abs(point[1] - y) < 1e-6:
+                return number, point[0], point[1]
+        return None
+
+    def expand_production_route(self, requested_route):
+        """Insert a grid centre for every diagonal requested transition.
+
+        The enforced order is horizontal then vertical.  For example, 1 -> 26
+        becomes 1 -> 6 -> 26: point 6 shares point 1's row and point 26's
+        column.  This makes every requested move_base segment axis-aligned and
+        makes every intentional turn occur at a numbered centre.
+        """
+        if not requested_route:
+            return []
+        route = [requested_route[0]]
+        for number, target_x, target_y in requested_route[1:]:
+            _, previous_x, previous_y = route[-1]
+            if abs(target_x - previous_x) >= 1e-6 and abs(target_y - previous_y) >= 1e-6:
+                turning_point = self.production_centre_at(target_x, previous_y)
+                if turning_point is None:
+                    rospy.logerr(
+                        "Production route cannot connect point %d to %d: "
+                        "no horizontal-then-vertical turning centre.",
+                        route[-1][0], number)
+                    return []
+                route.append(turning_point)
+            route.append((number, target_x, target_y))
+        rospy.loginfo("Production route expanded: %s", [point[0] for point in route])
+        return route
+
+    def current_map_pose(self, context):
+        try:
+            translation, rotation = self.tf_listener.lookupTransform(
+                "map", "base_link", rospy.Time(0))
+            yaw = tf.transformations.euler_from_quaternion(rotation)[2]
+            return translation[0], translation[1], yaw
+        except tf.Exception as exc:
+            rospy.logerr("%s skipped: cannot get current map pose: %s", context, exc)
+            return None
+
+    def publish_motion(self, linear_x=0.0, angular_z=0.0):
+        command = Twist()
+        command.linear.x = linear_x
+        command.angular.z = angular_z
+        self.cmd_vel_pub.publish(command)
+
+    def publish_stop(self):
+        self.publish_motion()
+
+    def publish_footprint_markers(self):
+        """Show the physical footprint and its 5 cm safety envelope in RViz."""
+        try:
+            points = [(float(point[0]), float(point[1]))
+                      for point in self.robot_footprint]
+            if len(points) < 3:
+                raise ValueError("fewer than three footprint vertices")
+        except (TypeError, ValueError, IndexError) as exc:
+            rospy.logerr("Cannot publish robot footprint marker: %s", exc)
+            return
+        self.publish_footprint_marker(0, points, 1.0, 0.1, 0.1, "physical")
+        min_x = min(point[0] for point in points) - self.footprint_safety_margin
+        max_x = max(point[0] for point in points) + self.footprint_safety_margin
+        min_y = min(point[1] for point in points) - self.footprint_safety_margin
+        max_y = max(point[1] for point in points) + self.footprint_safety_margin
+        self.publish_footprint_marker(
+            1, [(max_x, min_y), (max_x, max_y), (min_x, max_y), (min_x, min_y)],
+            1.0, 0.85, 0.0, "safety_margin")
+
+    def publish_footprint_marker(self, marker_id, points, red, green, blue, namespace):
+        marker = Marker()
+        marker.header.frame_id = "base_link"
+        marker.header.stamp = rospy.Time.now()
+        marker.ns = "navigation_2026_footprint"
+        marker.id = marker_id
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        marker.scale.x = 0.018
+        marker.color.r = red
+        marker.color.g = green
+        marker.color.b = blue
+        marker.color.a = 1.0
+        marker.text = namespace
+        outline = list(points) + [points[0]]
+        for x, y in outline:
+            point = Point()
+            point.x = x
+            point.y = y
+            marker.points.append(point)
+        self.footprint_marker_pub.publish(marker)
+
+    def set_local_obstacle_layer_enabled(self, enabled, stage):
+        """Disable local lidar overlay without erasing the global costmap."""
+        try:
+            client = DynamicReconfigureClient(self.local_obstacle_layer, timeout=2.0)
+            client.update_configuration({"enabled": bool(enabled)})
+        except Exception as exc:
+            rospy.logerr("%s: cannot set local obstacle layer to %s: %s",
+                         stage, enabled, exc)
+            return False
+        self.production_local_obstacle_layer_disabled = not enabled
+        rospy.loginfo("PRODUCTION_COSTMAP stage=%s local_dynamic_obstacles=%s",
+                      stage, "enabled" if enabled else "disabled")
+        return True
+
+    def finish_production_route(self, success, reason):
+        if self.production_alignment_timer is not None:
+            self.production_alignment_timer.shutdown()
+            self.production_alignment_timer = None
+        self.production_active = False
+        self.production_phase = None
+        self.production_alignment_yaw = None
+        self.production_alignment_deadline = None
+        self.production_global_obstacles_frozen = False
+        self.publish_stop()
+        self.set_holonomic_mode(False, "production_route_finish")
+        self.set_task_linear_speed(0.0, "production_route_finish")
+        if self.production_local_obstacle_layer_disabled:
+            self.set_local_obstacle_layer_enabled(True, "production_route_restore")
+        outcome = "REACHED" if success else "STOPPED"
+        message = "[PRODUCTION_ROUTE] %s reason=%s" % (outcome, reason)
+        sys.stdout.write(message + "\n")
         sys.stdout.flush()
+        rospy.loginfo(message)
+
+    def production_goal_yaw(self, index):
+        """Finish a move_base goal facing its approach, not the next turn."""
+        if index > 0:
+            _, previous_x, previous_y = self.production_route[index - 1]
+            _, x, y = self.production_route[index]
+            return math.atan2(y - previous_y, x - previous_x)
+        # QR scanning ends at -pi/2, which already matches the configured
+        # first production segment (2 -> 12).  Retain that compatible heading.
+        if index + 1 < len(self.production_route):
+            _, x, y = self.production_route[index]
+            _, next_x, next_y = self.production_route[index + 1]
+            return math.atan2(next_y - y, next_x - x)
+        pose = self.current_map_pose("production first-goal heading")
+        return pose[2] if pose is not None else 0.0
+
+    @staticmethod
+    def normalize_angle(angle):
+        return math.atan2(math.sin(angle), math.cos(angle))
+
+    @staticmethod
+    def clamp(value, lower, upper):
+        return max(lower, min(upper, value))
+
+    def production_goal_plan_ready(self, target_x, target_y, target_yaw):
+        """Fail safely when move_base has no map-valid route to the next centre."""
+        pose = self.current_map_pose("production route plan")
+        if pose is None:
+            return False
+        try:
+            rospy.wait_for_service("move_base/make_plan", timeout=3.0)
+            plan = self.make_plan(self.map_pose(pose[0], pose[1], pose[2]),
+                                  self.map_pose(target_x, target_y, target_yaw), 0.0)
+            if len(plan.plan.poses) > 1:
+                rospy.loginfo("PRODUCTION_ROUTE global plan to next centre has %d poses.",
+                              len(plan.plan.poses))
+                return True
+            rospy.logerr("PRODUCTION_ROUTE no global plan to the next centre.")
+        except (rospy.ROSException, rospy.ServiceException) as exc:
+            rospy.logerr("PRODUCTION_ROUTE cannot verify global plan: %s", exc)
+        return False
+
+    def start_next_production_goal(self):
+        if not self.production_active:
+            return
+        if self.production_waypoint_index >= len(self.production_route):
+            self.finish_production_route(True, "all configured grid centres reached")
+            return
+        number, target_x, target_y = self.production_route[self.production_waypoint_index]
+        target_yaw = self.production_goal_yaw(self.production_waypoint_index)
+        if not self.production_goal_plan_ready(target_x, target_y, target_yaw):
+            self.finish_production_route(False, "no safe global plan to point %d" % number)
+            return
+        rospy.loginfo(
+            "PRODUCTION_ROUTE goal=%d target=(%.3f, %.3f) yaw=%.3f via move_base.",
+            number, target_x, target_y, target_yaw)
+        self.send_goal(target_x, target_y, target_yaw, self.production_goal_done_cb)
+
+    def start_production_alignment(self):
+        """At a reached grid centre, orient before planning the next segment."""
+        if self.production_waypoint_index + 1 >= len(self.production_route):
+            self.finish_production_route(True, "all configured grid centres reached")
+            return
+        number, x, y = self.production_route[self.production_waypoint_index]
+        next_number, next_x, next_y = self.production_route[
+            self.production_waypoint_index + 1]
+        pose = self.current_map_pose("production centre alignment")
+        if pose is None:
+            self.finish_production_route(False, "cannot align at point %d" % number)
+            return
+        self.production_phase = "align"
+        self.production_alignment_yaw = math.atan2(next_y - y, next_x - x)
+        self.production_alignment_deadline = (
+            rospy.Time.now() + rospy.Duration(self.production_alignment_timeout))
+        if self.production_alignment_timer is not None:
+            self.production_alignment_timer.shutdown()
+        period = 1.0 / max(1.0, self.production_alignment_control_rate)
+        self.production_alignment_timer = rospy.Timer(
+            rospy.Duration(period), self.production_alignment_control_cb)
+        rospy.loginfo(
+            "PRODUCTION_ALIGN point=%d next=%d heading=%.3f timeout=%.1f s.",
+            number, next_number, self.production_alignment_yaw,
+            self.production_alignment_timeout)
+
+    def production_alignment_control_cb(self, _event):
+        if not self.production_active or self.production_phase != "align":
+            return
+        number, _, _ = self.production_route[self.production_waypoint_index]
+        pose = self.current_map_pose("production alignment control")
+        if pose is None:
+            self.finish_production_route(False, "map pose unavailable while aligning point %d" % number)
+            return
+        heading_error = self.normalize_angle(self.production_alignment_yaw - pose[2])
+        if abs(heading_error) <= self.production_heading_tolerance:
+            self.publish_stop()
+            if self.production_alignment_timer is not None:
+                self.production_alignment_timer.shutdown()
+                self.production_alignment_timer = None
+            self.production_phase = None
+            rospy.loginfo("PRODUCTION_ALIGN point=%d complete; planning next segment.", number)
+            self.production_waypoint_index += 1
+            self.start_next_production_goal()
+            return
+        if rospy.Time.now() >= self.production_alignment_deadline:
+            self.finish_production_route(
+                False, "point %d heading did not settle within %.1f s" % (
+                    number, self.production_alignment_timeout))
+            return
+        angular_z = self.clamp(
+            self.production_alignment_kp * heading_error,
+            -self.production_alignment_max_angular_speed,
+            self.production_alignment_max_angular_speed)
+        # Translation remains entirely under move_base; this bounded command is
+        # only the required in-place turn at a numbered grid centre.
+        self.publish_motion(0.0, angular_z)
+
+    def production_goal_done_cb(self, status, _result):
+        if not self.production_active:
+            return
+        number, target_x, target_y = self.production_route[self.production_waypoint_index]
+        self.publish_stop()
+        if status != GoalStatus.SUCCEEDED:
+            self.finish_production_route(
+                False, "move_base goal point %d failed with status %d" % (number, status))
+            return
+        pose = self.current_map_pose("production goal completion")
+        if pose is None:
+            self.finish_production_route(False, "cannot verify arrival at point %d" % number)
+            return
+        arrival_error = math.hypot(target_x - pose[0], target_y - pose[1])
+        # CymPlanner reaches the centre with its 0.05 m control threshold.
+        # lidar_loc can update map->odom between action completion and this
+        # callback, so this is an audit guard rather than a second controller.
+        if arrival_error > self.production_arrival_verification_tolerance:
+            self.finish_production_route(
+                False, "move_base stopped %.3f m from point %d (limit %.3f m)" % (
+                    arrival_error, number,
+                    self.production_arrival_verification_tolerance))
+            return
+        rospy.loginfo("PRODUCTION_ROUTE point=%d reached.", number)
+        self.start_production_alignment()
+
+    def begin_production_route(self):
+        """Run the expanded grid-centre sequence through normal move_base planning."""
+        if not self.production_route_enabled:
+            rospy.loginfo("Production route is disabled; task ends after QR scan.")
+            self.restore_task_motion("production_route_disabled")
+            return
+        if not self.production_route:
+            rospy.logerr("Production route has no valid grid centres; task stops.")
+            self.restore_task_motion("production_route_configuration_invalid")
+            return
+        self.move_base.cancel_all_goals()
+        self.publish_stop()
+        self.set_holonomic_mode(False, "production_route_enter")
+        self.set_task_linear_speed(self.production_linear_speed, "production_route_enter")
+        if not self.move_base.wait_for_server(rospy.Duration(5.0)):
+            self.finish_production_route(False, "move_base unavailable for production route")
+            return
+        # Keep the global obstacle layer and all of its existing cost values.
+        # Freezing its scan source blocks new marks without clearing old cells.
+        self.production_global_obstacles_frozen = True
+        if not self.set_local_obstacle_layer_enabled(False, "production_route_enter"):
+            self.production_global_obstacles_frozen = False
+            self.restore_task_motion("production_route_costmap_disable_failed")
+            return
+        self.production_active = True
+        self.production_waypoint_index = 0
+        self.start_next_production_goal()
+
+    def shutdown(self):
+        self.publish_stop()
+        self.production_global_obstacles_frozen = False
+        if self.production_alignment_timer is not None:
+            self.production_alignment_timer.shutdown()
+            self.production_alignment_timer = None
+        if self.production_local_obstacle_layer_disabled:
+            self.set_local_obstacle_layer_enabled(True, "shutdown_restore")
 
     def restore_task_motion(self, stage):
         self.set_holonomic_mode(False, stage)
@@ -457,77 +832,16 @@ class Navigation2026(object):
             rospy.logwarn("QR sweep stopped with fewer than %d distinct QR codes.", self.qr_scan_min_count)
             return
         if reason != "heading sequence completed":
-            rospy.logwarn("QR sweep completed its code count, but post-QR goal is skipped: %s.", reason)
+            rospy.logwarn("QR sweep completed its code count, but the production route is skipped: %s.", reason)
             return
-        if self.post_qr_goal_enabled:
-            # finish_qr_scan normally runs in the QR hold timer callback.
-            # Start the route in a new callback after that timer has fully
-            # returned, otherwise the transition can stop after scanning.
-            self.post_qr_start_timer = rospy.Timer(
-                rospy.Duration(0.1), self.post_qr_start_cb, oneshot=True)
+        # The QR hold timer has to return before direct base control starts.
+        self.production_start_timer = rospy.Timer(
+            rospy.Duration(0.1), self.production_start_cb, oneshot=True)
 
-    def post_qr_start_cb(self, _event):
-        self.post_qr_start_timer = None
+    def production_start_cb(self, _event):
+        self.production_start_timer = None
         if not rospy.is_shutdown():
-            self.send_post_qr_goal()
-
-    def send_post_qr_goal(self):
-        """Start the three-point, speed-limited post-QR task route."""
-        self.set_holonomic_mode(False, "post_qr_first_goal")
-        self.set_task_linear_speed(self.task_linear_speed, "post_qr_first_goal")
-        self.send_goal(self.post_qr_goal_x, self.post_qr_goal_y, self.post_qr_goal_yaw,
-                       self.post_qr_goal_done_cb)
-        self.post_qr_status(
-            "FIRST_GOAL target=(%.3f, %.3f) yaw=%.3f speed=%.3f" %
-            (self.post_qr_goal_x, self.post_qr_goal_y,
-             self.post_qr_goal_yaw, self.task_linear_speed))
-
-    def post_qr_goal_done_cb(self, status, _result):
-        if status == GoalStatus.SUCCEEDED:
-            if self.second_goal_enabled:
-                self.send_second_goal()
-            else:
-                self.restore_task_motion("post_qr_first_goal_finished")
-            self.post_qr_status("FIRST_GOAL_REACHED")
-        else:
-            self.restore_task_motion("post_qr_first_goal_failed")
-            self.post_qr_status("FIRST_GOAL_FAILED action_status=%d" % status)
-
-    def send_second_goal(self):
-        """Send the fixed second post-QR goal at the task speed."""
-        # The first post-QR point is approached normally.  All remaining
-        # points use lateral motion after that point has been reached.
-        self.set_holonomic_mode(True, "post_qr_second_goal")
-        self.send_goal(self.second_goal_x, self.second_goal_y, self.second_goal_yaw,
-                       self.second_goal_done_cb)
-        self.post_qr_status(
-            "SECOND_GOAL target=(%.3f, %.3f) yaw=%.3f speed=%.3f" %
-            (self.second_goal_x, self.second_goal_y,
-             self.second_goal_yaw, self.task_linear_speed))
-
-    def second_goal_done_cb(self, status, _result):
-        if status != GoalStatus.SUCCEEDED:
-            self.restore_task_motion("post_qr_second_goal_failed")
-            self.post_qr_status("SECOND_GOAL_FAILED action_status=%d" % status)
-            return
-        if not self.next_goal_enabled:
-            self.restore_task_motion("post_qr_second_goal_finished")
-            self.post_qr_status("SECOND_GOAL_REACHED")
-            return
-        self.set_holonomic_mode(True, "fixed_third_goal")
-        self.send_goal(self.next_goal_x, self.next_goal_y, self.next_goal_yaw,
-                       self.next_goal_done_cb)
-        self.post_qr_status(
-            "SECOND_GOAL_REACHED; THIRD_GOAL target=(%.3f, %.3f) yaw=%.3f speed=%.3f holonomic=true" %
-            (self.next_goal_x, self.next_goal_y, self.next_goal_yaw,
-             self.task_linear_speed))
-
-    def next_goal_done_cb(self, status, _result):
-        self.restore_task_motion("fixed_third_goal_finished")
-        if status == GoalStatus.SUCCEEDED:
-            self.post_qr_status("THIRD_GOAL_REACHED")
-        else:
-            self.post_qr_status("THIRD_GOAL_FAILED action_status=%d" % status)
+            self.begin_production_route()
 
 
 if __name__ == "__main__":

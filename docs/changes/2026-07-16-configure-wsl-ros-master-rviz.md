@@ -51,6 +51,11 @@ controller computer.
   vehicle ROS nodes.
 - The helper first probes the configured Master and exits successfully when it
   is already running, preventing a misleading second-roscore exception.
+- The vehicle `.bashrc` intentionally defaults to its on-board Master at
+  `192.168.8.231`. For WSL RViz operation, launch commands must run
+  `unset ROS_HOSTNAME` and override `ROS_IP` plus `ROS_MASTER_URI` after all
+  setup files have been sourced; otherwise the vehicle stays isolated on its
+  on-board Master.
 - A stale WSLg RDP/RAIL session produced a taskbar-only RViz window titled
   [WARN:COPY MODE]. Restarting WSL, then restarting the Master and RViz,
   removed that state; a Windows capture verified the full RViz main window,
