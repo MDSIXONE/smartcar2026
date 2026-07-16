@@ -1,0 +1,57 @@
+# Local history, backups, and exported archives
+/back/
+/.agents/
+/cur/
+/ucar_ws_source.tar.gz
+/ros_map.zip
+/cymplanner/*.zip
+*.zip
+*.tar
+*.tar.*
+*.7z
+
+# ROS, Python, and IDE output
+**/build/
+**/devel/
+**/install/
+**/log/
+**/logs/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.catkin_tools/
+.vscode/
+.idea/
+.DS_Store
+
+# Local or generated media and binaries
+*.weights
+*.o
+*.so
+*.a
+*.dll
+*.exe
+*.pcm
+*.wav
+*.mp3
+*.log
+*.logcache
+*.bp
+*.old
+*.bak
+*.tmp
+output.jpg
+output.png
+
+# Local configuration and credentials
+.env
+.env.*
+*.pem
+*.key
+*token*
+*secret*
+*password*
+/ucar_ws/src/xf_mic_asr_offline/config/appid_params.yaml
+
+# Accidental Windows binary extraction inside the map directory
+/ucar_ws/src/ucar_nav/maps/o/

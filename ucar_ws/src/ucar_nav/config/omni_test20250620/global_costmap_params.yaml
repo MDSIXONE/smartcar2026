@@ -1,0 +1,36 @@
+global_costmap:
+   global_frame: map
+   robot_base_frame: base_link
+   # Dynamic laser obstacles must reach the global planner promptly.
+   update_frequency: 3.0
+   publish_frequency: 2.0
+   #static_map: true
+   rolling_window: false
+   resolution: 0.01 #0.01
+   transform_tolerance: 1.2 #1.2
+   #map_type: costmap
+   plugins:
+      - {name: static_layer,       type: "costmap_2d::StaticLayer"}
+      # This source has static-wall returns removed by 2026.py, so both mapped
+      # walls and truly new laser obstacles can safely receive inflation.
+      - {name: obstacle_layer,     type: "costmap_2d::ObstacleLayer"}
+      - {name: inflation_layer,    type: "costmap_2d::InflationLayer"}
+   cost_scaling_factor: 5 #80 #60.0  # exponential rate at which the obstacle cost drops off (default: 10)
+   # The normal-map global safety boundary. Filtered dynamic obstacles receive
+   # the same clearance without duplicating slightly shifted static walls.
+   inflation_radius: 0.21
+
+   obstacle_layer:
+      observation_sources: global_scan_sensor
+      global_scan_sensor:
+         data_type: LaserScan
+         topic: /scan_global_obstacles
+         marking: true
+         clearing: true
+         expected_update_rate: 0
+         observation_persistence: 0.6
+         min_obstacle_height: 0.00
+         max_obstacle_height: 0.30
+
+GlobalPlanner:        
+   allow_unknown:  true

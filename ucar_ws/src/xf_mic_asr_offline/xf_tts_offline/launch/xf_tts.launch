@@ -1,0 +1,5 @@
+<launch>
+
+  <node pkg="xf_tts_offline" type="xf_tts_node" name="xf_tts__node" output="screen" />
+
+</launch>

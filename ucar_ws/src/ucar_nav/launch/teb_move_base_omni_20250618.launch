@@ -1,0 +1,19 @@
+<launch>
+    <node pkg="move_base" type="move_base" respawn="true" name="move_base" output="screen" clear_params="true">
+      <rosparam file="$(find ucar_nav)/config/omni_test20250620/costmap_common_params.yaml" command="load" ns="global_costmap" />
+      <rosparam file="$(find ucar_nav)/config/omni_test20250620/costmap_common_params.yaml" command="load" ns="local_costmap" />
+      <rosparam file="$(find ucar_nav)/config/omni_test20250620/local_costmap_params.yaml" command="load" />
+      <rosparam file="$(find ucar_nav)/config/omni_test20250620/global_costmap_params.yaml" command="load" />
+      <rosparam file="$(find ucar_nav)/config/omni_test20250620/global_planner_params.yaml" command="load" />
+  
+      <rosparam file="$(find ucar_nav)/config/omni_test20250620/teb_local_planner_params.yaml" command="load" />
+      <rosparam file="$(find ucar_nav)/config/omni_test20250620/move_base_params.yaml" command="load" />
+      
+      <!-- LOAD COSTMAP_CONVERTER PARAMETERS HERE -->
+      <rosparam file="$(find ucar_nav)/config/omni_test20250620/costmap_converter_params.yaml" command="load" />
+
+
+      <remap from="/cmd_vel" to="/teb_cmd_vel"/>
+    </node> 
+    
+  </launch>

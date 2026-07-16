@@ -1,0 +1,77 @@
+#Description:
+# move_base软件包的通用配置参数,现在依次解释每个参数意义:
+#   shutdown_costmaps:当move_base在不活动状态时,是否关掉costmap.
+#   controller_frequency:向底盘控制移动话题cmd_vel发送命令的频率.
+#   controller_patience:在空间清理操作执行前,控制器花多长时间等有效控制下发.
+#   planner_frequency:全局规划操作的执行频率.如果设置为0.0,则全局规划器仅
+#       在接收到新的目标点或者局部规划器报告路径堵塞时才会重新执行规划操作.
+#   planner_patience:在空间清理操作执行前,留给规划器多长时间来找出一条有效规划.
+#   oscillation_timeout:执行修复机制前,允许振荡的时长.
+#   oscillation_distance:来回运动在多大距离以上不会被认为是振荡.
+#   base_local_planner:指定用于move_base的局部规划器名称.
+#   base_global_planner:指定用于move_base的全局规划器插件名称.
+#   recovery_behavior_enabled指定于move_base中是否允许遇到障碍物，进行恢复行为
+#   clearing_rotation_allowed指定于move_base中是否允许遇到障碍物，进行清除障碍物旋转行为
+
+shutdown_costmaps: false                 #当move_base在不活动状态时,是否关掉costmap.
+
+controller_frequency: 10.0 #10           # 发布控制信号频率。
+controller_patience: 3.0  #2               # 等待控制速度的时间间隔,如果控制速度的发布超过设置时间,则认为局部路径规划失败。
+
+planner_frequency: 1.0    #0              # 全局规划期的执行频率,如果是 0,则只有出现新的目标点,才会重新规划。
+planner_patience: 3.0     #5                # 进行全局规划的时间间隔,如果超时则认为规划失败。
+
+oscillation_timeout: 5.0  #8               # 在执行恢复行为之前允许震荡的时间。
+oscillation_distance: 0.01 #0.3           #  机器人必须移动多远才能被视为不震荡。如果出现震荡则说明全局路径规划失败,那么将在超时后执行恢复模块。
+
+# Planner selection
+base_global_planner: "global_planner/GlobalPlanner"                                       # 指定用于move_base的全局规划器插件名称.用于规划全局的最优路径,通用的设置为 global_planner/GlobalPlanner,可以在
+                                                                                                                                                         # GlobalPlanner 的参数中配置为 A*或 D*算法。
+base_local_planner: "teb_local_planner/TebLocalPlannerROS"                      # 选择局部路径规划器插件,用于运动过程中
+                                                                                                                                                         # 的动态避障,通常可以选择使用 DWA 算法
+
+max_planning_retries: -1                                               # 最大规划路径重复尝试的次数，默认为-1,表示全局规划失败后立即执行恢复模块。
+
+recovery_behavior_enabled: true                  # 是否启用重恢复行为模块
+clearing_rotation_allowed: true                     # 是否允许旋转恢复行为
+
+#base_local_planner: "dwa_local_planner/DWAPlannerROS"
+#base_global_planner: "astar_planner/AstarPlannerRos"
+#
+
+#通过列表的形式设置各个恢复阶段的行为模块,如图中的设置将‘conservative_reset’步骤设置为使用
+#clear_costmap_recovery/ClearCostmapRecovery 插件,将‘clearing_rotaiong’设置为使用 rotate_recovery/RotateRecovery 插件。用户
+#可自定义各重恢复步骤所执行的行为插件,比如在塔克的配置文件中还提供了move_slow_and_clear 插件示例,可以实现机器人慢速移动并清除代价地图的步
+#骤,如需使用,可以将 type 设置为这个插件。
+
+recovery_behaviors:                                            # 重恢复行为的配置参数
+  - name: 'conservative_reset'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+    #type: 'move_slow_and_clear/MoveSlowAndClear'
+  #- name: 'aggressive_reset'
+  #  type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  #- name: 'super_reset'
+  #  type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  - name: 'clearing_rotation'
+    type: 'rotate_recovery/RotateRecovery'
+    
+conservative_reset:              #设置 conservative_reset 参数,包括reset_distance 清除距离以及 layer_names 作用的地图层级。
+  reset_distance: 0.1
+  #layer_names: [static_layer, obstacle_layer, inflation_layer]
+  layer_names: [obstacle_layer]
+
+aggressive_reset:                    # 概念同上
+  reset_distance: 3.0
+  #layer_names: [static_layer, obstacle_layer, inflation_layer]
+  layer_names: [obstacle_layer]
+
+super_reset:                              # 概念同上(未启用该行为)
+  reset_distance: 5.0
+  #layer_names: [static_layer, obstacle_layer, inflation_layer]
+  layer_names: [obstacle_layer]
+
+move_slow_and_clear:               # 设置 move_slow_and_clear 重恢复行为参数:
+  clearing_distance: 0.5                # 清除距离
+  limited_trans_speed: 0.1          # 线速度限制
+  limited_rot_speed: 0.4               # 角速度限制
+  limited_distance: 0.3                   # 重恢复行走距离限制

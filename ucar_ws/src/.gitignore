@@ -1,0 +1,2 @@
+# The root repository owns the shared publish rules in ../../.gitignore.
+# Keep all Catkin package source trees visible to the root workspace repository.

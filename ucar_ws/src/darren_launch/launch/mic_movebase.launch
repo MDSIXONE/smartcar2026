@@ -1,0 +1,10 @@
+<launch>
+    <!-- 启动底盘及激光雷达驱动包 -->
+    <include file="$(find ucar_controller)/launch/ucar_bringup.launch" />
+    <!--开启麦克风唤醒词-->
+    <include file="$(find xf_mic_asr_offline)/launch/mic_init.launch" />
+    <!--语音控制-->
+    <include file="$(find xf_mic_asr_offline)/launch/voice_control.launch" />
+    <!--开启语音合成-->
+    <include file="$(find xf_tts_offline)/launch/xf_tts.launch" />
+</launch>

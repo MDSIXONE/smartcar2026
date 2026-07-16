@@ -1,0 +1,19 @@
+<launch>
+
+    <arg name="input" default="/home/ucar/ucar_ws/src/image/"/>
+    <arg name="batch_size" default="1"/>
+    <arg name="weights" default="yolov4-tiny-ucar.weights"/>
+    <arg name="dont_show" default=""/>
+    <arg name="config_file" default="./cfg/yolov4-tiny-ucar.cfg"/>
+    <arg name="data_file"  default="./cfg/xunfei.data"/>
+    <arg name="thresh" default="0.5"/>
+
+    <node name="ucar_yolo" pkg="ucar_yolo" type="darknet_ucar.py" output="screen">
+        <param name="--input"                value="$(arg input)" />
+        <param name="--batch_size"           value="$(arg batch_size)" />
+        <param name="--weights"              value="$(arg weights)" />
+        <param name="--config_file"          value="$(arg config_file)" />
+        <param name="--data_file"            value="$(arg data_file)" />
+        <param name="--thresh"               value="$(arg thresh)" />
+    </node>
+</launch>

@@ -1,0 +1,64 @@
+<launch>
+  
+   <!-- 启动遥控器 -->
+   <arg name="control_type" default="$(optenv CONTROL_TYPE joy)"/>
+   <group if="$(eval arg('control_type') == 'joy')">
+       <node pkg="joy" name="joy_node" type="joy_node" output="screen" respawn="false" />
+       <node pkg="ucar_controller" name="joy_ps2" type="lax_twist_joy.py" output="screen" respawn="false">
+           <!-- <param name="x_speed_scale" value="0.075" />
+           <param name="y_speed_scale" value="0.075" />
+           <param name="w_speed_scale" value="0.25" /> -->
+           <param name="x_speed_scale" value="0.5" />
+           <param name="y_speed_scale" value="0.5" />
+           <param name="w_speed_scale" value="0.7" />
+       </node>
+   </group>
+
+   <!-- 启动底盘及激光雷达驱动包 -->
+   <include file="$(find ucar_controller)/launch/lax_bringup.launch" />
+  
+  <node type="slam_gmapping" pkg="gmapping" name="gmapping" args="scan:=scan">
+    <remap from="odom" to="odom" />
+
+    <param name="map_update_interval" value="1" />
+    <param name="maxUrange" value="8.0" />
+    <param name="maxRange" value="12.0" />
+    <param name="sigma" value="0.05" />
+    <!--param name="kernelSize" value="3"/-->
+    <param name="kernelSize" value="1" />
+    <param name="lstep" value="0.05" />
+    <param name="astep" value="0.05" />
+    <param name="iterations" value="5" />
+    <param name="lsigma" value="0.075" />
+    <param name="ogain" value="3.0" />
+    <param name="lskip" value="0" />
+    <!--param name="minimumScore" value="30"/ -->
+    <param name="minimumScore" value="100" />
+    <param name="srr" value="0.01" />
+    <param name="srt" value="0.02" />
+    <param name="str" value="0.01" />
+    <param name="stt" value="0.02" />
+    <param name="linearUpdate" value="0.05" />
+    <param name="angularUpdate" value="0.0436" />
+    <param name="temporalUpdate" value="-1.0" />
+    <param name="resampleThreshold" value="0.5" />
+    <param name="particles" value="8" />
+    <!--
+    <param name="xmin" value="-50.0"/>
+    <param name="ymin" value="-50.0"/>
+    <param name="xmax" value="50.0"/>
+    <param name="ymax" value="50.0"/>
+  make the starting size small for the benefit of the Android client's memory...
+  -->
+    <param name="xmin" value="-50.0" />
+    <param name="ymin" value="-50.0" />
+    <param name="xmax" value="50.0" />
+    <param name="ymax" value="50.0" />
+
+    <param name="delta" value="0.05" />
+    <param name="llsamplerange" value="0.01" />
+    <param name="llsamplestep" value="0.01" />
+    <param name="lasamplerange" value="0.005" />
+    <param name="lasamplestep" value="0.005" />
+  </node>
+</launch>

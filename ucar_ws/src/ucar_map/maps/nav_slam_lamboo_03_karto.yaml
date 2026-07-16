@@ -1,0 +1,7 @@
+image: /home/ucar/ucar_ws/src/ucar_map/maps/nav_slam_lamboo_03_karto.pgm
+resolution: 0.025000
+origin: [-0.585968, -0.503297, 0.000000]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.196
+

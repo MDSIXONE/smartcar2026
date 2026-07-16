@@ -1,0 +1,21 @@
+local_costmap:
+   global_frame: odom
+   robot_base_frame: base_link
+   # Eight updates per second lets the local collision gate react to 12 Hz lidar.
+   update_frequency: 8.0
+   publish_frequency: 4.0
+   rolling_window: true
+   # A 1.8 m window covers the 0.8 m CymPlanner collision lookahead.
+   width: 1.8
+   height: 1.8
+   resolution: 0.01
+   transform_tolerance: 1.2 #1.2 
+   cost_scaling_factor:  5 #50 # exponential rate at which the obstacle cost drops off (default: 10)
+   inflation_radius:     0.05 # Keep only 5 cm clearance beyond the robot footprint.
+# plugins:
+#       - {name: static_layer,       type: "costmap_2d::StaticLayer"}
+#       - {name: inflation_layer,    type: "costmap_2d::InflationLayer"}
+plugins:
+      - {name: static_layer,        type: "costmap_2d::StaticLayer"}
+      - {name: obstacle_layer,      type: "costmap_2d::VoxelLayer"}
+      - {name: inflation_layer,     type: "costmap_2d::InflationLayer"}

@@ -1,0 +1,93 @@
+#Description:
+# 代价地图通用参数配置文件,就是全局代价地图和局部代价地图
+# 共同都需要配置的参数,各参数意义如下:
+# robot_radius: 机器人的半径
+# "obstacle_range" 参数确定最大范围传感器读数，这将导致障碍物被放入代价地图中。
+# 在这里，我们把它设置在3米，这意味着机器人只会更新其地图包含距离移动基座3米以内的障碍物的信息。
+# “raytrace_range”参数确定了用于清除指定范围外的空间。
+# 将其设置为3.0米，这意味着机器人将尝试清除3米外的空间，在代价地图中清除3米外的障碍物。
+
+#robot_radius: 0.2
+
+footprint: [[0.171, -0.128], [0.171, 0.128],[-0.171, 0.128], [-0.171, -0.128]]
+
+# obstacle_layer:
+#   enabled: true
+#   combination_method: 1
+#   track_unknown_space: true
+#   obstacle_range: 2.0
+#   raytrace_range: 2.0
+#   observation_sources: laser_scan_sensor
+#   laser_scan_sensor: {
+#     sensor_frame: laser_frame,
+#     data_type: LaserScan,
+#     topic: scan,
+#     marking: true,
+#     clearing: true,
+#     inf_is_valid: true
+#   }
+ 
+# inflation_layer:
+#   enabled: true
+#   cost_scaling_factor: 5.0
+# # inflation_radius: 0.2
+#   inflation_radius: 0.03
+# #0.15
+ 
+# static_layer:
+#   enabled: true
+
+obstacle_layer:
+  enabled: true
+  max_obstacle_height: 0.6 # 要插入 costmap 的任何障碍物的最大高度(米)。此参数应设置为略高于机器人的高度。
+  min_obstacle_height: 0.0  # 要插入 costmap 的任何障碍物的最小高度(米)。一般设置为地面高度(0m)
+  obstacle_range: 2.0              # 使用传感器数据将障碍物插入 costmap 的最大距离(米)。
+  raytrace_range: 5.0               # 在机器人移动过程中,实时清除代价地图上的障碍物的最大范围,更新可自由移动的空间数据。假如设置该值为 3 米,
+                                                         # 那么就意味着在 3 米内的障碍物,本来开始时是有的,但是本次检测却没
+                                                         #  有了,那么就需要在代价地图上来更新,将旧障碍物的空间标记为可以自由移动的空间。
+  inflation_radius: 0.10          # 障碍物膨胀半径,障碍物层会把观测到的障碍物代价膨胀直到该半径为止,一般将该值设置为机器人底盘的直径大小。膨胀
+                                                        # 半径应设定为在代价地图的与障碍物保持安全的最大距离。例如,将膨胀半径设定为 0.55 米,意味着机器人针对相同的
+                                                        # 障碍物获取的所有路径都保持距离障碍物 0.55 米或更远。如果你的机器人不能很好地通过窄门或其它狭窄的地方,则稍微减小
+                                                        # 这个值,相反地,如果机器人不断地撞到东西,则尝试增大这个值。
+  combination_method: 1    # 更改障碍层如何处理来自其外部层的传入数据的行为。可能的值为“覆盖(Overwrite)”
+                                                        # (0)、“最大(Maximum)”(1)和“无(Nothing)”(99),”Overwrite”只覆盖数据,即不使用它们。“Maximum”是大多数时候想要的。
+                                                        # 它将最大限度地利用障碍层或传入数据。
+                                                        # ”Nothing”什么都不改变输入的数据。请注意,这会极大地影响costmap 的行为,具体取决于 track_unkown_space 的设置。
+  observation_sources: laser_scan_sensor    # 障碍层传感器观测来源,在下方声明了各
+                                                                                          # 项传感器来源,可以由此参数引入所需要的传感器。
+  track_unknown_space: true                              # 是否允许导航通过地图中的未知区域。
+ 
+  origin_z: 0.0                                                      # 地图的 z 轴原点。
+  z_resolution: 0.1                                             # 地图的 z 分辨率,以 m/cell 为单位。
+  z_voxels: 10                                                      # 每个垂直列中要包含的体素数,网格的高度为z_resolution * z_voxels。
+  unknown_threshold: 15                              # 列中被视为“已知”的未知单元格的数量。
+  mark_threshold: 0                                         # 列中被视为“空闲”的已标记单元格的最大数量。
+  publish_voxel_map: true                            # 是否出于可视化目的发布基础体素网格。
+  footprint_clearing_enabled: true            # 如果为 true,则机器人足迹将清除(标记是否出于可视化目的发布基础体素网格。
+                                                                                  # 为自由)其行进的空间。
+
+
+  laser_scan_sensor:
+    data_type: LaserScan
+    topic: /scan
+    marking: true
+    clearing: true
+    expected_update_rate: 0                           # 以秒为单位的期望传感器读数的频率。值为 0.0 将允许两次读取之间有无限的时间。此参数用作故
+                                                                                   # 障保护,以防止传感器故障时导航堆栈不向机器人发出命令。应将其设置为比传感器的实际速率稍宽的值。
+                                                                                   # 例如,如果我们希望每隔0.05 秒从激光器进行一次扫描,则可以将此参数设置为 0.1 秒,
+                                                                                   # 以提供足够的缓冲区并解决一定量的系统延迟。
+    min_obstacle_height: 0.00                        # 传感器读数的最小高度(以米为单位)被视为有效。通常将其设置为地面高度,但可以根据
+                                                                                   # 传感器的噪声模型将其设置为较高或较低。
+    max_obstacle_height: 0.30                       # 视为有效的传感器读数的最大高度(以米为单位)。通常将其设置为略高于机器人的高度。将此参数
+                                                                                  # 设置为大于全局 max_obstacle_height 参数的值无效。将此参数设置为小于全局 max_obstacle_height 的值
+                                                                                  # 将过滤掉该传感器中高于该高度的点。
+
+inflation_layer:        #膨胀层
+  enabled:              true
+  cost_scaling_factor:  10.0     # exponential rate at which the obstacle cost drops off (default: 10)【障碍代偿下降的指数速率（膨胀层中颜色分层）】
+                                                           # 在膨胀过程应用于成本值的比例因子。
+  inflation_radius:     0.02         # 地图使障碍物膨胀的半径(以米为单位)。
+
+static_layer:           #静态层
+  enabled:              true
+  map_topic:            "/map"

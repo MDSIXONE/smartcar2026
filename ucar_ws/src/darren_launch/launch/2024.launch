@@ -1,0 +1,63 @@
+<launch>
+    <param name="use_sim_time" value="true"/>
+
+    <!--起始点-->
+    <arg name="initial_pose_x" default="0"/>
+	<arg name="initial_pose_y" default="0"/>
+	<arg name="initial_pose_a" default="0"/> 
+
+    <!--开启导航-->
+        <!-- 启动底盘及激光雷达驱动包 -->
+    <include file="$(find ucar_controller)/launch/ucar_bringup.launch" />
+        <!-- 启动USB摄像头驱动包 -->
+    <include file="$(find ucar_cam)/launch/ucar_cam.launch" />
+    <arg name="map_file" default="$(find ucar_nav)/maps/19iflyrace_gamping_102.yaml" />
+    <node name="map_server" pkg="map_server" type="map_server" args="$(arg map_file)" output="screen">
+        <param name="frame_id" value="map" />
+    </node>
+        <!-- 启动AMCL 自适应蒙特卡洛定位算法包 -->
+    <include file="$(find ucar_nav)/launch/config/amcl/amcl_omni.launch">
+      
+    </include>
+    
+    
+
+    <node name="robot_pose_publisher" pkg="robot_pose_publisher" type="robot_pose_publisher"/>
+    <!--node name="darren_launch" pkg="darren_launch" type="lax_controller.py" output="screen"/-->
+
+    <!-- 开启麦克风唤醒词 -->
+    <include file="$(find xf_mic_asr_offline)/launch/mic_init.launch" /> 
+    <!--语音控制-->
+    <!--include file="$(find xf_mic_asr_offline)/launch/voice_control.launch" /-->
+    <!-- 开启语音合成-->
+    <include file="$(find xf_tts_offline)/launch/xf_tts.launch" />
+
+    <!-- <include file="$(find darknet_ros)/launch/darknet_ros_xf.launch" /> -->
+
+ 
+    		<node name="task_control" pkg="darren_launch" type="2024.py" output="screen" respawn="false"/>
+    <!--巡线控制-->
+    <node pkg="darren_launch" name="lane_follower_node" type="follow_line.py" output="screen" respawn="false" />
+    <!--node pkg="darren_launch" name="lane_follower_node" type="lane_follower_node" output="screen" respawn="false" /-->
+
+    <!--靠近标靶-->
+    <node pkg="darren_launch" name="lidar_node" type="lidar_node" output="screen" respawn="false" />
+    
+    <!-- <node pkg="darknet_ros" name="darknet_ros_video" type="darknet_sub" output="screen" respawn="false" /> -->
+
+    <node pkg="ucar_yolo" name="ucar_yolo_kongbufenzi" type="19kongbufenzi_detect.py" output="screen" respawn="false" />
+
+    <!-- <node pkg="usb_cam" name="usb_cam_image" type="image_sub" output="screen" respawn="false" /> -->
+
+    <!-- <node pkg="darren_launch" name="imu_flag" type="imu" output="screen" respawn="false" /> -->
+
+    <!-- <node pkg="darren_launch" name="lax_aruco" type="lax_aruco.py" output="screen" respawn="false" /> -->
+
+</launch>
+
+
+
+    
+
+
+

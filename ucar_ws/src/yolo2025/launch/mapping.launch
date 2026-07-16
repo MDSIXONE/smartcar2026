@@ -1,0 +1,29 @@
+<launch>
+  <!--
+    Manual map-building mode.  It intentionally does not load map_server,
+    lidar_loc, move_base, the camera, or the automatic task node: gmapping
+    must be the sole publisher of /map and the keyboard node the sole normal
+    publisher of /cmd_vel.
+  -->
+  <include file="$(find ucar_controller)/launch/ucar_bringup.launch" />
+
+  <!-- ucar_bringup's ydlidar launch intentionally publishes /scan_raw.
+       Gmapping consumes the unmodified copy on /scan. -->
+  <node pkg="yolo2025" type="mapping_scan_relay.py" name="mapping_scan_relay" output="screen" />
+
+  <node pkg="gmapping" type="slam_gmapping" name="slam_gmapping" output="screen">
+    <param name="base_frame" value="base_link" />
+    <param name="odom_frame" value="odom" />
+    <param name="map_update_interval" value="1.0" />
+    <param name="linearUpdate" value="0.10" />
+    <param name="angularUpdate" value="0.10" />
+    <param name="maxUrange" value="4.0" />
+    <param name="maxRange" value="4.5" />
+    <param name="particles" value="40" />
+    <remap from="scan" to="/scan" />
+  </node>
+
+  <!-- Run `rosrun yolo2025 mapping_keyboard.py` in a second terminal after
+       this launch is ready. Keeping it outside roslaunch preserves direct
+       terminal key input. -->
+</launch>

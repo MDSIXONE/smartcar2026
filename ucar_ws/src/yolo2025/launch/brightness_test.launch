@@ -1,0 +1,27 @@
+<launch>
+    <param name="use_sim_time" value="true"/>
+
+    <!--起始点-->
+    <arg name="initial_pose_x" default="0"/>
+	<arg name="initial_pose_y" default="0"/>
+	<arg name="initial_pose_a" default="0"/> 
+
+    <!--开启导航-->
+        <!-- 启动底盘及激光雷达驱动包 -->
+    <include file="$(find ucar_controller)/launch/ucar_bringup.launch" />
+        <!-- 启动USB摄像头驱动包 -->
+    <include file="$(find ucar_cam)/launch/ucar_cam.launch" />
+   
+
+   
+    <!-- <node pkg="yolo2025" name="final" type="detect" output="screen" respawn="false" > 
+     <param name="dist" value="0.8" />
+     <param name="skip" value="1" />
+      </node> -->
+      
+
+            <node pkg="yolo2025" name="imux" type="brightness_test.py" output="screen" respawn="false" /> 
+      
+      
+      
+</launch>

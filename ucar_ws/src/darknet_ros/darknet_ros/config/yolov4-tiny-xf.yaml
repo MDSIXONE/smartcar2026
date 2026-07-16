@@ -1,0 +1,17 @@
+yolo_model:
+
+  config_file:
+    name: yolov4-tiny-xf.cfg
+  weight_file:
+    name: yolov4-tiny-xf_0721.weights
+    # name: yolov4-tiny-xf_0721.weights
+  threshold:
+    value: 0.3
+  detection_classes:
+    names:
+      - watermelon
+      - maizeExposed
+      - cucumber
+      - twoMaizes
+      - threeCucumbers
+      - twoExposedMaizes

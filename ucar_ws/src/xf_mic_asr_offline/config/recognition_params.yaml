@@ -1,0 +1,38 @@
+confidence:  28 #18  #语音识别结果自信度阈值，取值：0-100
+seconds_per_order: 10  #每次语音指令录音长度，单位：秒
+
+line_vel_x: 0.2 #语音控制小车移动的X轴线速度
+
+radar_range: 0.75 #雷达自动避障障碍物阈值，单位：米
+radar_count: 3 #雷达自动避障排除噪点次数
+if_akm_yes_or_no: "no"   #车型，阿克曼车填yes，其他车型填no
+
+position_x: 2.28 #语音导航第一个人物识别点坐标。
+position_y: -0.46
+orientation_z: -0.1
+orientation_w: 1
+
+A2_position_x: 1.56 #语音导航第二个人物识别点坐标。
+A2_position_y: -1.93
+A2_orientation_z: -0.71
+A2_orientation_w: 0.7
+
+B_position_x: 2.376 #2.400 #2.354 #2.667 #2.371 #2.445  #2.484  #语音导航B点坐标。
+B_position_y: -2.572 #-2.441 #-2.600 #-2.914 #-2.6 #-2.786 #-2.829 #-2.438  #-2.472
+B_orientation_z:  0.994 #0.996 #1.000 
+B_orientation_w: 0.112 #0.089 #0.085 #0.070 #0.15 # -0.095 #0.003
+
+C_position_x: 0 #语音导航起点坐标。
+C_position_y: 0
+C_orientation_z: 0
+C_orientation_w: 1
+
+D_position_x: 0.055 #0.025 #0.030 #0.645 #-0.187 #语音导航终点坐标。
+D_position_y: -1.00 #-0.840 #-0.910 #0.816 #-1.325
+D_orientation_z: -0.710 #0.710 #0.719 #0.577 #0.721
+D_orientation_w: 0.705 #0.700 #0.695 #0.816 #0.693
+
+choice: 3 #1,2,3分别对应D1,D2,D3坐标
+identify: 1 #选择是否使用图像识别：0-不使用；1：使用
+turn_angle: 90 #人物模型识别区转的角度
+ang_vel_z: 0.3 #语音控制小车移动的Z轴角速度速度

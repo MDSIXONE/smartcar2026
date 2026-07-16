@@ -1,0 +1,99 @@
+<launch>
+    <!-- 真机运行：use_sim_time 必须为 false。此处不再声明，
+         交由 ucar_bringup.launch 设为 false（避免 ROS 时间卡在 0 导致 TF/AMCL 停摆）。 -->
+
+    <!--起始点（2026 warehouse 区，车头朝 +X）-->
+    <arg name="initial_pose_x" default="-0.25"/>
+    <arg name="initial_pose_y" default="2.75"/>
+    <arg name="initial_pose_a" default="0"/>
+    <arg name="startup_goal_enabled" default="true"/>
+
+    <!-- group 内的 remap 作用于底盘驱动；/scan_raw 由 2026.py 以 scan_scale=1.0 转发为 /scan。 -->
+    <group>
+        <remap from="scan" to="scan_raw"/>
+        <include file="$(find ucar_controller)/launch/ucar_bringup.launch"/>
+    </group>
+
+    <!-- 启动USB摄像头驱动包 -->
+    <include file="$(find yolo2025)/launch/qrcode.launch">
+        <arg name="start_camera" value="true" />
+        <arg name="api_enabled" value="true" />
+    </include>
+
+    <!-- 启动 Map server，发布地图（2026 新地图） -->
+    <arg name="map_file" default="$(find ucar_nav)/maps/iflysse_2026_direct.yaml" />
+    <node name="map_server" pkg="map_server" type="map_server" args="$(arg map_file)" output="screen">
+        <param name="frame_id" value="map" />
+    </node>
+
+    <!-- 使用 jie_ware 激光定位替代 AMCL。启动初值与原 AMCL 一致，RViz 仍可用 2D Pose Estimate 重定位。 -->
+    <node pkg="jie_ware" type="lidar_loc" name="lidar_loc" output="screen">
+        <param name="base_frame" value="base_link"/>
+        <param name="odom_frame" value="odom"/>
+        <param name="laser_frame" value="laser_frame"/>
+        <param name="laser_topic" value="scan"/>
+        <param name="initial_pose_x" value="$(arg initial_pose_x)"/>
+        <param name="initial_pose_y" value="$(arg initial_pose_y)"/>
+        <param name="initial_pose_a" value="$(arg initial_pose_a)"/>
+        <!-- lidar_loc 是激光定位节点，不使用 AMCL 专属的 odom_model_type 参数；全向控制由 CymPlanner 输出 linear.y 实现。 -->
+    </node>
+
+    <!-- 启动 CymPlanner / move_base：CymPlanner 直接发布 /cmd_vel，由 base_driver 消费。 -->
+    <include file="$(find ucar_nav)/launch/cym_move_base_omni_2026.launch"/>
+
+    <node name="robot_pose_publisher" pkg="robot_pose_publisher" type="robot_pose_publisher"/>
+
+    <!-- 语音唤醒（如需 /awake_flag 触发任务，取消下面注释） -->
+    <!-- <include file="$(find xf_mic_asr_offline)/launch/mic_init.launch" /> -->
+
+    <!-- 开启语音合成 -->
+    <include file="$(find xf_tts_offline)/launch/xf_tts.launch" />
+
+    <!-- 仅转发激光并按需发送一个默认目标；手动导航由 RViz 直接发送给 move_base。 -->
+    <node pkg="yolo2025" name="navigation_2026" type="2026.py" output="screen" respawn="false">
+        <!-- /scan stays unfiltered for lidar_loc and the local costmap. Only
+             the global obstacle layer consumes the static-wall-filtered topic. -->
+        <param name="global_obstacle_filter_enabled" value="true"/>
+        <param name="global_static_filter_radius" value="0.22"/>
+        <param name="global_static_filter_threshold" value="65"/>
+        <param name="startup_goal_enabled" value="$(arg startup_goal_enabled)"/>
+        <param name="startup_goal_x" value="-1.734"/>
+        <param name="startup_goal_y" value="2.305"/>
+        <!-- 先到顺时针 270°（d）；二维码序列最终由 CymPlanner 转到顺时针 90°（i）。 -->
+        <param name="startup_goal_yaw" value="1.570796"/>
+        <!-- Wait for lidar/odom and both costmaps to begin publishing before
+             the script checks that map -> base_link has settled. -->
+        <param name="startup_goal_delay" value="15.0"/>
+        <param name="startup_pose_settle_seconds" value="3.0"/>
+        <param name="startup_pose_settle_distance" value="0.05"/>
+        <param name="startup_plan_settle_samples" value="5"/>
+        <!-- 固定延时后还会等待定位与 /move_base/make_plan 返回有效路径，避免过早发送目标。 -->
+        <param name="startup_goal_ready_timeout" value="90.0"/>
+        <param name="qr_scan_enabled" value="true"/>
+        <param name="qr_scan_min_count" value="3"/>
+        <!-- 扫码器实测需要约 2~3.4 秒才稳定输出新码；3.5 秒避免在解码前切换朝向。 -->
+        <param name="qr_scan_hold_sec" value="3.5"/>
+        <param name="qr_scan_timeout" value="40.0"/>
+        <!-- 单个二维码朝向目标最多等待 6 秒；超时后取消旋转并在当前位置继续短暂扫描。 -->
+        <param name="qr_heading_goal_timeout" value="6.0"/>
+        <!-- 三码完成后的第一点：非全向、限速 0.1 m/s。 -->
+        <param name="post_qr_goal_enabled" value="true"/>
+        <param name="post_qr_goal_x" value="-1.737"/>
+        <param name="post_qr_goal_y" value="1.003"/>
+        <param name="post_qr_goal_yaw" value="3.140"/>
+        <!-- 第二点：固定地图坐标，非全向。 -->
+        <param name="second_goal_enabled" value="true"/>
+        <param name="second_goal_x" value="-1.722"/>
+        <param name="second_goal_y" value="-0.269"/>
+        <param name="second_goal_yaw" value="-3.140"/>
+        <!-- 第三点：固定全向目标；到位置后才对准最终朝向。 -->
+        <param name="next_goal_enabled" value="true"/>
+        <param name="next_goal_x" value="-2.265"/>
+        <param name="next_goal_y" value="-0.001"/>
+        <param name="next_goal_yaw" value="-1.557"/>
+        <param name="cym_holonomic_mode_param" value="/move_base/cym_planner/CymPlanner/holonomic_mode"/>
+        <param name="task_linear_speed" value="0.1"/>
+        <param name="cym_task_max_vel_param" value="/move_base/cym_planner/CymPlanner/task_max_vel"/>
+    </node>
+
+</launch>

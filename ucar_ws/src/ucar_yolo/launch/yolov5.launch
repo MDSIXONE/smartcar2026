@@ -1,0 +1,3 @@
+<launch>
+    <node name="ucar_yolo" pkg="ucar_yolo" type="detect_image.py" output="screen"/>
+</launch>

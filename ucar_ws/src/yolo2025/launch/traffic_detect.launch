@@ -1,0 +1,9 @@
+<launch>
+
+
+ <!-- 启动USB摄像头驱动包 -->
+ <include file="$(find ucar_cam)/launch/ucar_cam.launch" />
+ <node pkg="yolo2025" name="image_listener_traffic" type="run2.py" output="screen" respawn="false" />
+
+
+</launch>
