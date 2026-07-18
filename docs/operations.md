@@ -651,6 +651,53 @@ export ROS_MASTER_URI=http://192.168.8.197:11311
 python2 /opt/ros/melodic/bin/roslaunch yolo2025 2026.launch startup_goal_enabled:=false
 ```
 
+## CymPlanner 主分支与 TEB 试验分支
+
+当前分支约定如下：
+
+- `main`：真机稳定入口，`2026.launch` 使用 `cym_planner/CymPlanner`。
+- `teb-trial`：仅用于 TEB 试验，包含 TEB launch 和参数，不得直接当作稳定部署分支。
+
+切换到 TEB 试验时：
+
+```bash
+git switch teb-trial
+git push origin teb-trial
+```
+
+恢复稳定 CymPlanner 时：
+
+```bash
+git switch main
+git pull --ff-only origin main
+scp ucar_ws/src/yolo2025/launch/2026.launch \
+  ucar@192.168.8.231:~/ucar_ws/src/yolo2025/launch/
+```
+
+小车端按以下顺序重启，确保不自动发目标；所有 `source` 完成后都要显式设置
+WSL ROS Master 和小车 `ROS_IP`：
+
+```bash
+source /opt/ros/melodic/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_IP=192.168.8.231
+export ROS_MASTER_URI=http://192.168.8.197:11311
+bash ~/ucar_ws/src/yolo2025/scripts/stop_2026_task.sh
+python2 /opt/ros/melodic/bin/roslaunch yolo2025 2026.launch \
+  startup_goal_enabled:=false
+```
+
+启动后必须确认：
+
+```bash
+rosparam get /move_base/base_local_planner
+```
+
+主分支应输出 `cym_planner/CymPlanner`。只有 `/odom_raw` 为有限值、两个 TF 正常且急停可用时，
+才允许在 RViz 发送目标。
+
 ## Git 与 GitHub 私有仓库
 
 首次将本工作区发布到 GitHub 前，先确认忽略规则没有遗漏本地归档、模型权重或设备配置：
