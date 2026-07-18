@@ -148,6 +148,8 @@ scp ucar_ws/src/ucar_nav/config/omni_test20250620/teb_local_planner_params.yaml 
   ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/config/omni_test20250620/
 scp ucar_ws/src/yolo2025/launch/2026.launch \
   ucar@192.168.8.231:~/ucar_ws/src/yolo2025/launch/
+scp ucar_ws/src/yolo2025/scripts/2026.py \
+  ucar@192.168.8.231:~/ucar_ws/src/yolo2025/scripts/
 ```
 
 小车端验证 TEB 已安装、launch 可解析；每次 `source` 后显式恢复 WSL

@@ -85,11 +85,10 @@ class Navigation2026(object):
         self.footprint_safety_margin = float(
             rospy.get_param("~footprint_safety_margin", 0.05))
 
+        # Initialize every field used by scan_cb before subscribing.  ROS can
+        # deliver the first /scan_raw message immediately after Subscriber()
+        # returns, so assigning these below the subscription is a startup race.
         self.scan_scale = 1.0
-        self.scan_pub = rospy.Publisher("/scan", LaserScan, queue_size=1)
-        self.global_scan_pub = rospy.Publisher(
-            "/scan_global_obstacles", LaserScan, queue_size=1)
-        self.scan_sub = rospy.Subscriber("/scan_raw", LaserScan, self.scan_cb, queue_size=1)
         self.global_obstacle_filter_enabled = rospy.get_param(
             "~global_obstacle_filter_enabled", True)
         self.global_static_filter_radius = float(rospy.get_param(
@@ -98,6 +97,11 @@ class Navigation2026(object):
             "~global_static_filter_threshold", 65))
         self.global_static_filter_mask = None
         self.global_static_filter_info = None
+        self.production_global_obstacles_frozen = False
+        self.scan_pub = rospy.Publisher("/scan", LaserScan, queue_size=1)
+        self.global_scan_pub = rospy.Publisher(
+            "/scan_global_obstacles", LaserScan, queue_size=1)
+        self.scan_sub = rospy.Subscriber("/scan_raw", LaserScan, self.scan_cb, queue_size=1)
         self.map_sub = rospy.Subscriber("/map", OccupancyGrid, self.map_cb, queue_size=1)
 
         self.qr_result_sub = rospy.Subscriber("/qr_result", String, self.qr_result_cb, queue_size=10)
@@ -117,7 +121,6 @@ class Navigation2026(object):
         self.production_alignment_deadline = None
         self.production_waypoint_index = 0
         self.production_local_obstacle_layer_disabled = False
-        self.production_global_obstacles_frozen = False
         self.production_centres = {}
         self.production_requested_route = self.load_production_route()
         self.production_route = self.expand_production_route(
