@@ -20,6 +20,9 @@ CymPlanner.
 - Match Cym's `0.05 m` position-entry threshold and `0.10 rad` final-yaw
   tolerance.
 - Retain the real `0.342 m x 0.256 m` polygon and `0.03 m` hard clearance.
+- Set the TEB branch's local costmap inflation radius to `0.03 m`; the stable
+  CymPlanner branch is unchanged. This avoids double-counting a `0.07 m`
+  costmap margin on top of TEB's polygon clearance.
 - Keep homotopy-class alternatives disabled for a deterministic first grid
   run, but do not force every global-plan viapoint: the narrow local costmap
   made the `0.10 m`/weight-10 constraint infeasible at the startup goal.

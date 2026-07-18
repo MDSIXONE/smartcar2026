@@ -134,7 +134,8 @@ TEB 首次完整路线按已经验证的 CymPlanner 生产参数做保守基线�
 `0.25 m/s`、横移 `0.10 m/s`、角速度 `1.0 rad/s`、到点距离 `0.05 m`、
 最终朝向误差 `0.10 rad`、车体外硬净距 `0.03 m`。为避免窄路口在多个拓扑间
 切换，首次基线关闭 homotopy class；不强制绑定每个全局路径 viapoint，避免
-局部地图把路径判为不可行。
+局部地图把路径判为不可行。TEB 分支的局部 costmap 膨胀半径也设为 `0.03 m`，
+避免与 TEB 自身 `0.03 m` 硬净距重复叠加成过大的通道收缩。
 
 本地 WSL Noetic 没有安装 TEB 插件，不能在本地运行时加载该 planner。小车
 端先同步以下文件，再进行静态解析和构建检查：
@@ -145,6 +146,8 @@ scp ucar_ws/src/ucar_nav/launch/teb_move_base_omni_2026.launch \
 scp ucar_ws/src/ucar_nav/config/omni_test20250620/teb_move_base_params_2026.yaml \
   ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/config/omni_test20250620/
 scp ucar_ws/src/ucar_nav/config/omni_test20250620/teb_local_planner_params.yaml \
+  ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/config/omni_test20250620/
+scp ucar_ws/src/ucar_nav/config/omni_test20250620/local_costmap_params.yaml \
   ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/config/omni_test20250620/
 scp ucar_ws/src/yolo2025/launch/2026.launch \
   ucar@192.168.8.231:~/ucar_ws/src/yolo2025/launch/
