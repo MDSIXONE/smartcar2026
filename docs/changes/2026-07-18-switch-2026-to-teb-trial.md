@@ -35,15 +35,8 @@ changes were backed up to GitHub first in commit `aa58c5b` on
 - The local WSL Noetic environment does not contain the TEB plugin, so a local
   runtime test cannot load this planner. The vehicle must perform the final
   launch validation.
-- Static XML parsing passed. The first vehicle launch attempt exposed the
-  existing `ucar-mini` self-XML-RPC resolution problem; restarting with
-  `unset ROS_HOSTNAME` and `ROS_IP=192.168.8.231` fixed it.
-- With `startup_goal_enabled:=false`, the vehicle now has `/move_base` and
-  `/navigation_2026` running. `/move_base/base_local_planner` resolves to
-  `teb_local_planner/TebLocalPlannerROS`, and
-  `/move_base/TebLocalPlannerROS/max_vel_theta` is `0.8`.
-- No navigation goal was sent. `/odom_raw` was finite and `odom -> base_link`
-  was available during the no-motion check.
+- The launch and parameter files are syntactically static; no vehicle task was
+  started during this change.
 
 ## Safety
 

@@ -149,8 +149,6 @@ Master，不启动小车本机 `roscore`：
 source /opt/ros/melodic/setup.bash
 export ROS_MASTER_URI=http://192.168.8.197:11311
 source ~/ucar_ws/devel/setup.bash
-unset ROS_HOSTNAME
-export ROS_IP=192.168.8.231
 export ROS_MASTER_URI=http://192.168.8.197:11311
 rospack find teb_local_planner
 roslaunch --nodes yolo2025 2026.launch startup_goal_enabled:=false
@@ -162,8 +160,6 @@ roslaunch --nodes yolo2025 2026.launch startup_goal_enabled:=false
 source /opt/ros/melodic/setup.bash
 export ROS_MASTER_URI=http://192.168.8.197:11311
 source ~/ucar_ws/devel/setup.bash
-unset ROS_HOSTNAME
-export ROS_IP=192.168.8.231
 export ROS_MASTER_URI=http://192.168.8.197:11311
 bash ~/ucar_ws/src/yolo2025/scripts/stop_2026_task.sh
 python2 /opt/ros/melodic/bin/roslaunch yolo2025 2026.launch \
