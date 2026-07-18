@@ -31,9 +31,11 @@ TebLocalPlannerROS:
  acc_lim_theta: 0.2   #5            enable_homotopy_class_planning   # 机器人最大旋转角加速度
  min_turning_radius: 0.0                  # 机器人最小转弯半径
  wheelbase: 0.0
- footprint_model:
-    type: "polygon"
+ footprint_model: 
+    types: "polygon"
     vertices: [[0.171, -0.128], [0.171, 0.128],[-0.171, 0.128], [-0.171, -0.128]]
+    inscribed_radius: 0.128  # 
+    circumscribed_radius: 0.214  # 
 
 
  # GoalTolerance
@@ -44,7 +46,7 @@ TebLocalPlannerROS:
 
  # Obstacles
 
- min_obstacle_dist: 0.03
+ min_obstacle_dist: 0.1   #0.15 0.25 0.2
  include_costmap_obstacles: True #enable_homotopy_class_planning enable_dynamic_obstacles
  costmap_obstacles_behind_robot_dist: 0.5
  obstacle_poses_affected: 35 #10
@@ -96,4 +98,5 @@ TebLocalPlannerROS:
  obstacle_keypoint_offset: 0.1
  obstacle_heading_threshold: 0.45 #0.45
  visualize_hc_graph: False
+
 
