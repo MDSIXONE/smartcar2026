@@ -138,6 +138,8 @@ scp ucar_ws/src/ucar_nav/launch/teb_move_base_omni_2026.launch \
   ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/launch/
 scp ucar_ws/src/ucar_nav/config/omni_test20250620/teb_move_base_params_2026.yaml \
   ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/config/omni_test20250620/
+scp ucar_ws/src/ucar_nav/config/omni_test20250620/teb_local_planner_params.yaml \
+  ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/config/omni_test20250620/
 scp ucar_ws/src/yolo2025/launch/2026.launch \
   ucar@192.168.8.231:~/ucar_ws/src/yolo2025/launch/
 ```
@@ -169,6 +171,17 @@ bash ~/ucar_ws/src/yolo2025/scripts/stop_2026_task.sh
 python2 /opt/ros/melodic/bin/roslaunch yolo2025 2026.launch \
   startup_goal_enabled:=false
 ```
+
+启动日志必须显示 TEB 使用 polygon 车体模型，不应再出现
+`No robot footprint model specified`。以下两条应分别输出 `polygon` 和 `0.03`：
+
+```bash
+rosparam get /move_base/TebLocalPlannerROS/footprint_model/type
+rosparam get /move_base/TebLocalPlannerROS/min_obstacle_dist
+```
+
+`0.03 m` 是 TEB 在车体 polygon 外额外要求的硬障碍净距，不是把车体缩成 3 cm；
+车体仍为 `0.342 m × 0.256 m`。局部 costmap 的 `0.03 m/pix` 是栅格分辨率，含义不同。
 
 确认 `/odom_raw` 为有限值、`odom -> base_link` 和 `map -> base_link` TF 正常、
 且 `/cmd_vel` 没有多个非预期发布者后，再由 RViz 发送一个手动目标。回滚
