@@ -23,6 +23,8 @@ CymPlanner.
 - Set the TEB branch's local costmap inflation radius to `0.03 m`; the stable
   CymPlanner branch is unchanged. This avoids double-counting a `0.07 m`
   costmap margin on top of TEB's polygon clearance.
+- Set TEB `map_frame` to `map`, matching the current rolling local costmap's
+  `global_frame`; the legacy TEB value was still `odom`.
 - Keep homotopy-class alternatives disabled for a deterministic first grid
   run, but do not force every global-plan viapoint: the narrow local costmap
   made the `0.10 m`/weight-10 constraint infeasible at the startup goal.

@@ -2,7 +2,8 @@ TebLocalPlannerROS:
 
  odom_topic: odom                                  # 里程计话题消息
  #odom_topic: /robot_pose_ekf/odom_combined
- map_frame: odom                                   # 地图坐标系名称
+ # Must match local_costmap/global_frame for trajectory feasibility checks.
+ map_frame: map
  #map_frame: /odom_combined
 
  # Trajectory
