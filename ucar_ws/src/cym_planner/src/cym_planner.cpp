@@ -150,6 +150,7 @@ void CymPlanner::initialize(
     previous_heading_error_ = 0.0;
     previous_heading_control_time_ = ros::Time(0);
     angular_derivative_initialized_ = false;
+    final_yaw_tracker_.reset();
 
     ROS_INFO("cym_planner initialized: plugin=%s, holonomic=%s, max_vel_x=%.2f, max_vel_y=%.2f, max_vel_theta=%.2f, angular_p=%.2f, angular_d=%.2f, local obstacle lookahead=%.2f",
              name.c_str(), holonomic_mode_ ? "true" : "false", max_vel_x_, max_vel_y_, max_vel_theta_, angular_gain_, angular_kd_,
@@ -180,10 +181,34 @@ bool CymPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& plan)
         task_max_vel_ = std::max(0.0, requested_task_max_vel);
     else
         task_max_vel_ = 0.0;
+    bool same_final_goal = false;
+    if (!plan.empty() && !global_plan_.empty())
+    {
+        const geometry_msgs::PoseStamped& previous_goal = global_plan_.back();
+        const geometry_msgs::PoseStamped& next_goal = plan.back();
+        const double position_delta = std::hypot(
+            next_goal.pose.position.x - previous_goal.pose.position.x,
+            next_goal.pose.position.y - previous_goal.pose.position.y);
+        const double yaw_delta = std::atan2(
+            std::sin(tf::getYaw(next_goal.pose.orientation) -
+                     tf::getYaw(previous_goal.pose.orientation)),
+            std::cos(tf::getYaw(next_goal.pose.orientation) -
+                     tf::getYaw(previous_goal.pose.orientation)));
+        same_final_goal = next_goal.header.frame_id == previous_goal.header.frame_id &&
+                          position_delta < 0.02 && std::abs(yaw_delta) < 0.02;
+    }
+
+    // Keep the existing path-tracking behavior for every fresh global plan.
+    // Only the terminal-pose state is retained when the goal itself is the
+    // same, so a 3 Hz replan cannot reverse the selected final-yaw direction.
     target_index_ = 0;
+    if (!same_final_goal)
+    {
+        pose_adjusting_ = false;
+        goal_reached_ = false;
+        final_yaw_tracker_.reset();
+    }
     global_plan_ = plan;
-    pose_adjusting_ = false;
-    goal_reached_ = false;
     linear_derivative_initialized_ = false;
     lateral_derivative_initialized_ = false;
     angular_derivative_initialized_ = false;
@@ -266,7 +291,10 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     const double final_distance = std::hypot(
         pose_final.pose.position.x, pose_final.pose.position.y);
     if (!pose_adjusting_ && final_distance < 0.05)
+    {
         pose_adjusting_ = true;
+        final_yaw_tracker_.reset();
+    }
 
     const double motion_scale = carry_mode_ ? carry_speed_scale_ : 1.0;
     const double active_max_vel_x =
@@ -275,7 +303,8 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         task_max_vel_ > 0.0 ? std::min(max_vel_y_, task_max_vel_) : max_vel_y_;
     if (pose_adjusting_)
     {
-        const double final_yaw = tf::getYaw(pose_final.pose.orientation);
+        const double final_yaw = final_yaw_tracker_.update(
+            tf::getYaw(pose_final.pose.orientation));
         // Translation has already reached the position tolerance.  Do not mix
         // it with final orientation alignment: the robot rotates only now.
         cmd_vel.angular.z = std::max(

@@ -464,6 +464,10 @@ class Navigation2026(object):
         marker.id = marker_id
         marker.type = Marker.LINE_STRIP
         marker.action = Marker.ADD
+        # RViz rejects an all-zero quaternion as uninitialised, even though a
+        # LINE_STRIP has no meaningful pose rotation.  Use the identity pose
+        # so the footprint remains fixed in base_link and is renderable.
+        marker.pose.orientation.w = 1.0
         marker.scale.x = 0.018
         marker.color.r = red
         marker.color.g = green

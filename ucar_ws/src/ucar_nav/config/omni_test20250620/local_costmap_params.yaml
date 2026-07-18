@@ -1,24 +1,39 @@
 local_costmap:
-   # lidar_loc continuously aligns map -> base_link.  Keeping this rolling
-   # costmap in map prevents a changing map -> odom correction from rotating
-   # live laser obstacles in RViz and in CymPlanner's collision check.
+   # Keep the real vehicle's localization and sensor frames.  The footprint
+   # matches the global costmap so global and local collision checks agree.
    global_frame: map
    robot_base_frame: base_link
-   # Eight updates per second lets the local collision gate react to 12 Hz lidar.
-   update_frequency: 8.0
-   publish_frequency: 4.0
+   update_frequency: 12.0
+   publish_frequency: 5.0
    rolling_window: true
-   # A 1.8 m window covers the 0.8 m CymPlanner collision lookahead.
-   width: 1.8
-   height: 1.8
-   resolution: 0.01
-   # Do not accept a stale pose while the chassis is rotating; scan frames are
-   # stamped at roughly 12 Hz and the local costmap updates at 8 Hz.
+   width: 5.0
+   height: 5.0
+   resolution: 0.03
+   footprint: [[0.171, -0.128], [0.171, 0.128], [-0.171, 0.128], [-0.171, -0.128]]
+   footprint_padding: 0.0
    transform_tolerance: 0.30
-   cost_scaling_factor:  5 #50 # exponential rate at which the obstacle cost drops off (default: 10)
-   inflation_radius:     0.05 # Keep only 5 cm clearance beyond the robot footprint.
-   # Must stay inside local_costmap.  A local layer is driven by immediate
-   # lidar safety returns; static-map walls belong to the global costmap.
+   always_send_full_costmap: true
    plugins:
-      - {name: obstacle_layer,  type: "costmap_2d::ObstacleLayer"}
+      - {name: obstacle_layer, type: "costmap_2d::ObstacleLayer"}
       - {name: inflation_layer, type: "costmap_2d::InflationLayer"}
+   obstacle_layer:
+      enabled: true
+      combination_method: 1
+      track_unknown_space: false
+      obstacle_range: 3.0
+      raytrace_range: 4.0
+      observation_sources: laser_scan_sensor
+      laser_scan_sensor:
+         # Keep the real vehicle's isolated-return filter; localization keeps
+         # consuming raw /scan and the simulation-equivalent tuning begins here.
+         sensor_frame: laser_frame
+         data_type: LaserScan
+         topic: /scan_filtered
+         marking: true
+         clearing: true
+         inf_is_valid: true
+         observation_persistence: 0.0
+   inflation_layer:
+      enabled: true
+      inflation_radius: 0.07
+      cost_scaling_factor: 4.0

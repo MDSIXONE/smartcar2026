@@ -202,6 +202,12 @@ target_link_libraries(cym_planner
 ## Testing ##
 #############
 
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(cym_planner_final_yaw_test
+    test/final_yaw_control_test.cpp
+  )
+endif()
+
 ## Add gtest based cpp test target and link libraries
 # catkin_add_gtest(${PROJECT_NAME}-test test/test_cym_planner.cpp)
 # if(TARGET ${PROJECT_NAME}-test)

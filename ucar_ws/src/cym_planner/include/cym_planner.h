@@ -12,6 +12,8 @@
 #include <std_msgs/Bool.h>
 #include <tf2_ros/buffer.h>
 
+#include "cym_planner/final_yaw_control.h"
+
 
 namespace cym_planner
 {
@@ -33,6 +35,7 @@ namespace cym_planner
         ros::Subscriber carry_mode_sub_;
         bool carry_mode_;
         double carry_speed_scale_;
+        FinalYawTracker final_yaw_tracker_;
     };
 } // namespace cym_planner
 

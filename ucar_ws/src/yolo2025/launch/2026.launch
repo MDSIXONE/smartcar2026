@@ -8,6 +8,10 @@
     <arg name="initial_pose_a" default="0"/>
     <arg name="startup_goal_enabled" default="true"/>
 
+    <!-- RViz-only chassis model; it is a visual on the existing base_link and
+         does not create TF, collision geometry, or a control dependency. -->
+    <param name="robot_description" textfile="$(find yolo2025)/urdf/ucar_2026_visual.urdf"/>
+
     <!-- group 内的 remap 作用于底盘驱动；/scan_raw 由 2026.py 以 scan_scale=1.0 转发为 /scan。 -->
     <group>
         <remap from="scan" to="scan_raw"/>
@@ -106,6 +110,7 @@
         <param name="production_alignment_max_angular_speed" value="0.5"/>
         <!-- 中部阶段关闭局部障碍叠加；全局层保留已有代价，仅冻结新激光输入。 -->
         <param name="local_obstacle_layer" value="/move_base/local_costmap/obstacle_layer"/>
+        <!-- Match the global-costmap footprint: 0.342 m by 0.256 m. -->
         <rosparam param="robot_footprint">[[0.171, -0.128], [0.171, 0.128], [-0.171, 0.128], [-0.171, -0.128]]</rosparam>
         <param name="footprint_safety_margin" value="0.05"/>
         <param name="cym_holonomic_mode_param" value="/move_base/cym_planner/CymPlanner/holonomic_mode"/>
