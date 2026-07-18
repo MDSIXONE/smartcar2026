@@ -1,0 +1,4 @@
+# TEB trial override for the 2026 real-vehicle navigation launch.
+# The shared move_base parameters are loaded first; this file only selects the
+# installed TEB plugin so the CymPlanner launch remains an easy rollback path.
+base_local_planner: "teb_local_planner/TebLocalPlannerROS"

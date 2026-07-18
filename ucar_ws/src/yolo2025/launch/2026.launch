@@ -52,8 +52,9 @@
         <param name="outlier_threshold" value="0.10"/>
     </node>
 
-    <!-- 启动 CymPlanner / move_base：CymPlanner 直接发布 /cmd_vel，由 base_driver 消费。 -->
-    <include file="$(find ucar_nav)/launch/cym_move_base_omni_2026.launch"/>
+    <!-- 启动 TEB / move_base：TEB 直接发布 /cmd_vel，由 base_driver 消费。 -->
+    <!-- 2026 TEB trial; cym_move_base_omni_2026.launch remains rollback path. -->
+    <include file="$(find ucar_nav)/launch/teb_move_base_omni_2026.launch"/>
 
     <node name="robot_pose_publisher" pkg="robot_pose_publisher" type="robot_pose_publisher"/>
 
