@@ -133,7 +133,8 @@ rosrun tf tf_echo map base_link
 TEB 首次完整路线按已经验证的 CymPlanner 生产参数做保守基线：前进/后退
 `0.25 m/s`、横移 `0.10 m/s`、角速度 `1.0 rad/s`、到点距离 `0.05 m`、
 最终朝向误差 `0.10 rad`、车体外硬净距 `0.03 m`。为避免窄路口在多个拓扑间
-切换，首次基线关闭 homotopy class，并以 `0.10 m` 间隔跟随全局路径。
+切换，首次基线关闭 homotopy class；不强制绑定每个全局路径 viapoint，避免
+局部地图把路径判为不可行。
 
 本地 WSL Noetic 没有安装 TEB 插件，不能在本地运行时加载该 planner。小车
 端先同步以下文件，再进行静态解析和构建检查：

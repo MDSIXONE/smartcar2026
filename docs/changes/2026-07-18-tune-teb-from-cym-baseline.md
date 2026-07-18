@@ -20,16 +20,21 @@ CymPlanner.
 - Match Cym's `0.05 m` position-entry threshold and `0.10 rad` final-yaw
   tolerance.
 - Retain the real `0.342 m x 0.256 m` polygon and `0.03 m` hard clearance.
-- Increase global-plan following density to `0.10 m`, increase viapoint weight
-  to `10`, and disable homotopy-class alternatives for a deterministic first
-  grid-route run.
+- Keep homotopy-class alternatives disabled for a deterministic first grid
+  run, but do not force every global-plan viapoint: the narrow local costmap
+  made the `0.10 m`/weight-10 constraint infeasible at the startup goal.
+- Disable dynamic-obstacle optimization for the static production field and
+  reduce `obstacle_poses_affected` to `15` to avoid over-constraining the
+  local trajectory.
 - Reduce `penalty_epsilon` to `0.05`, so it is not larger than the configured
   `0.10 m/s` lateral limit.
 
 ## Verification
 
 - The pre-change static comparison failed on nine mismatched TEB values.
-- The post-change static comparison must pass before deployment.
+- The post-change static comparison must pass before deployment, including
+  `global_plan_viapoint_sep=-1`, `weight_viapoint=0`, and
+  `include_dynamic_obstacles=false`.
 - Deploy and start with `startup_goal_enabled:=false`; confirm the live local
   planner is TEB and all parameters above are active before motion.
 - Only run after finite `/odom_raw` and valid `odom -> base_link` and
