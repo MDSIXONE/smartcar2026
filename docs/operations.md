@@ -122,55 +122,6 @@ rosrun tf tf_echo odom base_link
 rosrun tf tf_echo map base_link
 ```
 
-## 2026 TEB 试运行
-
-当前 2026 入口使用
-`ucar_nav/launch/teb_move_base_omni_2026.launch`，通过
-`teb_move_base_params_2026.yaml` 选择已经安装在小车 Melodic 中的
-`teb_local_planner/TebLocalPlannerROS`。TEB 直接发布 `/cmd_vel`，不要套用旧
-的 `/teb_cmd_vel` 重映射；当前没有启动对应 relay。
-
-本地 WSL Noetic 没有安装 TEB 插件，不能在本地运行时加载该 planner。小车
-端先同步以下文件，再进行静态解析和构建检查：
-
-```bash
-scp ucar_ws/src/ucar_nav/launch/teb_move_base_omni_2026.launch \
-  ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/launch/
-scp ucar_ws/src/ucar_nav/config/omni_test20250620/teb_move_base_params_2026.yaml \
-  ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/config/omni_test20250620/
-scp ucar_ws/src/yolo2025/launch/2026.launch \
-  ucar@192.168.8.231:~/ucar_ws/src/yolo2025/launch/
-```
-
-小车端验证 TEB 已安装、launch 可解析；每次 `source` 后显式恢复 WSL
-Master，不启动小车本机 `roscore`：
-
-```bash
-source /opt/ros/melodic/setup.bash
-export ROS_MASTER_URI=http://192.168.8.197:11311
-source ~/ucar_ws/devel/setup.bash
-export ROS_MASTER_URI=http://192.168.8.197:11311
-rospack find teb_local_planner
-roslaunch --nodes yolo2025 2026.launch startup_goal_enabled:=false
-```
-
-第一次真正启动时先停止旧任务，并保持无自动目标：
-
-```bash
-source /opt/ros/melodic/setup.bash
-export ROS_MASTER_URI=http://192.168.8.197:11311
-source ~/ucar_ws/devel/setup.bash
-export ROS_MASTER_URI=http://192.168.8.197:11311
-bash ~/ucar_ws/src/yolo2025/scripts/stop_2026_task.sh
-python2 /opt/ros/melodic/bin/roslaunch yolo2025 2026.launch \
-  startup_goal_enabled:=false
-```
-
-确认 `/odom_raw` 为有限值、`odom -> base_link` 和 `map -> base_link` TF 正常、
-且 `/cmd_vel` 没有多个非预期发布者后，再由 RViz 发送一个手动目标。回滚
-时把 `2026.launch` 的 include 改回
-`cym_move_base_omni_2026.launch`，然后按同样的停止/启动流程重启。
-
 ## CymPlanner 终点 180° 震荡修复：构建与验证
 
 该修复属于 `cym_planner` C++ 代码变更。仅调整 YAML 参数不能解决
