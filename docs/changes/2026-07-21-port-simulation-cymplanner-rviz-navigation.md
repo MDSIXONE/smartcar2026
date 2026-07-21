@@ -36,8 +36,10 @@ camera, or production-route logic.
 - `ucar_ws/src/yolo2025/rviz/navigation_2026.rviz`: displays the CymPlanner
   lookahead footprint instead of the removed task marker, and adds the real
   `/usb_cam/image_raw` Image panel.
-- `docs/quickstart.md` and `docs/operations.md`: record the RViz-only flow,
-  build, launch, verification, and safety limits.
+- `README.md`, `docs/quickstart.md`, and `docs/operations.md`: record the
+  RViz-only flow, build, launch, verification, and safety limits.  The root
+  README describes only the real-vehicle workspace and has no local
+  `simulation/` workspace reference.
 - `.gitignore`: excludes the root `simulation/` workspace from the
   vehicle-only `simulation_real` branch.
 
