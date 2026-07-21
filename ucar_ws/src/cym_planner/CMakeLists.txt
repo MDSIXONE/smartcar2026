@@ -16,6 +16,7 @@ find_package(catkin REQUIRED COMPONENTS
   std_msgs
   tf
   tf2_ros
+  visualization_msgs
 )
 
 ## Uncomment this if the package has a setup.py. This macro ensures
@@ -106,7 +107,7 @@ find_package(catkin REQUIRED COMPONENTS
 catkin_package(
   INCLUDE_DIRS include
   LIBRARIES cym_planner
-  CATKIN_DEPENDS costmap_2d geometry_msgs nav_core pluginlib roscpp std_msgs tf tf2_ros
+  CATKIN_DEPENDS costmap_2d geometry_msgs nav_core pluginlib roscpp std_msgs tf tf2_ros visualization_msgs
 )
 
 ###########

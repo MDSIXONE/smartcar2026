@@ -6,6 +6,7 @@
 #include <tf/tf.h>
 #include <tf/transform_datatypes.h>
 #include <tf/transform_listener.h>
+#include <visualization_msgs/Marker.h>
 
 PLUGINLIB_EXPORT_CLASS(cym_planner::CymPlanner, nav_core::BaseLocalPlanner)
 
@@ -46,6 +47,7 @@ bool pose_adjusting_;
 bool goal_reached_;
 bool holonomic_mode_;
 double task_max_vel_;
+ros::Publisher lookahead_footprint_pub_;
 
 // move_base versions can pass either "CymPlanner" or the fully-qualified
 // plugin name to initialize().  Keep the configuration namespace explicit so
@@ -61,6 +63,37 @@ bool readPlannerParam(
     return runtime_nh.getParam(key, value) ||
            canonical_nh.getParam(key, value) ||
            legacy_nh.getParam(key, value);
+}
+
+void publishLookaheadFootprint(
+    const geometry_msgs::PoseStamped& lookahead_pose,
+    const std::string& costmap_frame)
+{
+    if (!costmap_ros_ || !lookahead_footprint_pub_)
+        return;
+
+    const std::vector<geometry_msgs::Point>& footprint =
+        costmap_ros_->getRobotFootprint();
+    if (footprint.empty())
+        return;
+
+    visualization_msgs::Marker marker;
+    marker.header.frame_id = costmap_frame;
+    marker.header.stamp = ros::Time::now();
+    marker.ns = "cym_planner";
+    marker.id = 0;
+    marker.type = visualization_msgs::Marker::LINE_STRIP;
+    marker.action = visualization_msgs::Marker::ADD;
+    marker.pose = lookahead_pose.pose;
+    marker.pose.position.z += 0.03;
+    marker.scale.x = 0.025;
+    marker.color.r = 0.05;
+    marker.color.g = 0.95;
+    marker.color.b = 0.95;
+    marker.color.a = 1.0;
+    marker.points = footprint;
+    marker.points.push_back(footprint.front());
+    lookahead_footprint_pub_.publish(marker);
 }
 }
 
@@ -141,6 +174,11 @@ void CymPlanner::initialize(
     ros::NodeHandle public_nh;
     carry_mode_sub_ = public_nh.subscribe(
         "/sim_task3/carry_mode", 1, &CymPlanner::carryModeCallback, this);
+    // This is the real-vehicle equivalent of the simulation lookahead
+    // footprint display.  Use the canonical configuration namespace so the
+    // RViz topic is stable even if move_base supplies a short plugin name.
+    lookahead_footprint_pub_ = canonical_nh.advertise<visualization_msgs::Marker>(
+        "lookahead_footprint", 1, true);
     previous_linear_error_ = 0.0;
     previous_control_time_ = ros::Time(0);
     linear_derivative_initialized_ = false;
@@ -229,6 +267,9 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     double previous_x = 0.0;
     double previous_y = 0.0;
     bool have_previous_point = false;
+    geometry_msgs::PoseStamped lookahead_pose;
+    bool have_lookahead_pose = false;
+    bool lookahead_blocked = false;
 
     // This planner does not detour.  A blocked path segment causes move_base to
     // stop and attempt recovery/replanning instead of sending an unsafe command.
@@ -266,13 +307,26 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
 
         unsigned int x = 0;
         unsigned int y = 0;
-        if (costmap->worldToMap(pose_costmap.pose.position.x, pose_costmap.pose.position.y, x, y) &&
-            costmap->getCost(x, y) >= obstacle_cost_threshold_)
+        if (!costmap->worldToMap(
+                pose_costmap.pose.position.x, pose_costmap.pose.position.y, x, y))
+            continue;
+
+        lookahead_pose = pose_costmap;
+        have_lookahead_pose = true;
+        if (costmap->getCost(x, y) >= obstacle_cost_threshold_)
         {
-            ROS_WARN_THROTTLE(1.0,
-                              "cym_planner: blocked path segment; requesting recovery/replan");
-            return false;
+            lookahead_blocked = true;
+            break;
         }
+    }
+
+    if (have_lookahead_pose)
+        publishLookaheadFootprint(lookahead_pose, costmap_frame);
+    if (lookahead_blocked)
+    {
+        ROS_WARN_THROTTLE(1.0,
+                          "cym_planner: blocked path segment; requesting recovery/replan");
+        return false;
     }
 
     geometry_msgs::PoseStamped pose_final;

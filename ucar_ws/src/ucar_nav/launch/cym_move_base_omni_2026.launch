@@ -1,11 +1,11 @@
 <launch>
   <node pkg="move_base" type="move_base" respawn="true" name="move_base" output="screen" clear_params="true">
-    <rosparam file="$(find ucar_nav)/config/omni_test20250620/costmap_common_params.yaml" command="load" ns="global_costmap" />
-    <rosparam file="$(find ucar_nav)/config/omni_test20250620/costmap_common_params.yaml" command="load" ns="local_costmap" />
-    <rosparam file="$(find ucar_nav)/config/omni_test20250620/local_costmap_params.yaml" command="load" />
-    <rosparam file="$(find ucar_nav)/config/omni_test20250620/global_costmap_params.yaml" command="load" />
-    <rosparam file="$(find ucar_nav)/config/omni_test20250620/global_planner_params.yaml" command="load" />
-    <rosparam file="$(find ucar_nav)/config/omni_test20250620/move_base_params.yaml" command="load" />
+    <rosparam file="$(find ucar_nav)/config/testnav20260721/global_costmap_common.yaml" command="load" ns="global_costmap" />
+    <rosparam file="$(find ucar_nav)/config/testnav20260721/local_costmap_common.yaml" command="load" ns="local_costmap" />
+    <rosparam file="$(find ucar_nav)/config/testnav20260721/local_costmap_params.yaml" command="load" />
+    <rosparam file="$(find ucar_nav)/config/testnav20260721/global_costmap_params.yaml" command="load" />
+    <rosparam file="$(find ucar_nav)/config/testnav20260721/global_planner_params.yaml" command="load" />
+    <rosparam file="$(find ucar_nav)/config/testnav20260721/move_base_params.yaml" command="load" />
     <rosparam file="$(find cym_planner)/config/ucar_cym_planner_params.yaml" command="load" />
 
     <!-- move_base 直接发布 /cmd_vel，由底盘驱动消费。 -->

@@ -12,10 +12,13 @@
 WSL 的 ROS 环境已设置 DISABLE_ROS1_EOL_WARNINGS=1，因此不会再显示 ROS 1
 Noetic 生命周期结束的提示窗口。
 
-`~/start_rviz.sh` 会固定加载本地
-`ucar_ws/src/yolo2025/rviz/navigation_2026.rviz`：其中已启用 `/map`、全局/局部代价地图、
-`/scan` 激光点云和 `base_link` 朝向箭头。点云轨迹与朝向 TF 的失效时间均为 `0.3 s`，因此
-不会把断流后的旧朝向继续显示为实时数据。
+必须以当前工作区的 `RVIZ_CONFIG` 覆盖 `~/start_rviz.sh` 的历史默认值：
+
+    export RVIZ_CONFIG=/mnt/d/WORK/ALLCODE/smartcar2026/simulationforreal/ucar_source_code/ucar_ws/src/yolo2025/rviz/navigation_2026.rviz
+
+该配置已启用 `/map`、全局/局部代价地图、`/scan` 激光点云、`base_link` 朝向箭头和
+`/usb_cam/image_raw` 相机画面。点云轨迹与朝向 TF 的失效时间均为 `0.3 s`，因此不会把
+断流后的旧朝向继续显示为实时数据。
 
 首次使用前，必须在 Windows 的管理员 PowerShell 放行仅来自小车的入站 TCPROS：
 
@@ -27,7 +30,7 @@ Noetic 生命周期结束的提示窗口。
 
 另开一个 WSL 终端即可运行：
 
-    ~/start_rviz.sh
+    RVIZ_CONFIG=/mnt/d/WORK/ALLCODE/smartcar2026/simulationforreal/ucar_source_code/ucar_ws/src/yolo2025/rviz/navigation_2026.rviz ~/start_rviz.sh
 
 若 Windows 任务栏只有 RViz 图标、无法显示主窗口，说明 WSLg 远程应用会话卡住。在
 Windows PowerShell 执行以下命令重建图形会话，再运行上述 Master 和 RViz 启动命令：
@@ -66,6 +69,136 @@ rostopic echo -n 1 /move_base/global_costmap/costmap
 rostopic echo -n 1 /move_base/local_costmap/costmap
 rosrun tf tf_echo map base_link
 ```
+
+## 当前 2026 RViz 定点导航（CymPlanner）
+
+本节是当前唯一的真机导航入口，取代本文后续历史的 TEB、二维码、语音、默认目标和
+生产路线说明。`yolo2025/launch/2026.launch` 现在只启动如下链路：
+
+```text
+base_driver + YDLidar (/scan_raw)
+  -> navigation_scan_relay (/scan, /scan_global_obstacles)
+  -> lidar_loc (map -> odom) + lidar_filter_node (/scan_filtered)
+  -> move_base (GlobalPlanner + CymPlanner) -> /cmd_vel -> base_driver
+usb_cam (/dev/ucar_video) -> /usb_cam/image_raw -> RViz Image panel
+```
+
+`navigation_scan_relay` 仅转发激光并从全局障碍物输入中删除已存在于静态地图的墙体回波；
+它优先使用激光时间戳的 `map <- laser_frame` TF，若该查询只因数毫秒发布延迟失败，则可使用
+不超过 `0.20 s` 的最新公共 TF。地图掩码或这两种 TF 都未就绪时，它发布全 `inf` 的全局扫描，
+避免把错误坐标系的点写入全局代价地图。定位始终使用未滤波的 `/scan`，局部避障使用
+`/scan_filtered`，全局重规划使用 `/scan_global_obstacles`。
+
+relay 配置为 `respawn=true` 与 `2.0 s` 重试延迟：若其在启动阶段短暂退出，ROS 会先恢复
+`/scan_raw -> /scan`，而不是让 `lidar_loc` 长期失去激光输入。重试期间不得发送导航目标。
+相机也以相同的 2 秒重试策略运行；它只供 RViz 显示，未连接任何二维码、语音、任务或
+`/cmd_vel` 控制逻辑。
+
+真机仍必须使用真实尺寸 `0.342 m × 0.256 m` 的足迹、`map` / `base_link` 坐标系和
+`lidar_loc` 的 `map -> odom`。不得照搬仿真的 Gazebo、`base_footprint` 或 `odom`
+接口。`testnav20260721` 是当前生效的导航配置档；其
+`global_costmap_common.yaml` 与 `local_costmap_common.yaml` 分别承载仿真的
+全局/局部层参数：全局使用 `5/1 Hz`、`0.01185 m`、`3.0/4.0 m`、`0.205 m/0.05`；局部
+使用 `12/5 Hz`、`2.0 m × 2.0 m`、`0.03 m`、`3.0/4.0 m`、`0.07 m/4.0`。全局仍消费
+静态墙体已掩除的 `/scan_global_obstacles`，局部仍消费 `/scan_filtered`，这是为真实
+雷达与地图的小对齐误差保留的安全适配。
+
+当前真机默认地图为
+`ucar_nav/maps/iflysse_field_walls_without_middle_vertices.yaml`，即场地中间不含顶点的
+版本。不要将它与旧的 `iflysse_2026_direct.yaml` 混用。
+
+只同步当前代价地图和 launch 文件、但保持任务停止时，在控制电脑工作区执行：
+
+```powershell
+ssh ucar@192.168.8.231 'mkdir -p ~/ucar_ws/src/ucar_nav/config/testnav20260721'
+scp ucar_ws/src/ucar_nav/config/testnav20260721/global_costmap_common.yaml ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/config/testnav20260721/
+scp ucar_ws/src/ucar_nav/config/testnav20260721/local_costmap_common.yaml ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/config/testnav20260721/
+scp ucar_ws/src/ucar_nav/config/testnav20260721/global_costmap_params.yaml ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/config/testnav20260721/
+scp ucar_ws/src/ucar_nav/config/testnav20260721/local_costmap_params.yaml ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/config/testnav20260721/
+scp ucar_ws/src/ucar_nav/config/testnav20260721/global_planner_params.yaml ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/config/testnav20260721/
+scp ucar_ws/src/ucar_nav/config/testnav20260721/move_base_params.yaml ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/config/testnav20260721/
+scp ucar_ws/src/ucar_nav/launch/cym_move_base_omni_2026.launch ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/launch/
+scp ucar_ws/src/ucar_nav/maps/iflysse_field_walls_without_middle_vertices.yaml ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/maps/
+scp ucar_ws/src/ucar_nav/maps/iflysse_field_walls_without_middle_vertices.pgm ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/maps/
+```
+
+这九个 YAML/launch/map 文件不需要重新编译。同步后在小车端完成静态解析（不会启动节点或移动）：
+
+```bash
+source /opt/ros/melodic/setup.bash
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_IP=192.168.8.231
+export ROS_MASTER_URI=http://192.168.8.197:11311
+roslaunch --nodes yolo2025 2026.launch
+```
+
+在 Ubuntu 18.04 / ROS Melodic 环境重新构建后，所有 `source` 完成后显式恢复唯一的
+WSL Master：
+
+```bash
+source /opt/ros/melodic/setup.bash
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_IP=192.168.8.231
+export ROS_MASTER_URI=http://192.168.8.197:11311
+cd ~/ucar_ws
+catkin_make --pkg cym_planner yolo2025
+source devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_IP=192.168.8.231
+export ROS_MASTER_URI=http://192.168.8.197:11311
+python2 /opt/ros/melodic/bin/roslaunch yolo2025 2026.launch
+```
+
+此入口没有 `startup_goal_enabled` 参数，也不会发布自动目标。只在 `/odom_raw` 为有限值、
+`odom -> base_link` 与 `map -> base_link` 均可用，且 `/cmd_vel` 只有预期的
+`/move_base` 发布者时，才可在控制电脑的 RViz 使用 **2D Nav Goal**。
+
+```bash
+rostopic echo -n 1 /odom_raw
+rosrun tf tf_echo odom base_link
+rosrun tf tf_echo map base_link
+rostopic info /cmd_vel
+rosparam get /move_base/base_local_planner
+rosparam get /move_base/local_costmap/inflation_layer/inflation_radius
+```
+
+预期本地规划器为 `cym_planner/CymPlanner`，局部膨胀半径为 `0.07`。RViz 的
+**CymPlanner Lookahead Footprint** 来自
+`/move_base/cym_planner/CymPlanner/lookahead_footprint`；只有 move_base 收到目标并
+产生路径后才会出现。前视轮廓使用运行中代价地图的真实车体 footprint，不参与额外控制。
+
+### `map` TF 等待与 scan relay 异常退出
+
+若 move_base 重复报告 `Timed out waiting for transform from base_link to map`，不要把它
+当作代价地图数值错误。`map_server` 仅发布 `/map`，实际的 `map -> odom` 由 `lidar_loc`
+在同时取得 `/scan` 和有效里程计后发布。当前链路中 `/scan` 又完全依赖
+`navigation_scan_relay` 将 `/scan_raw` 转发出来。
+
+先保持无导航目标，并在小车端执行以下只读检查；所有 `source` 完成后必须恢复 WSL Master：
+
+```bash
+source /opt/ros/melodic/setup.bash
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_IP=192.168.8.231
+export ROS_MASTER_URI=http://192.168.8.197:11311
+rosnode list | grep -E '^/(navigation_scan_relay|lidar_loc|move_base)$'
+rostopic info /scan
+rostopic echo -n 1 /odom_raw
+timeout 5 rosrun tf tf_echo map base_link
+```
+
+2026-07-21 曾发生 relay 在完整 launch 开始约两秒后以 exit code 1 退出：随后没有 `/scan`，
+`lidar_loc` 不会发布 `map -> odom`，上述代价地图警告随之出现。该次异常的启动前 stderr
+没有写进 ROS 日志；relay 文件本身的 Python 2 编译、ROS 依赖、可执行权限和 LF shebang 均已
+验证正常，且它可以单独保持运行。若复现，保留并记录终端中
+`[navigation_scan_relay-8] process has died` 前后的完整输出；不要在 `/odom_raw` 为 `NaN`
+或 `map -> base_link` 缺失时发送 RViz 目标。若出现 `NaN`，先发布零速度并重启导航/底盘
+里程计链路，再继续检查。
+
+本次变更已按用户指示同步到小车进行静态验证；不要创建小车端备份、不要提交或推送 GitHub。
 
 ## ROS Melodic 终端恢复
 
@@ -400,7 +533,7 @@ python2 /opt/ros/melodic/bin/roslaunch yolo2025 2026.launch startup_goal_enabled
 
 CymPlanner 只保留并加载 `$(find cym_planner)/config/ucar_cym_planner_params.yaml`；参数根键为 `cym_planner/CymPlanner`。插件同时兼容 move_base 传入的短名称和完整名称，并始终回退读取该规范命名空间，防止参数缺失时悄悄退回到源码默认的 `0.2 m/s`、`0.5 rad/s`。正常行进的线速度不再按车头与路径夹角做 25%～100% 的额外缩放；仍受 `max_vel_x`、搬运模式比例、碰撞检查和底盘 `linear_speed_max` 限制。修改 `cym_planner.cpp` 后必须先执行本节的 `catkin_make -DCATKIN_WHITELIST_PACKAGES="cym_planner;jie_ware"`，再重启 launch 才会加载新插件库。旧 JSON 示例已删除，不参与真机运行。
 
-当前 2026 导航的局部代价地图与全局代价地图使用同一足迹 `0.342 m × 0.256 m`（`±0.171 m`、`±0.128 m`），使全局路径、局部碰撞检查和 RViz 车体模型一致。局部滚动窗口为 `5.0 m × 5.0 m`、分辨率 `0.03 m`、更新/发布频率 `12/5 Hz`、障碍物/清除范围 `3.0/4.0 m`、`inflation_radius: 0.07 m`、`cost_scaling_factor: 4.0`。真机仍保留 `map` / `base_link` 坐标系和 `/scan_filtered` 局部观测；这两个接口不能改为仿真的 `odom` / `base_footprint` / `/scan`，否则会破坏 `lidar_loc` 定位与实车离群点过滤。全局代价地图 `inflation_radius` 为 `0.21 m`，全局插件顺序为 `static_layer → obstacle_layer → inflation_layer`。修改代价地图或 CymPlanner 参数后，必须停止并重新执行上述 `roslaunch` 命令，运行中的 `move_base` 不会自动重新加载 YAML。
+当前 2026 导航的局部代价地图与全局代价地图使用同一足迹 `0.342 m × 0.256 m`（`±0.171 m`、`±0.128 m`），使全局路径、局部碰撞检查和 RViz 车体模型一致。局部滚动窗口为 `2.0 m × 2.0 m`、分辨率 `0.03 m`、更新/发布频率 `12/5 Hz`、障碍物/清除范围 `3.0/4.0 m`、`inflation_radius: 0.07 m`、`cost_scaling_factor: 4.0`。真机仍保留 `map` / `base_link` 坐标系和 `/scan_filtered` 局部观测；这两个接口不能改为仿真的 `odom` / `base_footprint` / `/scan`，否则会破坏 `lidar_loc` 定位与实车离群点过滤。全局代价地图 `inflation_radius` 为 `0.205 m`，全局插件顺序为 `static_layer → obstacle_layer → inflation_layer`。修改代价地图或 CymPlanner 参数后，必须停止并重新执行上述 `roslaunch` 命令，运行中的 `move_base` 不会自动重新加载 YAML。
 
 当前激光数据经 `/scan_raw → 2026.py → /scan` 中继；`scan_scale` 为 `1.0`，因此 `/scan` 保持原始距离。`lidar_loc` 始终订阅原始 `/scan`。`2026.launch` 同时启动 `jie_ware/lidar_filter_node`，以 `0.10 m` 的近邻差阈值删除单束离群回波并发布 `/scan_filtered`；局部代价地图订阅该过滤话题。全局代价地图仍只订阅 `2026.py` 发布的 `/scan_global_obstacles`，不得把定位或全局静态墙过滤改接为 `/scan_filtered`。
 

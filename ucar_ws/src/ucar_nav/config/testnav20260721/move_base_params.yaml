@@ -1,26 +1,18 @@
 shutdown_costmaps: false
 
 controller_frequency: 20.0
-# CymPlanner returns false as soon as its lookahead footprint enters a blocked
-# path segment.  Recover/replan promptly instead of continuing a stale plan.
 controller_patience: 0.5
-
-# Replan quickly after the global obstacle layer receives a new laser hit.
 planner_frequency: 3.0
 planner_patience: 3.0
-
 oscillation_timeout: 5.0
 oscillation_distance: 0.01
 
-# Planner selection
-base_global_planner: "global_planner/GlobalPlanner"  
+base_global_planner: "global_planner/GlobalPlanner"
 base_local_planner: "cym_planner/CymPlanner"
-
 max_planning_retries: 3
 
 recovery_behavior_enabled: true
 clearing_rotation_allowed: true
-
 recovery_behaviors:
   - name: 'conservative_reset'
     type: 'clear_costmap_recovery/ClearCostmapRecovery'
@@ -28,10 +20,9 @@ recovery_behaviors:
     type: 'rotate_recovery/RotateRecovery'
   - name: 'aggressive_reset'
     type: 'clear_costmap_recovery/ClearCostmapRecovery'
-    
+
 conservative_reset:
   reset_distance: 1.0
-  #layer_names: [static_layer, obstacle_layer, inflation_layer]
   layer_names: [obstacle_layer]
 
 aggressive_reset:
@@ -40,11 +31,10 @@ aggressive_reset:
 
 super_reset:
   reset_distance: 5.0
-  #layer_names: [static_layer, obstacle_layer, inflation_layer]
   layer_names: [obstacle_layer]
 
 move_slow_and_clear:
   clearing_distance: 0.5
   limited_trans_speed: 0.1
-  limited_rot_speed: 0.4 #0.4
+  limited_rot_speed: 0.4
   limited_distance: 0.3

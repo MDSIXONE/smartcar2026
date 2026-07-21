@@ -6,26 +6,46 @@
     <arg name="initial_pose_x" default="-0.25"/>
     <arg name="initial_pose_y" default="2.75"/>
     <arg name="initial_pose_a" default="0"/>
-    <arg name="startup_goal_enabled" default="true"/>
-
     <!-- RViz-only chassis model; it is a visual on the existing base_link and
          does not create TF, collision geometry, or a control dependency. -->
     <param name="robot_description" textfile="$(find yolo2025)/urdf/ucar_2026_visual.urdf"/>
 
-    <!-- group 内的 remap 作用于底盘驱动；/scan_raw 由 2026.py 以 scan_scale=1.0 转发为 /scan。 -->
+    <!-- The driver keeps its fixed /scan_raw output.  navigation_scan_relay
+         restores /scan for localization and publishes a separately filtered
+         global-obstacle stream. -->
     <group>
         <remap from="scan" to="scan_raw"/>
         <include file="$(find ucar_controller)/launch/ucar_bringup.launch"/>
     </group>
 
-    <!-- 启动USB摄像头驱动包 -->
-    <include file="$(find yolo2025)/launch/qrcode.launch">
-        <arg name="start_camera" value="true" />
-        <arg name="api_enabled" value="true" />
-    </include>
+    <!-- Camera is only a visual stream for RViz.  Do not include qrcode.launch:
+         it would also start QR/task logic that is outside manual navigation. -->
+    <node name="usb_cam" pkg="usb_cam" type="usb_cam_node" output="screen"
+          respawn="true" respawn_delay="2.0">
+        <param name="video_device" value="/dev/ucar_video"/>
+        <param name="image_width" value="640"/>
+        <param name="image_height" value="480"/>
+        <param name="pixel_format" value="yuyv"/>
+        <param name="camera_frame_id" value="usb_cam"/>
+        <param name="io_method" value="mmap"/>
+        <param name="framerate" value="30"/>
+        <param name="camera_info_url" type="string"
+               value="file://$(find ucar_cam)/camera_calibration.yaml"/>
+    </node>
 
-    <!-- 启动 Map server，发布地图（2026 新地图） -->
-    <arg name="map_file" default="$(find ucar_nav)/maps/iflysse_2026_direct.yaml" />
+    <!-- A transient Python/ROS registration failure must not leave lidar_loc
+         without /scan forever: retry the bridge before move_base is used. -->
+    <node pkg="yolo2025" type="navigation_scan_relay.py"
+          name="navigation_scan_relay" output="screen" respawn="true"
+          respawn_delay="2.0">
+        <param name="global_obstacle_filter_enabled" value="true"/>
+        <param name="global_static_filter_radius" value="0.22"/>
+        <param name="global_static_filter_threshold" value="65"/>
+        <param name="global_transform_max_age" value="0.20"/>
+    </node>
+
+    <!-- Use the field-wall map without middle vertices for real navigation. -->
+    <arg name="map_file" default="$(find ucar_nav)/maps/iflysse_field_walls_without_middle_vertices.yaml" />
     <node name="map_server" pkg="map_server" type="map_server" args="$(arg map_file)" output="screen">
         <param name="frame_id" value="map" />
     </node>
@@ -52,70 +72,9 @@
         <param name="outlier_threshold" value="0.10"/>
     </node>
 
-    <!-- 启动 TEB / move_base：TEB 直接发布 /cmd_vel，由 base_driver 消费。 -->
-    <!-- 2026 TEB trial; cym_move_base_omni_2026.launch remains rollback path. -->
-    <include file="$(find ucar_nav)/launch/teb_move_base_omni_2026.launch"/>
+    <!-- Same move_base/CymPlanner flow as the simulation.  The plugin writes
+         /cmd_vel directly to the chassis driver; RViz is the only goal source. -->
+    <include file="$(find ucar_nav)/launch/cym_move_base_omni_2026.launch"/>
 
     <node name="robot_pose_publisher" pkg="robot_pose_publisher" type="robot_pose_publisher"/>
-
-    <!-- 语音唤醒（如需 /awake_flag 触发任务，取消下面注释） -->
-    <!-- <include file="$(find xf_mic_asr_offline)/launch/mic_init.launch" /> -->
-
-    <!-- 开启语音合成 -->
-    <include file="$(find xf_tts_offline)/launch/xf_tts.launch" />
-
-    <!-- 仅转发激光并按需发送一个默认目标；手动导航由 RViz 直接发送给 move_base。 -->
-    <node pkg="yolo2025" name="navigation_2026" type="2026.py" output="screen" respawn="false">
-        <!-- lidar_loc consumes raw /scan.  lidar_filter_node publishes the
-             isolated-return-filtered /scan_filtered for the local costmap;
-             only the global obstacle layer consumes /scan_global_obstacles. -->
-        <param name="global_obstacle_filter_enabled" value="true"/>
-        <param name="global_static_filter_radius" value="0.22"/>
-        <param name="global_static_filter_threshold" value="65"/>
-        <param name="startup_goal_enabled" value="$(arg startup_goal_enabled)"/>
-        <param name="startup_goal_x" value="-1.734"/>
-        <param name="startup_goal_y" value="2.305"/>
-        <!-- 先到顺时针 270°（d）；二维码序列最终由 CymPlanner 转到顺时针 90°（i）。 -->
-        <param name="startup_goal_yaw" value="1.570796"/>
-        <!-- Wait for lidar/odom and both costmaps to begin publishing before
-             the script checks that map -> base_link has settled. -->
-        <param name="startup_goal_delay" value="15.0"/>
-        <param name="startup_pose_settle_seconds" value="3.0"/>
-        <param name="startup_pose_settle_distance" value="0.05"/>
-        <param name="startup_plan_settle_samples" value="5"/>
-        <!-- 固定延时后还会等待定位与 /move_base/make_plan 返回有效路径，避免过早发送目标。 -->
-        <param name="startup_goal_ready_timeout" value="90.0"/>
-        <param name="qr_scan_enabled" value="true"/>
-        <param name="qr_scan_min_count" value="3"/>
-        <!-- 扫码器实测需要约 2~3.4 秒才稳定输出新码；3.5 秒避免在解码前切换朝向。 -->
-        <param name="qr_scan_hold_sec" value="3.5"/>
-        <param name="qr_scan_timeout" value="40.0"/>
-        <!-- 单个二维码朝向目标最多等待 6 秒；超时后取消旋转并在当前位置继续短暂扫描。 -->
-        <param name="qr_heading_goal_timeout" value="6.0"/>
-        <!-- 扫码后仍用 move_base；对角目标自动插入格心，逐段规划。 -->
-        <param name="production_route_enabled" value="true"/>
-        <param name="production_square_centers_path"
-               value="$(find yolo2025)/config/production_square_centers.json"/>
-        <rosparam param="production_route_numbers">[2, 12, 22, 32, 31, 21, 11, 1]</rosparam>
-        <!-- 每段平移交给 move_base；抵达格心后才原地对准下一段。 -->
-        <param name="production_linear_speed" value="0.25"/>
-        <param name="production_arrival_tolerance" value="0.05"/>
-        <!-- lidar_loc may refresh after the 5 cm move_base completion; this
-             audit guard avoids treating a few millimetres of post-result TF
-             motion as a failed centre goal. -->
-        <param name="production_arrival_verification_tolerance" value="0.08"/>
-        <param name="production_heading_tolerance" value="0.07"/>
-        <param name="production_alignment_timeout" value="8.0"/>
-        <param name="production_alignment_control_rate" value="20.0"/>
-        <param name="production_alignment_kp" value="1.2"/>
-        <param name="production_alignment_max_angular_speed" value="0.5"/>
-        <!-- 中部阶段关闭局部障碍叠加；全局层保留已有代价，仅冻结新激光输入。 -->
-        <param name="local_obstacle_layer" value="/move_base/local_costmap/obstacle_layer"/>
-        <!-- Match the global-costmap footprint: 0.342 m by 0.256 m. -->
-        <rosparam param="robot_footprint">[[0.171, -0.128], [0.171, 0.128], [-0.171, 0.128], [-0.171, -0.128]]</rosparam>
-        <param name="footprint_safety_margin" value="0.05"/>
-        <param name="cym_holonomic_mode_param" value="/move_base/cym_planner/CymPlanner/holonomic_mode"/>
-        <param name="cym_task_max_vel_param" value="/move_base/cym_planner/CymPlanner/task_max_vel"/>
-    </node>
-
 </launch>
