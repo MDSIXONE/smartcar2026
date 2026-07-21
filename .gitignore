@@ -1,5 +1,6 @@
 # Local history, backups, and exported archives
 /back/
+/simulation/
 /.agents/
 /cur/
 /ucar_ws_source.tar.gz
