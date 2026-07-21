@@ -38,6 +38,8 @@ camera, or production-route logic.
   `/usb_cam/image_raw` Image panel.
 - `docs/quickstart.md` and `docs/operations.md`: record the RViz-only flow,
   build, launch, verification, and safety limits.
+- `.gitignore`: excludes the root `simulation/` workspace from the
+  vehicle-only `simulation_real` branch.
 
 ## Environment adaptation
 
@@ -114,6 +116,11 @@ the prior `iflysse_2026_direct.yaml` map.
   the vehicle launch was restarted at zero speed.  The running node reports
   global inflation `0.205`, local size `2 x 2`, finite stationary `/odom_raw`,
   and a live `map -> base_link` transform.
+- The real-vehicle changes were committed on `simulation_real`
+  (`55af7cf`).  A follow-up commit (`c910537`) removes the inherited root
+  `simulation/` workspace from that branch and ignores it for future commits.
+  The local workspace was intentionally not retained; existing remote branches
+  such as `size-cymplanner` were not altered.
 
 ## Known limitations
 
@@ -121,7 +128,8 @@ The lookahead Marker is published only after move_base receives a path.  A
 vehicle must not receive an RViz goal until `/odom_raw` is finite and both
 `odom -> base_link` and `map -> base_link` transforms are available.  The
 required runtime files have been transferred to the vehicle and validated only
-while stationary; the local Git worktree has not been committed or pushed.
+while stationary.  The source-only changes are committed and pushed on
+`simulation_real`; the root `simulation/` workspace is not part of that branch.
 
 ## Recorded issue: 2026-07-21 missing `map -> base_link` after full launch
 

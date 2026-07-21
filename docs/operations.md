@@ -869,6 +869,7 @@ python2 /opt/ros/melodic/bin/roslaunch yolo2025 2026.launch startup_goal_enabled
 ```bash
 git status --short
 git check-ignore -v ucar_ws_source.tar.gz \
+  simulation/ \
   ucar_ws/src/ucar_yolo/scripts/yolov4.weights \
   ucar_ws/src/xf_mic_asr_offline/config/appid_params.yaml
 ```
@@ -894,6 +895,23 @@ git push
 ```
 
 仓库默认私有。不要用 `--public` 发布设备地址、地图、模型、厂商资源或任何本机凭据；模型权重和 `appid_params.yaml` 保持为本地配置。
+
+### `simulation_real` 真机发布分支
+
+`simulation_real` 只发布真机导航所需的源码、地图、配置和文档。根目录
+`simulation/` 是本地仿真工作区，不得加入该分支；当前分支通过 `.gitignore` 忽略它，
+且 `HEAD` 中没有这个目录。发布或复核前执行：
+
+```bash
+git switch simulation_real
+git status --short
+git check-ignore -v --no-index simulation/
+git ls-tree -d --name-only HEAD simulation
+git push
+```
+
+`git check-ignore` 应显示根 `.gitignore` 的 `/simulation/` 规则；最后一条
+`git ls-tree` 不应有输出。不要删除或改写 `size-cymplanner` 等既有远端分支。
 
 ## 本机 Simulation 部署（WSL Ubuntu 20.04）
 
