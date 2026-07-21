@@ -795,6 +795,43 @@ rosservice call /controller_manager/list_controllers
 rostopic list
 ```
 
+### Simulation CymPlanner 前视 footprint 验收
+
+该改动增加了 `visualization_msgs` 依赖并修改了 `cym_planner` C++ 源码；首次
+同步后必须重新构建该包。以下命令仅用于本机 WSL 仿真，不会启动小车本机
+`roscore`。每个 `source` 之后都显式恢复唯一的 WSL ROS Master：
+
+```bash
+cd ~/smartcar2026-simulation
+source /opt/ros/noetic/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+export ROS_IP=192.168.8.197
+catkin_make --pkg cym_planner
+source devel/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+export ROS_IP=192.168.8.197
+roslaunch car3 task3_prepare.launch gui:=false rviz:=false
+```
+
+在另一个已加载相同 ROS 环境的 WSL 终端中，以下只读检查应显示 `0.3`，并在
+规划器收到路径后显示 latched Marker：
+
+```bash
+cd ~/smartcar2026-simulation
+source /opt/ros/noetic/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+source devel/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+export ROS_IP=192.168.8.197
+rosparam get /move_base/CymPlanner/obstacle_lookahead_distance
+rostopic echo -n 1 /move_base/CymPlanner/lookahead_footprint
+```
+
+`task3_prepare.launch` 不发送导航目标。若需要发送会导致运动的目标以验证 Marker
+位置，先检查 `/odom_raw` 和 `odom -> base_link`、`map -> base_link` TF。只要出现
+`NaN` 或 `TF_NAN_INPUT`，先发布零速度并重启导航/底盘里程计链路，确认恢复有限值
+和两个 TF 后才可继续。
+
 ### Simulation 物块可见性验收
 
 `task3_prepare.launch` 启动完成后，确认 `/gazebo/get_world_properties`
