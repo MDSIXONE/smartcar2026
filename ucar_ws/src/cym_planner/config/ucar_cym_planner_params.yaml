@@ -1,45 +1,44 @@
 cym_planner/CymPlanner:
-  # 本地规划器使用的车体坐标系名称，通常无需调整。
+  # 真机局部控制直接使用离群点过滤后的激光数据。
   base_link_frame: base_link
-  # 里程计坐标系名称，通常无需调整。
-  odom_frame: odom
+  scan_topic: /scan_filtered
+  scan_timeout: 0.4
+  scan_min_range: 0.03
+  scan_max_range: 3.0
 
-  # move_base directly publishes /cmd_vel. These are normal, safety-oriented command limits.
-  # The chassis independently imposes its own final limit.
-  # 直线距离误差的比例增益；提高会更快达到 max_vel_x，但过大可能造成抖动或打滑。
+  # 使用真实车体 footprint 外扩 3.5 cm 做激光轨迹扫掠。
+  safety_margin: 0.035
+  braking_deceleration: 3.0
+  reaction_time: 0.05
+
+  # 路径跟踪保持真机安全速度；不采用开发环境中的高速参数。
+  lookahead_distance: 0.5
   linear_x_gain: 1.5
-  # 直线距离误差的微分增益；用于抑制误差快速变化时的突变。
-  linear_x_kd: 0.5
-  # 启用后，规划器按车体系的 X/Y 位置误差同时输出 linear.x 与 linear.y；行驶阶段不预转最终朝向。
-  holonomic_mode: false
-  # 横向（车体系 Y）位置误差的 P/D 增益。1.5 对应 1 m 横向误差时 1.5 m/s 的未限幅指令。
-  linear_y_gain: 1.5
-  linear_y_kd: 0.0
-  # 平移速度命令上限，单位 m/s；实际速度仍可能被底盘固件、供电和机械负载限制。
-  max_vel_x: 0.5
-  # 横向速度命令上限，单位 m/s；与底盘最终限速共同生效。
-  max_vel_y: 0.1
-  # 任务节点可在单个任务阶段写入更低的平移限速；0 表示使用上面的正常限速。
-  task_max_vel: 0.0
-  # 行进时航向误差的比例增益（角速度 P）；提高会更积极转向，过大可能造成来回摆动。
   angular_gain: 2.5
-  # 行进时航向误差的微分增益（角速度 D）；用于抑制航向误差快速变化造成的过冲。
-  angular_kd: 0.4
-  # 行进过程的角速度命令上限，单位 rad/s。
+  max_vel_x: 0.5
   max_vel_theta: 1.0
 
-  # 到达目标位置后的最终朝向比例增益。
+  # 终点位置与朝向控制。
+  goal_position_tolerance: 0.05
   final_yaw_gain: 2.0
-  # 最终朝向对准时的角速度命令上限，单位 rad/s。
   final_yaw_max_vel: 1.0
-  # 最终朝向判定为到位的误差阈值，单位 rad；减小会更精确但更容易持续微调。
   final_yaw_tolerance: 0.10
-  # 靠近目标点时的直线距离比例增益。
   final_linear_x_gain: 1.0
-
-  # 前方路径碰撞检查距离，单位 m；增大更保守，减小更容易贴近障碍物。
-  obstacle_lookahead_distance: 0.8
-  # 代价地图障碍阈值（0~255）；253 及以上通常是膨胀后的不可通行区域。
-  obstacle_cost_threshold: 253
-  # 搬运/任务模式的速度比例；源码会将其限制在不大于 1.0，不能用它提高速度。
   carry_speed_scale: 1.0
+
+  # 直接激光轨迹采样与评分。
+  simulation_time: 0.3
+  simulation_step: 0.05
+  v_samples: 7
+  w_samples: 9
+  path_distance_weight: 4.0
+  heading_weight: 0.8
+  clearance_weight: 0.5
+  velocity_weight: 0.5
+  angular_velocity_weight: 0.05
+  minimum_progress_velocity: 0.05
+  minimum_turn_velocity: 0.10
+
+  # 代价地图仅用于辅助触发全局重规划。
+  obstacle_lookahead_distance: 0.30
+  obstacle_cost_threshold: 253

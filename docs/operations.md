@@ -450,21 +450,19 @@ export ROS_MASTER_URI=http://192.168.8.197:11311
 roslaunch yolo2025 2026.launch
 ```
 
-当 CymPlanner、2026 任务脚本或 2026 地图有变更时，先从本机同步以下文件，再在小车端执行上面的 `catkin_make`。常规变更不创建新备份：
+当 CymPlanner 有变更时，先从本机同步源码、头文件、依赖声明和参数，再在小车端执行
+上面的 `catkin_make`：
 
 ```bash
 scp ucar_ws/src/cym_planner/src/cym_planner.cpp \
   ucar@192.168.8.231:~/ucar_ws/src/cym_planner/src/
+scp ucar_ws/src/cym_planner/include/cym_planner.h \
+  ucar@192.168.8.231:~/ucar_ws/src/cym_planner/include/
+scp ucar_ws/src/cym_planner/CMakeLists.txt \
+  ucar_ws/src/cym_planner/package.xml \
+  ucar@192.168.8.231:~/ucar_ws/src/cym_planner/
 scp ucar_ws/src/cym_planner/config/ucar_cym_planner_params.yaml \
   ucar@192.168.8.231:~/ucar_ws/src/cym_planner/config/
-scp ucar_ws/src/yolo2025/scripts/2026.py \
-  ucar@192.168.8.231:~/ucar_ws/src/yolo2025/scripts/
-scp ucar_ws/src/yolo2025/launch/2026.launch \
-  ucar@192.168.8.231:~/ucar_ws/src/yolo2025/launch/
-scp ucar_ws/src/jie_ware/src/lidar_loc.cpp \
-  ucar@192.168.8.231:~/ucar_ws/src/jie_ware/src/
-scp ucar_ws/src/ucar_nav/maps/iflysse_2026_direct.pgm \
-  ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/maps/
 ```
 
 构建只写入新的库文件，不会替换已运行进程内存中的插件。请在当前 launch 终端按 `Ctrl-C` 后，使用以下命令手动启动；`startup_goal_enabled:=false` 会确保启动时不自动行车：
@@ -529,13 +527,25 @@ python2 /opt/ros/melodic/bin/roslaunch yolo2025 2026.launch startup_goal_enabled
 
 建图和导航发布的 `/scan` 仍遵循 ROS 标准 `LaserScan` 约定（`+X` 前、`+Y` 左）。但当前 YDLidar 任务地图与 `lidar_loc` 内部的 OpenCV 图像行坐标相配，`lidar_loc.cpp` 必须保留 `y_laser = -range*sin(angle)` 的内部镜像；不要仅依据通用 ROS 约定把它改成正号。更改该符号前必须以静态墙体重合率验证。
 
-当前 CymPlanner 的正常命令上限为线速度 `max_vel_x: 0.5 m/s`、横向速度 `max_vel_y: 0.1 m/s`、行进和末端对准角速度 `max_vel_theta: 1.0 rad/s`、`final_yaw_max_vel: 1.0 rad/s`。线速度 P/D 参数为 `linear_x_gain: 1.5`、`linear_x_kd: 0.5`；行进航向角速度 P/D 参数为 `angular_gain: 2.5`、`angular_kd: 0.4`。最终朝向和靠近目标点的增益仍为 `final_yaw_gain: 2.0`、`final_linear_x_gain: 1.0`。`move_base` 直接发布 `/cmd_vel`，不经过 `2026.py` 的速度中继或缩放；底盘驱动限幅仍为线速度 `3.0 m/s`、角速度 `3.14 rad/s`。这些是 ROS 命令上限，绝不等同于实际车速；`carry_speed_scale` 保持 `1.0`，因为源代码会将它钳制在 `1.0` 以内。
+当前 CymPlanner 的命令上限为线速度 `max_vel_x: 0.5 m/s`、行进角速度
+`max_vel_theta: 1.0 rad/s`、末端对准角速度 `final_yaw_max_vel: 1.0 rad/s`。
+规划器直接订阅 `/scan_filtered`，以 `0.3 s` 预测窗口、`0.05 s` 步长和 `7 × 9`
+组速度样本做激光轨迹碰撞检测。激光超过 `0.4 s` 未更新、没有有效点或所有候选轨迹
+都碰撞时，它会输出零速度并返回失败；非末端阶段没有可前进轨迹时会请求全局重规划，
+但允许选择能够减小目标航向误差的原地旋转轨迹。
 
-CymPlanner 只保留并加载 `$(find cym_planner)/config/ucar_cym_planner_params.yaml`；参数根键为 `cym_planner/CymPlanner`。插件同时兼容 move_base 传入的短名称和完整名称，并始终回退读取该规范命名空间，防止参数缺失时悄悄退回到源码默认的 `0.2 m/s`、`0.5 rad/s`。正常行进的线速度不再按车头与路径夹角做 25%～100% 的额外缩放；仍受 `max_vel_x`、搬运模式比例、碰撞检查和底盘 `linear_speed_max` 限制。修改 `cym_planner.cpp` 后必须先执行本节的 `catkin_make -DCATKIN_WHITELIST_PACKAGES="cym_planner;jie_ware"`，再重启 launch 才会加载新插件库。旧 JSON 示例已删除，不参与真机运行。
+CymPlanner 只加载 `$(find cym_planner)/config/ucar_cym_planner_params.yaml`，参数根键为
+`cym_planner/CymPlanner`。代价地图不再直接决定局部速度，只在沿全局路径前视
+`0.30 m` 命中 `cost >= 253` 时辅助触发重规划。修改 C++、头文件或依赖声明后必须
+重新构建插件并重启 launch；只修改 YAML 时无需编译，但同样必须重启。
 
-当前 2026 导航的局部代价地图与全局代价地图使用同一足迹 `0.342 m × 0.256 m`（`±0.171 m`、`±0.128 m`），使全局路径、局部碰撞检查和 RViz 车体模型一致。局部滚动窗口为 `2.0 m × 2.0 m`、分辨率 `0.03 m`、更新/发布频率 `12/5 Hz`、障碍物/清除范围 `3.0/4.0 m`、`inflation_radius: 0.07 m`、`cost_scaling_factor: 4.0`。真机仍保留 `map` / `base_link` 坐标系和 `/scan_filtered` 局部观测；这两个接口不能改为仿真的 `odom` / `base_footprint` / `/scan`，否则会破坏 `lidar_loc` 定位与实车离群点过滤。全局代价地图 `inflation_radius` 为 `0.205 m`，全局插件顺序为 `static_layer → obstacle_layer → inflation_layer`。修改代价地图或 CymPlanner 参数后，必须停止并重新执行上述 `roslaunch` 命令，运行中的 `move_base` 不会自动重新加载 YAML。
+当前 2026 导航的局部代价地图与全局代价地图使用同一足迹 `0.342 m × 0.256 m`（`±0.171 m`、`±0.128 m`），使全局路径、局部碰撞检查和 RViz 车体模型一致。局部滚动窗口为 `2.0 m × 2.0 m`、分辨率 `0.03 m`、更新/发布频率 `12/5 Hz`、障碍物/清除范围 `3.0/4.0 m`、`inflation_radius: 0.07 m`、`cost_scaling_factor: 4.0`。真机必须保留 `map` / `base_link` 坐标系和 `/scan_filtered` 局部观测，否则会破坏 `lidar_loc` 定位与离群点过滤。全局代价地图 `inflation_radius` 为 `0.205 m`，全局插件顺序为 `static_layer → obstacle_layer → inflation_layer`。修改代价地图或 CymPlanner 参数后，必须停止并重新执行上述 `roslaunch` 命令，运行中的 `move_base` 不会自动重新加载 YAML。
 
-当前激光数据经 `/scan_raw → 2026.py → /scan` 中继；`scan_scale` 为 `1.0`，因此 `/scan` 保持原始距离。`lidar_loc` 始终订阅原始 `/scan`。`2026.launch` 同时启动 `jie_ware/lidar_filter_node`，以 `0.10 m` 的近邻差阈值删除单束离群回波并发布 `/scan_filtered`；局部代价地图订阅该过滤话题。全局代价地图仍只订阅 `2026.py` 发布的 `/scan_global_obstacles`，不得把定位或全局静态墙过滤改接为 `/scan_filtered`。
+当前激光数据经 `/scan_raw → navigation_scan_relay → /scan` 中继，距离保持原值；
+`lidar_loc` 始终订阅原始 `/scan`。`jie_ware/lidar_filter_node` 以 `0.10 m` 的近邻差阈值
+删除单束离群回波并发布 `/scan_filtered`；局部代价地图和 CymPlanner 直接激光控制均订阅
+该过滤话题。全局代价地图继续使用 `/scan_global_obstacles`，不得把定位或全局静态墙过滤
+改接为 `/scan_filtered`。
 
 修改该滤波链路时，上传 `2026.launch` 和 `costmap_common_params.yaml` 并重启导航；`lidar_filter_node` 已是 `jie_ware` 的构建目标。若小车端尚未构建过该包，先执行 `catkin_make --pkg jie_ware`。无目标启动后先确认滤波话题正常，再进行导航：
 

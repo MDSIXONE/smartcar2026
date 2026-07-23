@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.0.2)
 project(cym_planner)
 
 ## Compile as C++11, supported in ROS Kinetic and newer
-# add_compile_options(-std=c++11)
+add_compile_options(-std=c++11)
 
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
@@ -13,6 +13,7 @@ find_package(catkin REQUIRED COMPONENTS
   nav_core
   pluginlib
   roscpp
+  sensor_msgs
   std_msgs
   tf
   tf2_ros
@@ -107,7 +108,7 @@ find_package(catkin REQUIRED COMPONENTS
 catkin_package(
   INCLUDE_DIRS include
   LIBRARIES cym_planner
-  CATKIN_DEPENDS costmap_2d geometry_msgs nav_core pluginlib roscpp std_msgs tf tf2_ros visualization_msgs
+  CATKIN_DEPENDS costmap_2d geometry_msgs nav_core pluginlib roscpp sensor_msgs std_msgs tf tf2_ros visualization_msgs
 )
 
 ###########

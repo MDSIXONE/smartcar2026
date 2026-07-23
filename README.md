@@ -20,6 +20,13 @@ SmartCar 2026 真机 ROS 1 工程：包含导航与视觉工作区、CymPlanner 
 
 首次使用需要在小车的 ROS Melodic 环境下构建所需 Catkin 包。
 
+## 当前导航安全链路
+
+CymPlanner 直接使用 `/scan_filtered` 激光点对候选速度轨迹做车体扫掠碰撞检查。
+激光数据缺失或超时、有效点为空、所有候选轨迹碰撞时，规划器会保持零速度并请求
+`move_base` 重新规划。代价地图继续负责全局路径约束，当前真机参数位于
+`ucar_ws/src/cym_planner/config/ucar_cym_planner_params.yaml`。
+
 ## 未纳入版本控制的内容
 
 为使仓库可推送且不泄露本机信息，以下内容只保留在本地：备份目录、构建输出、模型权重、厂商运行时二进制、生成的音视频/日志、压缩包和含有设备 App ID 的配置文件。
