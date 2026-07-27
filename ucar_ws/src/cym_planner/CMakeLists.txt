@@ -208,9 +208,6 @@ if(CATKIN_ENABLE_TESTING)
   catkin_add_gtest(cym_planner_final_yaw_test
     test/final_yaw_control_test.cpp
   )
-  catkin_add_gtest(cym_planner_velocity_profile_test
-    test/test_velocity_profile.cpp
-  )
 endif()
 
 ## Add gtest based cpp test target and link libraries

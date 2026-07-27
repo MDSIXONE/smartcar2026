@@ -1,50 +1,33 @@
 cym_planner/CymPlanner:
-  # Keep the real-vehicle frame and filtered lidar chain.
+  # 真机局部控制直接使用离群点过滤后的激光数据。
   base_link_frame: base_link
   scan_topic: /scan_filtered
   scan_timeout: 0.4
   scan_min_range: 0.03
   scan_max_range: 3.0
 
-  # Use the current simulation controller on the vehicle: origin/main path
-  # following guarded by direct lidar points swept over the full footprint.
-  navigation_mode: laser_avoidance
-  main_legacy_target_distance: 0.20
-  main_legacy_linear_x_gain: 1.5
-  main_legacy_linear_x_kd: 0.05
-  main_legacy_angular_gain: 2.5
+  # 使用真实车体 footprint 外扩 3.5 cm 做激光轨迹扫掠。
+  safety_margin: 0.035
+  braking_deceleration: 3.0
+  reaction_time: 0.05
 
-  # Preserve the proven real-vehicle limits instead of the simulation's
-  # high-speed Gazebo values.
-  main_legacy_max_vel_x: 0.5
-  main_legacy_max_vel_theta: 1.0
-  main_legacy_final_yaw_gain: 2.0
-  main_legacy_final_yaw_max_vel: 1.0
-  main_legacy_final_yaw_tolerance: 0.10
-  main_legacy_final_linear_x_gain: 1.0
-  main_legacy_goal_position_tolerance: 0.05
+  # 路径跟踪保持真机安全速度；不采用开发环境中的高速参数。
+  lookahead_distance: 0.5
+  linear_x_gain: 1.5
+  angular_gain: 2.5
+  max_vel_x: 0.5
+  max_vel_theta: 1.0
+
+  # 终点位置与朝向控制。
+  goal_position_tolerance: 0.05
+  final_yaw_gain: 2.0
+  final_yaw_max_vel: 1.0
+  final_yaw_tolerance: 0.10
+  final_linear_x_gain: 1.0
   carry_speed_scale: 1.0
 
-  # Project the 0.342 m x 0.256 m costmap footprint every 0.03 m over the
-  # next 0.30 m of the global path. Any filtered lidar touch fails closed and
-  # asks move_base/global_planner for a new route.
-  main_legacy_obstacle_lookahead_distance: 0.30
-  main_legacy_obstacle_cost_threshold: 253
-  laser_projection_step: 0.03
-  safety_margin: 0.035
-
-  # Retained by the imported simulation implementation for its bounded-stop
-  # and diagnostic helpers.
-  braking_deceleration: 3.0
-  minimum_moving_clearance: 0.10
-  laser_blocked_grace_period: 0.25
-  laser_blocked_hold_max_velocity: 0.10
-  laser_blocked_stop_deceleration: 0.25
-  laser_blocked_stop_angular_deceleration: 1.0
-  laser_command_linear_rate_limit: 0.50
-  laser_command_angular_rate_limit: 4.0
-  reaction_time: 0.05
-  simulation_time: 0.30
+  # 直接激光轨迹采样与评分。
+  simulation_time: 0.3
   simulation_step: 0.05
   v_samples: 7
   w_samples: 9
@@ -55,3 +38,7 @@ cym_planner/CymPlanner:
   angular_velocity_weight: 0.05
   minimum_progress_velocity: 0.05
   minimum_turn_velocity: 0.10
+
+  # 代价地图仅用于辅助触发全局重规划。
+  obstacle_lookahead_distance: 0.30
+  obstacle_cost_threshold: 253

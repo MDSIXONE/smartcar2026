@@ -458,10 +458,6 @@ scp ucar_ws/src/cym_planner/src/cym_planner.cpp \
   ucar@192.168.8.231:~/ucar_ws/src/cym_planner/src/
 scp ucar_ws/src/cym_planner/include/cym_planner.h \
   ucar@192.168.8.231:~/ucar_ws/src/cym_planner/include/
-scp ucar_ws/src/cym_planner/include/cym_planner/velocity_profile.h \
-  ucar@192.168.8.231:~/ucar_ws/src/cym_planner/include/cym_planner/
-scp ucar_ws/src/cym_planner/test/test_velocity_profile.cpp \
-  ucar@192.168.8.231:~/ucar_ws/src/cym_planner/test/
 scp ucar_ws/src/cym_planner/CMakeLists.txt \
   ucar_ws/src/cym_planner/package.xml \
   ucar@192.168.8.231:~/ucar_ws/src/cym_planner/
@@ -531,42 +527,17 @@ python2 /opt/ros/melodic/bin/roslaunch yolo2025 2026.launch startup_goal_enabled
 
 建图和导航发布的 `/scan` 仍遵循 ROS 标准 `LaserScan` 约定（`+X` 前、`+Y` 左）。但当前 YDLidar 任务地图与 `lidar_loc` 内部的 OpenCV 图像行坐标相配，`lidar_loc.cpp` 必须保留 `y_laser = -range*sin(angle)` 的内部镜像；不要仅依据通用 ROS 约定把它改成正号。更改该符号前必须以静态墙体重合率验证。
 
-当前 CymPlanner 使用与仿真一致的 `main_legacy` 路径跟踪控制律，前视目标距离为
-`0.20 m`。真机命令上限保持为线速度 `0.5 m/s`、行进角速度 `1.0 rad/s`、末端
-对准角速度 `1.0 rad/s`，不会加载仿真的高速 Gazebo 参数。规划器默认处于
-`laser_avoidance` 模式，直接订阅 `/scan_filtered`，沿全局路径未来 `0.30 m` 每隔
-`0.03 m` 投影一次完整车体 footprint。激光超过 `0.4 s` 未更新，或任一过滤后激光点
-进入投影车体时，它输出零速度并返回失败，请求 `move_base` 调用全局规划器重规划。
+当前 CymPlanner 的命令上限为线速度 `max_vel_x: 0.5 m/s`、行进角速度
+`max_vel_theta: 1.0 rad/s`、末端对准角速度 `final_yaw_max_vel: 1.0 rad/s`。
+规划器直接订阅 `/scan_filtered`，以 `0.3 s` 预测窗口、`0.05 s` 步长和 `7 × 9`
+组速度样本做激光轨迹碰撞检测。激光超过 `0.4 s` 未更新、没有有效点或所有候选轨迹
+都碰撞时，它会输出零速度并返回失败；非末端阶段没有可前进轨迹时会请求全局重规划，
+但允许选择能够减小目标航向误差的原地旋转轨迹。
 
 CymPlanner 只加载 `$(find cym_planner)/config/ucar_cym_planner_params.yaml`，参数根键为
-`cym_planner/CymPlanner`。默认激光投影模式不使用代价地图决定局部速度；如通过
-`/ucar/navigation_mode` 显式切换为 `main_legacy`，则沿全局路径前视 `0.30 m` 命中
-`cost >= 253` 时返回失败。修改 C++、头文件或依赖声明后必须重新构建插件并重启
-launch；只修改 YAML 时无需编译，但同样必须重启。
-
-部署后先运行不启动车轮的构建与测试：
-
-```bash
-cd ~/ucar_ws
-source /opt/ros/melodic/setup.bash
-catkin_make --pkg cym_planner -DCATKIN_ENABLE_TESTING=ON
-catkin_make run_tests_cym_planner
-catkin_test_results
-```
-
-重新启动前设置唯一 ROS Master，并禁用自动目标：
-
-```bash
-source ~/ucar_ws/devel/setup.bash
-unset ROS_HOSTNAME
-export ROS_IP=192.168.8.231
-export ROS_MASTER_URI=http://192.168.8.197:11311
-python2 /opt/ros/melodic/bin/roslaunch yolo2025 2026.launch startup_goal_enabled:=false
-```
-
-确认 `/odom_raw` 全部为有限值、`odom -> base_link` 与 `map -> base_link` TF 可用，且
-`rostopic echo -n 1 /move_base/cym_planner/CymPlanner/safety_state` 没有报告 stale scan
-后，才允许发送首个低风险 RViz 目标。
+`cym_planner/CymPlanner`。代价地图不再直接决定局部速度，只在沿全局路径前视
+`0.30 m` 命中 `cost >= 253` 时辅助触发重规划。修改 C++、头文件或依赖声明后必须
+重新构建插件并重启 launch；只修改 YAML 时无需编译，但同样必须重启。
 
 当前 2026 导航的局部代价地图与全局代价地图使用同一足迹 `0.342 m × 0.256 m`（`±0.171 m`、`±0.128 m`），使全局路径、局部碰撞检查和 RViz 车体模型一致。局部滚动窗口为 `2.0 m × 2.0 m`、分辨率 `0.03 m`、更新/发布频率 `12/5 Hz`、障碍物/清除范围 `3.0/4.0 m`、`inflation_radius: 0.07 m`、`cost_scaling_factor: 4.0`。真机必须保留 `map` / `base_link` 坐标系和 `/scan_filtered` 局部观测，否则会破坏 `lidar_loc` 定位与离群点过滤。全局代价地图 `inflation_radius` 为 `0.205 m`，全局插件顺序为 `static_layer → obstacle_layer → inflation_layer`。修改代价地图或 CymPlanner 参数后，必须停止并重新执行上述 `roslaunch` 命令，运行中的 `move_base` 不会自动重新加载 YAML。
 
