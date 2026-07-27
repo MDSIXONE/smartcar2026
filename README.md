@@ -22,9 +22,10 @@ SmartCar 2026 真机 ROS 1 工程：包含导航与视觉工作区、CymPlanner 
 
 ## 当前导航安全链路
 
-CymPlanner 直接使用 `/scan_filtered` 激光点对候选速度轨迹做车体扫掠碰撞检查。
-激光数据缺失或超时、有效点为空、所有候选轨迹碰撞时，规划器会保持零速度并请求
-`move_base` 重新规划。代价地图继续负责全局路径约束，当前真机参数位于
+CymPlanner 使用与当前仿真一致的 `main_legacy` 路径跟踪控制律，并直接使用
+`/scan_filtered` 激光点沿全局路径前视段投影完整车体。激光缺失、超时或任一激光点
+触碰投影车体时，规划器保持零速度并请求 `move_base` 重新规划。真机继续使用实测
+footprint、滤波激光接口和安全速度上限，参数位于
 `ucar_ws/src/cym_planner/config/ucar_cym_planner_params.yaml`。
 
 ## 未纳入版本控制的内容
