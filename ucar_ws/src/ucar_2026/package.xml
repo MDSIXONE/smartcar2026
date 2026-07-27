@@ -10,6 +10,7 @@
   <buildtool_depend>catkin</buildtool_depend>
 
   <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>cym_planner</exec_depend>
   <exec_depend>jie_ware</exec_depend>
   <exec_depend>map_server</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
