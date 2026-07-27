@@ -25,6 +25,7 @@ cym_planner/CymPlanner:
 - `max_vel_x`、`max_vel_theta`：真机命令速度上限。
 - `obstacle_lookahead_distance`、`obstacle_cost_threshold`：辅助代价地图重规划条件。
 
-修改 YAML 后无需重新编译，但必须重启 `roslaunch yolo2025 2026.launch`。修改
+修改 YAML 后无需重新编译，但必须重启 `roslaunch ucar_2026 2026.launch`。旧的
+`roslaunch yolo2025 2026.launch` 仅作为兼容 wrapper。修改
 `src/cym_planner.cpp`、`include/cym_planner.h`、`CMakeLists.txt` 或 `package.xml`
 后必须重新构建 `cym_planner`。

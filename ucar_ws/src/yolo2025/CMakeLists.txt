@@ -212,7 +212,6 @@ catkin_install_python(PROGRAMS
   scripts/2026.py
   scripts/mapping_keyboard.py
   scripts/mapping_scan_relay.py
-  scripts/navigation_scan_relay.py
   scripts/run.py
   scripts/line.py
   scripts/qrcode.py

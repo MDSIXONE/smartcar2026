@@ -1,7 +1,8 @@
 # 快速操作（环境已配置）
 
-本页只保留日常启动命令。唯一 ROS Master 为本机 WSL Ubuntu 20.04 的
-`http://192.168.8.197:11311`；不要在小车 `192.168.8.231` 上执行 `roscore`。
+本页只保留日常启动命令。唯一 ROS Master 为本机 WSL Ubuntu 20.04；当前地址与
+小车端配置以 [rosmaster/NETWORK_CONFIGURATION.md](../rosmaster/NETWORK_CONFIGURATION.md)
+为准，小车端不得执行 `roscore`。
 
 > 当前进行**真机测试**时，只执行下面“真机 2026 测试”章节的命令。不要同时启动
 > Gazebo、仿真 RViz 或 `task3_prepare.launch`。
@@ -28,10 +29,14 @@
 source /opt/ros/melodic/setup.bash
 source ~/ucar_ws/devel/setup.bash
 unset ROS_HOSTNAME
-export ROS_IP=192.168.8.231
-export ROS_MASTER_URI=http://192.168.8.197:11311
-python2 /opt/ros/melodic/bin/roslaunch yolo2025 2026.launch
+read -r -p '请输入 WSL Master 当前地址: ' MASTER_IP
+export ROS_MASTER_URI="http://${MASTER_IP}:11311"
+export ROS_IP="$(ip -4 route get "$MASTER_IP" | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+roslaunch ucar_2026 2026.launch
 ```
+
+上述网络变量必须放在所有 `source` 之后；也可按网络配置文档使用显式地址或
+`rosmaster.local`。小车只连接 WSL Master，不启动本机 `roscore`。
 
 启动后不需要发送任何目标。`navigation_scan_relay` 若遇到一次瞬态启动失败会在 2 秒后
 自动重试；它恢复 `/scan` 后，`lidar_loc` 才能发布 `map -> odom`。看到启动初期的
@@ -42,7 +47,7 @@ python2 /opt/ros/melodic/bin/roslaunch yolo2025 2026.launch
 在 WSL Ubuntu 20.04 的第二个终端输入：
 
 ```bash
-RVIZ_CONFIG=/mnt/d/WORK/ALLCODE/smartcar2026/simulationforreal/ucar_source_code/ucar_ws/src/yolo2025/rviz/navigation_2026.rviz \
+RVIZ_CONFIG=/mnt/d/WORK/ALLCODE/smartcar2026/simulationforreal/ucar_source_code/ucar_ws/src/ucar_2026/rviz/navigation_2026.rviz \
   ~/start_rviz.sh
 ```
 
@@ -89,11 +94,14 @@ timeout 5 rosrun tf tf_echo map base_link
 正常停止真机导航：在运行 `2026.launch` 的小车终端按 `Ctrl-C`。停止 RViz：在运行
 `start_rviz.sh` 的 WSL 终端按 `Ctrl-C`。
 
-如果误关了启动终端、任务仍在运行，在**任意新的小车终端**执行下面这一条；它会先发布
-零速度，再只停止 `yolo2025 2026.launch` 及其子节点，**不会**停止 WSL Master：
+如果误关了启动终端、任务仍在运行，在**任意新的小车终端**先提供当前 WSL Master
+地址，再执行停止脚本。它会先发布零速度，再只停止 `ucar_2026 2026.launch` 及其
+兼容 wrapper 子节点，**不会**停止 WSL Master：
 
 ```bash
-bash ~/ucar_ws/src/yolo2025/scripts/stop_2026_task.sh
+read -r -p '请输入 WSL Master 当前地址: ' MASTER_IP
+export MASTER_IP
+bash ~/ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh
 ```
 
 若 `rosnode list` 还显示旧节点但 `rosnode info <节点名>` 报 `connection refused`，它们是
@@ -112,10 +120,8 @@ bash ~/ucar_ws/src/yolo2025/scripts/stop_2026_task.sh
 ```bash
 cd ~/smartcar2026-simulation
 source /opt/ros/noetic/setup.bash
-export ROS_MASTER_URI=http://192.168.8.197:11311
 source devel/setup.bash
-export ROS_MASTER_URI=http://192.168.8.197:11311
-export ROS_IP=192.168.8.197
+source ~/.config/smartcar/ros_network.sh
 roslaunch car3 task3_prepare.launch gui:=true rviz:=true
 ```
 

@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>ucar_2026</name>
+  <version>0.0.0</version>
+  <description>Launch and support resources for the 2026 real UCar navigation setup.</description>
+
+  <maintainer email="ucar@todo.todo">ucar</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>jie_ware</exec_depend>
+  <exec_depend>map_server</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>robot_pose_publisher</exec_depend>
+  <exec_depend>roslaunch</exec_depend>
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>rostopic</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>tf</exec_depend>
+  <exec_depend>ucar_cam</exec_depend>
+  <exec_depend>ucar_controller</exec_depend>
+  <exec_depend>ucar_nav</exec_depend>
+  <exec_depend>usb_cam</exec_depend>
+
+  <export/>
+</package>
