@@ -9,8 +9,10 @@ local_costmap:
   # footprint safety independent of a momentary lidar occlusion.
   static_map: true
   rolling_window: true
-  width: 2.0
-  height: 2.0
+  # 1 m square is sufficient for the slow body-projection horizon and avoids
+  # copying/drawing unused cells on every local planner cycle.
+  width: 1.0
+  height: 1.0
   resolution: 0.03
   always_send_full_costmap: true
   plugins:

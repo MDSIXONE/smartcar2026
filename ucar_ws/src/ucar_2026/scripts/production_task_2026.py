@@ -544,15 +544,19 @@ class ProductionTask2026(object):
         observation = self.points[observation_number]
         observation_yaw = bearing(staging, observation)
         self.publish_state("QR_FACE_%d" % observation_number)
+        # Capture the sequence before turning so a code acquired while the
+        # chassis is settling at this new face is accepted immediately.
+        with self.lock:
+            baseline = self.qr_sequence
         self.navigate_coordinates(
             staging[0], staging[1], observation_yaw,
             "QR face point %d" % observation_number,
             require_plan=False)
 
-        with self.lock:
-            baseline = self.qr_sequence
-        detected = self.wait_for_fresh_qr(
-            baseline, self.qr_search_timeout)
+        detected = self.fresh_qr_after(baseline)
+        if detected is None:
+            detected = self.wait_for_fresh_qr(
+                baseline, self.qr_search_timeout)
         if detected is None:
             self.publish_state("QR_SEARCH_TURN_%d" % observation_number)
             detected = self.rotate_full_revolution(

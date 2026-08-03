@@ -133,7 +133,7 @@ relay 配置为 `respawn=true` 与 `2.0 s` 重试延迟：若其在启动阶段�
 接口。`testnav20260721` 是当前生效的导航配置档；其
 `global_costmap_common.yaml` 与 `local_costmap_common.yaml` 分别承载仿真的
 全局/局部层参数：全局使用 `3/5 Hz`、`0.01185 m`、`3.0/4.0 m`、`0.205 m/0.05`；局部
-使用 `8/3 Hz`、`2.0 m × 2.0 m`、`0.03 m`、`3.0/4.0 m`、`0.07 m/4.0`。全局仍消费
+使用 `8/3 Hz`、`1.0 m × 1.0 m`、`0.03 m`、`3.0/4.0 m`、`0.07 m/4.0`。全局仍消费
 静态墙体已掩除的 `/scan_global_obstacles`，局部仍消费 `/scan_filtered`，这是为真实
 雷达与地图的小对齐误差保留的安全适配。
 
@@ -1073,7 +1073,7 @@ python2 /opt/ros/melodic/bin/roslaunch ucar_2026 2026.launch
 确认 `/odom_raw` 全部为有限值、`odom -> base_link` 与 `map -> base_link` TF 可用后，
 才允许发送首个低风险 RViz 目标。
 
-当前 2026 导航的局部代价地图与全局代价地图使用同一足迹 `0.342 m × 0.256 m`（`±0.171 m`、`±0.128 m`），使全局路径、局部碰撞检查和 RViz 车体模型一致。局部滚动窗口为 `2.0 m × 2.0 m`、分辨率 `0.03 m`、更新/发布频率 `8/3 Hz`；全局更新/发布频率为 `3/5 Hz`；障碍物/清除范围 `3.0/4.0 m`、`inflation_radius: 0.07 m`、`cost_scaling_factor: 4.0`。真机必须保留 `map` / `base_link` 坐标系和 `/scan_filtered` 局部观测，否则会破坏 `lidar_loc` 定位与离群点过滤。全局代价地图 `inflation_radius` 为 `0.205 m`，全局插件顺序为 `static_layer → obstacle_layer → inflation_layer`。`body_projection` 已改为使用同一控制周期的局部代价地图快照，不再依赖全局代价地图发布；`global_costmap/always_send_full_costmap` 可按本文后续性能优化章节设为 `false`。修改代价地图或 CymPlanner 参数后，必须停止并重新执行上述 `roslaunch` 命令，运行中的 `move_base` 不会自动重新加载 YAML。
+当前 2026 导航的局部代价地图与全局代价地图使用同一足迹 `0.342 m × 0.256 m`（`±0.171 m`、`±0.128 m`），使全局路径、局部碰撞检查和 RViz 车体模型一致。局部滚动窗口为 `1.0 m × 1.0 m`、分辨率 `0.03 m`、更新/发布频率 `8/3 Hz`；全局更新/发布频率为 `3/5 Hz`；障碍物/清除范围 `3.0/4.0 m`、`inflation_radius: 0.07 m`、`cost_scaling_factor: 4.0`。真机必须保留 `map` / `base_link` 坐标系和 `/scan_filtered` 局部观测，否则会破坏 `lidar_loc` 定位与离群点过滤。body_projection 的弹性带同步限制为 `0.25 m`，避免完整 footprint 越出 1 m 局部图边界。全局代价地图 `inflation_radius` 为 `0.205 m`，全局插件顺序为 `static_layer → obstacle_layer → inflation_layer`。`body_projection` 已改为使用同一控制周期的局部代价地图快照，不再依赖全局代价地图发布；`global_costmap/always_send_full_costmap` 可按本文后续性能优化章节设为 `false`。修改代价地图或 CymPlanner 参数后，必须停止并重新执行上述 `roslaunch` 命令，运行中的 `move_base` 不会自动重新加载 YAML。
 
 当前激光数据经 `/scan_raw → navigation_scan_relay → /scan` 中继，距离保持原值；
 `lidar_loc` 始终订阅原始 `/scan`。`jie_ware/lidar_filter_node` 以 `0.10 m` 的近邻差阈值
@@ -1698,6 +1698,18 @@ roslaunch yolo2025 2026.launch full_task_enabled:=true
 全接触格统计和本地动态障碍检查；当前源码也会拒绝任何 `true` 请求。
 模式切换只能在车辆已停止、两个导航目标之间执行，不允许运动中切换。
 
+`elastic_enabled=true` 是模式 2 的预防性局部带状路径，不是脱困横移：仅当前真实
+footprint 完全安全而前视全局路径被 local 254/255 阻挡时，才在 `0.25 m` 带内尝试 `±0.02..±0.10 m`
+的平滑偏移；每个候选以 `0.015 m` 以下间距投影完整 footprint 并保留现有 Twist
+0.40 秒扫掠。位置与变形后切线朝向同时插值，旋转采样间隔不超过 `0.05 rad`；候选阶段
+速度固定受 `elastic_max_vel_x`（默认 `0.07 m/s`）和 `elastic_max_vel_theta`
+（默认 `0.30 rad/s`）约束。规划器对 global plan 按弧长取 7 点，全部位置偏差不超过
+`0.04 m`、切线角偏差不超过 `0.20 rad` 才视为等价；等价 plan 不会清除已验证的带或
+0.4 秒搜索计时，中段绕行等实质几何变化才重置。
+两侧候选均失败才请求全局重规划；当前 footprint 已接触、未知区、TF 或 local costmap
+不新鲜时始终零速失败关闭。不要以提高 `elastic_max_lateral_offset`、放宽 254/255 或
+关闭 sweep 来解决无解路径。
+
 同步修改时不得在小车端创建备份目录。以下命令只部署、构建和测试，不启动 ROS、
 不发布速度：
 
@@ -1713,11 +1725,15 @@ scp ucar_ws/src/cym_planner/include/cym_planner/escape_recovery.h \
   "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/include/cym_planner/"
 scp ucar_ws/src/cym_planner/include/cym_planner/planner_tuning.h \
   "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/include/cym_planner/"
+scp ucar_ws/src/cym_planner/include/cym_planner/local_elastic_path.h \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/include/cym_planner/"
 scp ucar_ws/src/cym_planner/config/ucar_cym_planner_params.yaml \
   "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/config/"
 scp ucar_ws/src/cym_planner/test/escape_recovery_test.cpp \
   "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/test/"
 scp ucar_ws/src/cym_planner/test/planner_tuning_test.cpp \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/test/"
+scp ucar_ws/src/cym_planner/test/local_elastic_path_test.cpp \
   "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/test/"
 
 ssh "${VEHICLE_HOST}"
@@ -1784,9 +1800,13 @@ scp ucar_ws/src/cym_planner/include/cym_planner.h \
   "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/include/"
 scp ucar_ws/src/cym_planner/include/cym_planner/global_cost_semantics.h \
   "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/include/cym_planner/"
+scp ucar_ws/src/cym_planner/include/cym_planner/local_elastic_path.h \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/include/cym_planner/"
 scp ucar_ws/src/cym_planner/config/ucar_cym_planner_params.yaml \
   "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/config/"
 scp ucar_ws/src/cym_planner/test/global_cost_semantics_test.cpp \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/test/"
+scp ucar_ws/src/cym_planner/test/local_elastic_path_test.cpp \
   "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/test/"
 
 scp ucar_ws/src/ucar_2026/launch/2026.launch \

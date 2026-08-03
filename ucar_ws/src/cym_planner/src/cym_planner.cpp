@@ -1,5 +1,6 @@
 #include "cym_planner.h"
 #include "cym_planner/global_cost_semantics.h"
+#include "cym_planner/local_elastic_path.h"
 
 #include <cv_bridge/cv_bridge.h>
 #include <boost/thread/locks.hpp>
@@ -267,11 +268,24 @@ CymPlanner::CymPlanner()
       costmap_ros_(NULL),
       debug_images_enabled_(false),
       escape_enabled_(false),
+      elastic_enabled_(true),
+      elastic_lookahead_distance_(0.25),
+      elastic_lateral_step_(0.02),
+      elastic_max_lateral_offset_(0.10),
+      elastic_validation_step_(0.015),
+      elastic_validation_yaw_step_(0.05),
+      elastic_max_vel_x_(0.07),
+      elastic_max_vel_theta_(0.30),
+      elastic_search_timeout_(0.40),
       target_index_(0),
       pose_adjusting_(false),
       goal_reached_(false),
       carry_mode_(false),
       body_projection_enabled_(false),
+      elastic_active_(false),
+      elastic_end_plan_index_(-1),
+      elastic_last_side_(0),
+      elastic_blocked_since_(ros::Time(0)),
       escape_blocked_since_(ros::Time(0)),
       escape_wait_until_(ros::Time(0)),
       escape_motion_started_(ros::Time(0)),
@@ -363,6 +377,28 @@ void CymPlanner::initialize(std::string name, tf2_ros::Buffer* /* tf */,
                      escape_heading_tolerance_, 0.05);
     readPlannerParam(planner_nh, canonical_nh, legacy_nh,
                      "escape_max_attempts", escape_max_attempts_, 4);
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "elastic_enabled", elastic_enabled_, true);
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "elastic_lookahead_distance",
+                     elastic_lookahead_distance_, 0.25);
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "elastic_lateral_step", elastic_lateral_step_, 0.02);
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "elastic_max_lateral_offset",
+                     elastic_max_lateral_offset_, 0.10);
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "elastic_validation_step", elastic_validation_step_,
+                     0.015);
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "elastic_validation_yaw_step",
+                     elastic_validation_yaw_step_, 0.05);
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "elastic_max_vel_x", elastic_max_vel_x_, 0.07);
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "elastic_max_vel_theta", elastic_max_vel_theta_, 0.30);
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "elastic_search_timeout", elastic_search_timeout_, 0.40);
 
     escape_blocked_timeout_ =
         clampValue(escape_blocked_timeout_, 0.10, 2.0);
@@ -376,6 +412,20 @@ void CymPlanner::initialize(std::string name, tf2_ros::Buffer* /* tf */,
     escape_heading_tolerance_ =
         clampValue(escape_heading_tolerance_, 0.02, 0.10);
     escape_max_attempts_ = std::max(1, std::min(10, escape_max_attempts_));
+    elastic_lookahead_distance_ =
+        clampValue(elastic_lookahead_distance_, 0.20, 0.30);
+    elastic_lateral_step_ =
+        clampValue(elastic_lateral_step_, 0.01, 0.03);
+    elastic_max_lateral_offset_ =
+        clampValue(elastic_max_lateral_offset_, elastic_lateral_step_, 0.10);
+    elastic_validation_step_ =
+        clampValue(elastic_validation_step_, 0.005, 0.015);
+    elastic_validation_yaw_step_ =
+        clampValue(elastic_validation_yaw_step_, 0.02, 0.10);
+    elastic_max_vel_x_ = clampValue(elastic_max_vel_x_, 0.02, 0.07);
+    elastic_max_vel_theta_ = clampValue(elastic_max_vel_theta_, 0.05, 0.30);
+    elastic_search_timeout_ =
+        clampValue(elastic_search_timeout_, 0.10, 1.00);
 
     ros::NodeHandle public_nh;
     carry_mode_sub_ = public_nh.subscribe(
@@ -394,13 +444,15 @@ void CymPlanner::initialize(std::string name, tf2_ros::Buffer* /* tf */,
     ROS_WARN(
         "cym_planner initialized | mode1 point max %.2f m/s %.2f rad/s | "
         "mode2 body max %.2f m/s %.2f rad/s turn_scale %.2f | "
-        "debug images %s | escape %s",
+        "debug images %s | escape %s | elastic path %s (%.2f m band)",
         point_tuning_.max_vel_x, point_tuning_.max_vel_theta,
         body_projection_tuning_.max_vel_x,
         body_projection_tuning_.max_vel_theta,
         body_projection_tuning_.heading_slowdown_min_scale,
         debug_images_enabled_ ? "enabled" : "disabled",
-        escape_enabled_ ? "enabled" : "disabled");
+        escape_enabled_ ? "enabled" : "disabled",
+        elastic_enabled_ ? "enabled" : "disabled",
+        elastic_max_lateral_offset_);
 }
 
 void CymPlanner::carryModeCallback(const std_msgs::Bool::ConstPtr& message)
@@ -445,6 +497,8 @@ void CymPlanner::navigationModeCallback(const std_msgs::String::ConstPtr& messag
     body_projection_enabled_ = requested_body_mode;
     resetControllerState();
     resetEscapeRecovery();
+    clearElasticPlan();
+    resetElasticSearch();
     const PlannerTuning& tuning = activeTuning();
     ROS_WARN(
         "cym_planner switched to %s | linear P/D %.2f/%.2f "
@@ -549,12 +603,146 @@ bool CymPlanner::commandSweepIsSafe(
 
 bool CymPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& plan)
 {
+    const bool preserve_elastic = elasticPlanMatchesNewGlobal(plan);
+    const bool preserve_search = elasticSearchTimerSurvivesEquivalentPlan(
+        !elastic_blocked_since_.isZero(),
+        elasticSearchPlanMatchesNewGlobal(plan));
     global_plan_ = plan;
-    target_index_ = 0;
-    pose_adjusting_ = false;
-    goal_reached_ = false;
-    resetControllerState();
+    if(!preserve_elastic)
+    {
+        clearElasticPlan();
+        if(!preserve_search)
+            resetElasticSearch();
+        target_index_ = 0;
+        pose_adjusting_ = false;
+        goal_reached_ = false;
+        resetControllerState();
+    }
     return !global_plan_.empty();
+}
+
+const std::vector<geometry_msgs::PoseStamped>& CymPlanner::trackingPlan() const
+{
+    return elastic_active_ ? elastic_plan_ : global_plan_;
+}
+
+void CymPlanner::clearElasticPlan()
+{
+    elastic_active_ = false;
+    elastic_end_plan_index_ = -1;
+    elastic_plan_.clear();
+}
+
+void CymPlanner::resetElasticSearch()
+{
+    elastic_blocked_since_ = ros::Time(0);
+    elastic_search_reference_plan_.clear();
+}
+
+bool CymPlanner::plansHaveSameGeometry(
+    const std::vector<geometry_msgs::PoseStamped>& first,
+    const std::vector<geometry_msgs::PoseStamped>& plan) const
+{
+    if(first.empty() || plan.empty() ||
+       normalizedFrameId(first.front().header.frame_id) !=
+       normalizedFrameId(plan.front().header.frame_id))
+    {
+        return false;
+    }
+    for(const geometry_msgs::PoseStamped& pose : first)
+    {
+        if(!poseIsFinite(pose) ||
+           normalizedFrameId(pose.header.frame_id) !=
+           normalizedFrameId(first.front().header.frame_id))
+            return false;
+    }
+    for(const geometry_msgs::PoseStamped& pose : plan)
+    {
+        if(!poseIsFinite(pose) ||
+           normalizedFrameId(pose.header.frame_id) !=
+           normalizedFrameId(plan.front().header.frame_id))
+            return false;
+    }
+    const auto planLength = [](const std::vector<geometry_msgs::PoseStamped>& path)
+    {
+        double length = 0.0;
+        for(int index = 1; index < static_cast<int>(path.size()); ++index)
+        {
+            length += std::hypot(
+                path[index].pose.position.x - path[index - 1].pose.position.x,
+                path[index].pose.position.y - path[index - 1].pose.position.y);
+        }
+        return length;
+    };
+    const auto samplePlan = [](
+        const std::vector<geometry_msgs::PoseStamped>& path,
+        double requested_distance,
+        double& world_x, double& world_y, double& yaw)
+    {
+        double travelled = 0.0;
+        for(int index = 1; index < static_cast<int>(path.size()); ++index)
+        {
+            const double delta_x = path[index].pose.position.x -
+                path[index - 1].pose.position.x;
+            const double delta_y = path[index].pose.position.y -
+                path[index - 1].pose.position.y;
+            const double segment = std::hypot(delta_x, delta_y);
+            if(segment < 1e-6)
+                continue;
+            if(travelled + segment >= requested_distance ||
+               index == static_cast<int>(path.size()) - 1)
+            {
+                const double ratio = std::max(0.0, std::min(
+                    1.0, (requested_distance - travelled) / segment));
+                world_x = path[index - 1].pose.position.x + delta_x * ratio;
+                world_y = path[index - 1].pose.position.y + delta_y * ratio;
+                yaw = std::atan2(delta_y, delta_x);
+                return true;
+            }
+            travelled += segment;
+        }
+        return false;
+    };
+    const double first_length = planLength(first);
+    const double second_length = planLength(plan);
+    if(!std::isfinite(first_length) || !std::isfinite(second_length) ||
+       first_length < 1e-6 || second_length < 1e-6)
+    {
+        return std::hypot(first.back().pose.position.x - plan.back().pose.position.x,
+                          first.back().pose.position.y - plan.back().pose.position.y) <= 0.03;
+    }
+    for(int sample = 0; sample <= 6; ++sample)
+    {
+        const double ratio = static_cast<double>(sample) / 6.0;
+        double first_x = 0.0;
+        double first_y = 0.0;
+        double first_yaw = 0.0;
+        double second_x = 0.0;
+        double second_y = 0.0;
+        double second_yaw = 0.0;
+        if(!samplePlan(first, first_length * ratio, first_x, first_y, first_yaw) ||
+           !samplePlan(plan, second_length * ratio,
+                       second_x, second_y, second_yaw) ||
+           std::hypot(first_x - second_x, first_y - second_y) > 0.04 ||
+           std::abs(normalizeAngle(first_yaw - second_yaw)) > 0.20)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool CymPlanner::elasticPlanMatchesNewGlobal(
+    const std::vector<geometry_msgs::PoseStamped>& plan) const
+{
+    return elastic_active_ && plansHaveSameGeometry(global_plan_, plan);
+}
+
+bool CymPlanner::elasticSearchPlanMatchesNewGlobal(
+    const std::vector<geometry_msgs::PoseStamped>& plan) const
+{
+    return !elastic_search_reference_plan_.empty() &&
+        plansHaveSameGeometry(elastic_search_reference_plan_, plan);
 }
 
 bool CymPlanner::transformPlanPose(
@@ -579,12 +767,13 @@ bool CymPlanner::transformPlanPose(
 
 bool CymPlanner::selectTargetPose(geometry_msgs::PoseStamped& target_pose)
 {
+    const std::vector<geometry_msgs::PoseStamped>& plan = trackingPlan();
     bool have_target = false;
     for(int index = target_index_;
-        index < static_cast<int>(global_plan_.size()); ++index)
+        index < static_cast<int>(plan.size()); ++index)
     {
         geometry_msgs::PoseStamped pose_base;
-        if(!transformPlanPose(global_plan_[index], base_link_frame_, pose_base))
+        if(!transformPlanPose(plan[index], base_link_frame_, pose_base))
             return false;
 
         target_pose = pose_base;
@@ -592,7 +781,7 @@ bool CymPlanner::selectTargetPose(geometry_msgs::PoseStamped& target_pose)
         const double distance = std::hypot(
             pose_base.pose.position.x, pose_base.pose.position.y);
         if(distance > kTargetDistance ||
-           index == static_cast<int>(global_plan_.size()) - 1)
+           index == static_cast<int>(plan.size()) - 1)
         {
             target_index_ = index;
             break;
@@ -744,6 +933,164 @@ CymPlanner::FootprintBlockage CymPlanner::inspectFootprint(
     return result;
 }
 
+bool CymPlanner::elasticCandidateIsSafe(
+    const std::vector<geometry_msgs::PoseStamped>& candidate,
+    int start_index,
+    int end_index,
+    const costmap_2d::Costmap2D& local_costmap,
+    cv::Mat& map_image)
+{
+    if(start_index < 0 || end_index <= start_index ||
+       end_index >= static_cast<int>(candidate.size()))
+    {
+        return false;
+    }
+    geometry_msgs::PoseStamped previous = candidate[start_index];
+    if(inspectFootprint(previous, local_costmap, map_image, false).blocked)
+        return false;
+    for(int index = start_index + 1; index <= end_index; ++index)
+    {
+        const geometry_msgs::PoseStamped& next = candidate[index];
+        const double distance = std::hypot(
+            next.pose.position.x - previous.pose.position.x,
+            next.pose.position.y - previous.pose.position.y);
+        if(!std::isfinite(distance))
+            return false;
+        const double previous_yaw = tf::getYaw(previous.pose.orientation);
+        const double next_yaw = tf::getYaw(next.pose.orientation);
+        if(!std::isfinite(previous_yaw) || !std::isfinite(next_yaw))
+            return false;
+        const double yaw_delta = normalizeAngle(next_yaw - previous_yaw);
+        const int samples = elasticInterpolationSamples(
+            distance, elastic_validation_step_, yaw_delta,
+            elastic_validation_yaw_step_);
+        if(samples <= 0)
+            return false;
+        for(int sample = 1; sample <= samples; ++sample)
+        {
+            const double ratio = static_cast<double>(sample) /
+                static_cast<double>(samples);
+            geometry_msgs::PoseStamped probe = next;
+            probe.pose.position.x = previous.pose.position.x +
+                (next.pose.position.x - previous.pose.position.x) * ratio;
+            probe.pose.position.y = previous.pose.position.y +
+                (next.pose.position.y - previous.pose.position.y) * ratio;
+            probe.pose.orientation = tf::createQuaternionMsgFromYaw(
+                normalizeAngle(previous_yaw + yaw_delta * ratio));
+            if(inspectFootprint(probe, local_costmap, map_image, false).blocked)
+                return false;
+        }
+        previous = next;
+    }
+    return true;
+}
+
+bool CymPlanner::tryActivateElasticPlan(
+    const std::vector<geometry_msgs::PoseStamped>& costmap_plan,
+    int start_index,
+    const geometry_msgs::PoseStamped& current_pose,
+    const costmap_2d::Costmap2D& local_costmap,
+    cv::Mat& map_image)
+{
+    if(!body_projection_enabled_ || !elastic_enabled_ || elastic_active_ ||
+       costmap_plan.size() != global_plan_.size() ||
+       start_index < 0 || start_index + 2 >= static_cast<int>(costmap_plan.size()))
+    {
+        return false;
+    }
+    int end_index = start_index;
+    double travelled = 0.0;
+    for(int index = start_index + 1;
+        index < static_cast<int>(costmap_plan.size()); ++index)
+    {
+        travelled += std::hypot(
+            costmap_plan[index].pose.position.x -
+                costmap_plan[index - 1].pose.position.x,
+            costmap_plan[index].pose.position.y -
+                costmap_plan[index - 1].pose.position.y);
+        end_index = index;
+        if(travelled >= elastic_lookahead_distance_)
+            break;
+    }
+    if(end_index <= start_index + 1 ||
+       travelled < std::min(0.30, elastic_lookahead_distance_ * 0.75))
+        return false;
+
+    const int preferred_side = elastic_last_side_ == 0 ? 1 : elastic_last_side_;
+    const int sides[2] = {preferred_side, -preferred_side};
+    for(double magnitude = elastic_lateral_step_;
+        magnitude <= elastic_max_lateral_offset_ + 1e-9;
+        magnitude += elastic_lateral_step_)
+    {
+        for(int side_index = 0; side_index < 2; ++side_index)
+        {
+            std::vector<geometry_msgs::PoseStamped> candidate = global_plan_;
+            candidate[start_index] = current_pose;
+            candidate[start_index].header.frame_id =
+                costmap_ros_->getGlobalFrameID();
+            double along = 0.0;
+            for(int index = start_index + 1; index <= end_index; ++index)
+            {
+                along += std::hypot(
+                    costmap_plan[index].pose.position.x -
+                        costmap_plan[index - 1].pose.position.x,
+                    costmap_plan[index].pose.position.y -
+                        costmap_plan[index - 1].pose.position.y);
+                const geometry_msgs::PoseStamped& before = costmap_plan[index - 1];
+                const geometry_msgs::PoseStamped& after =
+                    costmap_plan[std::min(index + 1, end_index)];
+                const double tangent_x = after.pose.position.x - before.pose.position.x;
+                const double tangent_y = after.pose.position.y - before.pose.position.y;
+                const double tangent_length = std::hypot(tangent_x, tangent_y);
+                if(!std::isfinite(tangent_length) || tangent_length < 1e-6)
+                {
+                    candidate.clear();
+                    break;
+                }
+                const double offset = elasticLateralOffset(
+                    along, travelled, sides[side_index] * magnitude);
+                geometry_msgs::PoseStamped pose = costmap_plan[index];
+                pose.pose.position.x += -tangent_y / tangent_length * offset;
+                pose.pose.position.y += tangent_x / tangent_length * offset;
+                candidate[index] = pose;
+            }
+            for(int index = start_index + 1;
+                !candidate.empty() && index <= end_index; ++index)
+            {
+                const geometry_msgs::PoseStamped& before = candidate[index - 1];
+                const geometry_msgs::PoseStamped& after =
+                    candidate[std::min(index + 1, end_index)];
+                const double tangent_x = after.pose.position.x - before.pose.position.x;
+                const double tangent_y = after.pose.position.y - before.pose.position.y;
+                if(!std::isfinite(tangent_x) || !std::isfinite(tangent_y) ||
+                   std::hypot(tangent_x, tangent_y) < 1e-6)
+                {
+                    candidate.clear();
+                    break;
+                }
+                candidate[index].pose.orientation =
+                    tf::createQuaternionMsgFromYaw(
+                        std::atan2(tangent_y, tangent_x));
+            }
+            if(!candidate.empty() && elasticCandidateIsSafe(
+                   candidate, start_index, end_index, local_costmap, map_image))
+            {
+                elastic_plan_ = candidate;
+                elastic_active_ = true;
+                elastic_end_plan_index_ = end_index;
+                elastic_last_side_ = sides[side_index];
+                resetControllerState();
+                ROS_WARN(
+                    "cym_planner: activated local elastic path side=%d "
+                    "offset=%.3f m horizon=%.3f m",
+                    elastic_last_side_, magnitude, travelled);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 CymPlanner::FootprintBlockage CymPlanner::checkPathBlocked(
     const costmap_2d::Costmap2D& local_costmap,
     cv::Mat& map_image)
@@ -762,18 +1109,28 @@ CymPlanner::FootprintBlockage CymPlanner::checkPathBlocked(
         path_blockage =
             inspectFootprint(current_pose, local_costmap, map_image, true);
         if(path_blockage.blocked)
+        {
+            path_blockage.current_footprint_blocked = true;
+            clearElasticPlan();
+            resetElasticSearch();
             return path_blockage;
+        }
     }
 
+    const std::vector<geometry_msgs::PoseStamped>& plan = trackingPlan();
+    if(plan.empty())
+    {
+        path_blockage.blocked = true;
+        return path_blockage;
+    }
     std::vector<geometry_msgs::PoseStamped> costmap_plan;
-    costmap_plan.reserve(global_plan_.size());
+    costmap_plan.reserve(plan.size());
     int start_index = 0;
     double nearest_distance = std::numeric_limits<double>::infinity();
-    for(int index = 0;
-        index < static_cast<int>(global_plan_.size()); ++index)
+    for(int index = 0; index < static_cast<int>(plan.size()); ++index)
     {
         geometry_msgs::PoseStamped pose_costmap;
-        if(!transformPlanPose(global_plan_[index], costmap_frame, pose_costmap) ||
+        if(!transformPlanPose(plan[index], costmap_frame, pose_costmap) ||
            !poseIsFinite(pose_costmap))
         {
             path_blockage.blocked = true;
@@ -788,19 +1145,13 @@ CymPlanner::FootprintBlockage CymPlanner::checkPathBlocked(
             nearest_distance = distance;
             start_index = index;
         }
-        unsigned int map_x = 0;
-        unsigned int map_y = 0;
-        if(local_costmap.worldToMap(
-               pose_costmap.pose.position.x,
-               pose_costmap.pose.position.y,
-               map_x, map_y))
-        {
-            if(!map_image.empty())
-            {
-                cv::circle(map_image, cv::Point(map_x, map_y), 1,
-                           cv::Scalar(255, 0, 255), -1);
-            }
-        }
+    }
+    if(elastic_active_ && start_index >= elastic_end_plan_index_)
+    {
+        clearElasticPlan();
+        resetElasticSearch();
+        target_index_ = 0;
+        return checkPathBlocked(local_costmap, map_image);
     }
 
     double checked_distance = 0.0;
@@ -820,7 +1171,6 @@ CymPlanner::FootprintBlockage CymPlanner::checkPathBlocked(
             path_blockage.blocked = true;
             return path_blockage;
         }
-
         if(have_previous_point)
         {
             checked_distance += std::hypot(
@@ -836,28 +1186,53 @@ CymPlanner::FootprintBlockage CymPlanner::checkPathBlocked(
         if(body_projection_enabled_)
         {
             path_blockage =
-                inspectFootprint(
-                    pose_costmap, local_costmap, map_image, true);
+                inspectFootprint(pose_costmap, local_costmap, map_image, true);
         }
         else
         {
-            if(!map_image.empty())
-            {
-                cv::circle(map_image, cv::Point(map_x, map_y), 1,
-                           cv::Scalar(0, 0, 255), -1);
-            }
-            path_blockage.blocked =
-                local_costmap.getCost(map_x, map_y) >=
-                    tuning.obstacle_cost_threshold;
+            path_blockage.blocked = local_costmap.getCost(map_x, map_y) >=
+                tuning.obstacle_cost_threshold;
         }
         if(path_blockage.blocked)
         {
+            if(body_projection_enabled_ && !elastic_active_ &&
+               tryActivateElasticPlan(
+                   costmap_plan, start_index, current_pose,
+                   local_costmap, map_image))
+            {
+                resetElasticSearch();
+                return FootprintBlockage();
+            }
+            if(elastic_active_)
+                clearElasticPlan();
+            if(body_projection_enabled_ && elastic_enabled_ &&
+               !path_blockage.current_footprint_blocked)
+            {
+                const ros::Time now = ros::Time::now();
+                if(elastic_blocked_since_.isZero())
+                {
+                    elastic_blocked_since_ = now;
+                    elastic_search_reference_plan_ = global_plan_;
+                }
+                if((now - elastic_blocked_since_).toSec() <
+                   elastic_search_timeout_)
+                {
+                    path_blockage.hold = true;
+                    ROS_WARN_THROTTLE(
+                        1.0,
+                        "cym_planner: holding zero while local elastic "
+                        "search retries (%.2f s budget)",
+                        elastic_search_timeout_);
+                    return path_blockage;
+                }
+            }
             ROS_WARN_THROTTLE(
                 1.0, "cym_planner: blocked forward %s; requesting global replan",
                 body_projection_enabled_ ? "vehicle footprint" : "path point");
             return path_blockage;
         }
     }
+    resetElasticSearch();
     return path_blockage;
 }
 
@@ -1219,7 +1594,11 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         publishDebugPlan();
     }
     if(path_blockage.blocked)
+    {
+        if(path_blockage.hold)
+            return true;
         return escape_command_valid;
+    }
     resetEscapeRecovery();
 
     geometry_msgs::PoseStamped final_pose;
@@ -1296,11 +1675,14 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     previous_heading_error_ = heading_error;
     previous_heading_control_time_ = control_time;
     angular_derivative_initialized_ = true;
+    const double maximum_angular_velocity =
+        (elastic_active_ ? std::min(tuning.max_vel_theta, elastic_max_vel_theta_) :
+         tuning.max_vel_theta) * motion_scale;
     cmd_vel.angular.z = clampValue(
         (heading_error * tuning.angular_gain +
          heading_derivative * tuning.angular_kd) * motion_scale,
-        -tuning.max_vel_theta * motion_scale,
-        tuning.max_vel_theta * motion_scale);
+        -maximum_angular_velocity,
+        maximum_angular_velocity);
 
     const double linear_error = target_pose.pose.position.x;
     if(!std::isfinite(linear_error))
@@ -1322,11 +1704,14 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     linear_derivative_initialized_ = true;
     const double turn_speed_scale = headingSpeedScale(
         heading_error, tuning.heading_slowdown_min_scale);
+    const double maximum_linear_velocity =
+        (elastic_active_ ? std::min(tuning.max_vel_x, elastic_max_vel_x_) :
+         tuning.max_vel_x) * motion_scale;
     cmd_vel.linear.x = clampValue(
         (linear_error * tuning.linear_x_gain +
          linear_derivative * tuning.linear_x_kd) *
             motion_scale * turn_speed_scale,
-        0.0, tuning.max_vel_x * motion_scale);
+        0.0, maximum_linear_velocity);
     cmd_vel.linear.y = 0.0;
     if(!commandIsFinite(cmd_vel) ||
        (body_projection_enabled_ &&

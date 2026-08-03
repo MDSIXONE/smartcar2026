@@ -30,19 +30,19 @@ cym_planner/CymPlanner:
   mode2_body_projection:
     linear_x_gain: 0.9
     linear_x_kd: 0.2
-    max_vel_x: 0.22
+    max_vel_x: 0.07
     angular_gain: 2.0
     angular_kd: 0.2
-    max_vel_theta: 0.55
+    max_vel_theta: 0.35
     heading_slowdown_min_scale: 0.15
     # 按实际 (linear.x, linear.y, angular.z) 对未来 0.4 s 车体姿态做扫掠。
     command_sweep_time: 0.40
     command_sweep_step: 0.025
     final_yaw_gain: 1.5
-    final_yaw_max_vel: 0.35
+    final_yaw_max_vel: 0.25
     final_yaw_tolerance: 0.10
     final_linear_x_gain: 0.6
-    obstacle_lookahead_distance: 0.30
+    obstacle_lookahead_distance: 0.25
     obstacle_cost_threshold: 253
     carry_speed_scale: 1.0
 
@@ -57,3 +57,15 @@ cym_planner/CymPlanner:
   escape_max_attempts: 4
   escape_max_total_distance: 0.08
   escape_heading_tolerance: 0.05
+
+  # 局部 footprint 只在前视路径受阻、但当前车体仍完全安全时尝试。
+  # 每一条带状候选都以 local 合并 costmap 的 254/255 和完整 footprint 验证；
+  # 当前 footprint 接触、未知区、TF 或 costmap 异常仍直接失败关闭并请求全局重规划。
+  elastic_enabled: true
+  elastic_lookahead_distance: 0.25
+  elastic_lateral_step: 0.02
+  elastic_max_lateral_offset: 0.10
+  elastic_validation_step: 0.015
+  elastic_validation_yaw_step: 0.05
+  elastic_max_vel_x: 0.07
+  elastic_max_vel_theta: 0.30

@@ -305,6 +305,31 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.assertEqual(detected, "next-code")
         self.assertLess(elapsed, 0.20)
 
+    def test_qr_seen_while_facing_is_accepted_without_search_wait(self):
+        self.task.lock = threading.RLock()
+        self.task.points = {52: (-1.75, 2.25), 262: (-2.50, 2.25)}
+        self.task.staging_point_number = 52
+        self.task.qr_sequence = 0
+        self.task.latest_qr_text = ""
+        self.task.used_qr_codes = set()
+        self.task.require_distinct_qr_codes = True
+        self.task.qr_event = threading.Event()
+        self.task.publish_state = lambda _state: None
+
+        class QrMessage(object):
+            data = "turning-code"
+
+        def navigate(*_args, **_kwargs):
+            self.task.qr_result_cb(QrMessage())
+
+        self.task.navigate_coordinates = navigate
+        self.task.wait_for_fresh_qr = (
+            lambda *_args: self.fail("must not wait after a turn-time QR"))
+
+        self.task.scan_observation_point(262)
+
+        self.assertEqual(self.task.used_qr_codes, set(["turning-code"]))
+
     def test_camera_stop_retries_once_before_succeeding(self):
         calls = []
         self.task.lock = threading.RLock()

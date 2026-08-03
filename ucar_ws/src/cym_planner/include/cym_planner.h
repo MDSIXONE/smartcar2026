@@ -44,6 +44,8 @@ private:
         FootprintBlockage()
             : blocked(false),
               recoverable(false),
+              current_footprint_blocked(false),
+              hold(false),
               contact_count(0),
               contact_world_x(0.0),
               contact_world_y(0.0)
@@ -52,6 +54,8 @@ private:
 
         bool blocked;
         bool recoverable;
+        bool current_footprint_blocked;
+        bool hold;
         unsigned int contact_count;
         double contact_world_x;
         double contact_world_y;
@@ -63,6 +67,28 @@ private:
                            const std::string& target_frame,
                            geometry_msgs::PoseStamped& result) const;
     bool selectTargetPose(geometry_msgs::PoseStamped& target_pose);
+    const std::vector<geometry_msgs::PoseStamped>& trackingPlan() const;
+    void clearElasticPlan();
+    void resetElasticSearch();
+    bool elasticPlanMatchesNewGlobal(
+        const std::vector<geometry_msgs::PoseStamped>& plan) const;
+    bool elasticSearchPlanMatchesNewGlobal(
+        const std::vector<geometry_msgs::PoseStamped>& plan) const;
+    bool plansHaveSameGeometry(
+        const std::vector<geometry_msgs::PoseStamped>& first,
+        const std::vector<geometry_msgs::PoseStamped>& second) const;
+    bool tryActivateElasticPlan(
+        const std::vector<geometry_msgs::PoseStamped>& costmap_plan,
+        int start_index,
+        const geometry_msgs::PoseStamped& current_pose,
+        const costmap_2d::Costmap2D& local_costmap,
+        cv::Mat& map_image);
+    bool elasticCandidateIsSafe(
+        const std::vector<geometry_msgs::PoseStamped>& candidate,
+        int start_index,
+        int end_index,
+        const costmap_2d::Costmap2D& local_costmap,
+        cv::Mat& map_image);
     FootprintBlockage checkPathBlocked(
         const costmap_2d::Costmap2D& local_costmap,
         cv::Mat& map_image);
@@ -113,6 +139,15 @@ private:
     double escape_max_total_distance_;
     double escape_heading_tolerance_;
     int escape_max_attempts_;
+    bool elastic_enabled_;
+    double elastic_lookahead_distance_;
+    double elastic_lateral_step_;
+    double elastic_max_lateral_offset_;
+    double elastic_validation_step_;
+    double elastic_validation_yaw_step_;
+    double elastic_max_vel_x_;
+    double elastic_max_vel_theta_;
+    double elastic_search_timeout_;
 
     std::vector<geometry_msgs::PoseStamped> global_plan_;
     int target_index_;
@@ -120,6 +155,12 @@ private:
     bool goal_reached_;
     bool carry_mode_;
     bool body_projection_enabled_;
+    bool elastic_active_;
+    int elastic_end_plan_index_;
+    int elastic_last_side_;
+    ros::Time elastic_blocked_since_;
+    std::vector<geometry_msgs::PoseStamped> elastic_search_reference_plan_;
+    std::vector<geometry_msgs::PoseStamped> elastic_plan_;
     ros::Time escape_blocked_since_;
     ros::Time escape_wait_until_;
     ros::Time escape_motion_started_;

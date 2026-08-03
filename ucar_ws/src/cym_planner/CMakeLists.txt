@@ -221,6 +221,9 @@ if(CATKIN_ENABLE_TESTING)
   catkin_add_gtest(cym_planner_planner_tuning_test
     test/planner_tuning_test.cpp
   )
+  catkin_add_gtest(cym_planner_local_elastic_path_test
+    test/local_elastic_path_test.cpp
+  )
 endif()
 
 ## Add gtest based cpp test target and link libraries
