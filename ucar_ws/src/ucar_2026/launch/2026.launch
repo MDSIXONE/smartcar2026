@@ -119,6 +119,9 @@
             <param name="post_turn_recenter_trigger" value="0.06"/>
             <param name="post_turn_recenter_attempts" value="2"/>
             <param name="require_distinct_qr_codes" value="true"/>
+            <!-- Before the first move_base goal, production_task_2026 pins
+                 CymPlanner to front-lookahead point mode for every task leg. -->
+            <param name="navigation_mode_connect_timeout" value="5.0"/>
             <param name="camera_node_name" value="/usb_cam"/>
             <param name="camera_starts_suspended"
                    value="$(arg camera_start_suspended)"/>

@@ -9,7 +9,7 @@ Flow:
      most one complete revolution while scanning.
   3. Disable QR decoding and start the Python 3 OCR helper.  In the default
      configuration the helper consumes frames saved from the ROS usb_cam topic.
-  4. Switch CymPlanner collision checking to body_projection.
+  4. Lock CymPlanner in front-lookahead point mode for the whole mission.
   5. Navigate each configured production target.  After arrival, turn at most
      one full revolution while querying OCR.  A candidate stops the turn,
      passes a fresh-odometry stop gate, then aligns the box and reads the front
@@ -135,8 +135,9 @@ class ProductionTask2026(object):
                 "~rotation_completion_tolerance", 0.05)))
         self.require_distinct_qr_codes = bool(
             rospy.get_param("~require_distinct_qr_codes", True))
-        self.body_mode_connect_timeout = float(
-            rospy.get_param("~body_mode_connect_timeout", 5.0))
+        self.navigation_mode_connect_timeout = float(rospy.get_param(
+            "~navigation_mode_connect_timeout",
+            rospy.get_param("~body_mode_connect_timeout", 5.0)))
         self.camera_node_name = str(
             rospy.get_param("~camera_node_name", "/usb_cam"))
         self.camera_start_service = str(rospy.get_param(
@@ -471,6 +472,7 @@ class ProductionTask2026(object):
                 "move_base unavailable after %.1f s" %
                 self.move_base_ready_timeout)
         self.wait_for_safe_start()
+        self.switch_to_point_mode()
 
         if self.resume_production_only:
             self.qr_enable_pub.publish(Int8(data=0))
@@ -505,7 +507,6 @@ class ProductionTask2026(object):
         else:
             self.release_ros_camera()
         self.start_native_ocr()
-        self.switch_to_body_projection()
 
         rospy.loginfo(
             "PRODUCTION_TARGET_LEGS %s arrival_ocr_turn=360deg",
@@ -569,7 +570,8 @@ class ProductionTask2026(object):
 
     def wait_for_qr_scanner(self):
         deadline = (
-            rospy.Time.now() + rospy.Duration(self.body_mode_connect_timeout))
+            rospy.Time.now() + rospy.Duration(
+                self.navigation_mode_connect_timeout))
         while not rospy.is_shutdown() and rospy.Time.now() < deadline:
             self.require_safe()
             if self.qr_enable_pub.get_num_connections() > 0:
@@ -1664,10 +1666,12 @@ class ProductionTask2026(object):
             os.fsync(handle.fileno())
         os.rename(temporary, target)
 
-    def switch_to_body_projection(self):
-        self.publish_state("SWITCH_BODY_PROJECTION")
+    def switch_to_point_mode(self):
+        """Lock all task navigation legs to CymPlanner's front point mode."""
+        self.publish_state("SET_POINT_NAVIGATION_MODE")
         deadline = (
-            rospy.Time.now() + rospy.Duration(self.body_mode_connect_timeout))
+            rospy.Time.now() + rospy.Duration(
+                self.navigation_mode_connect_timeout))
         while not rospy.is_shutdown() and rospy.Time.now() < deadline:
             self.require_safe()
             if self.navigation_mode_pub.get_num_connections() > 0:
@@ -1680,10 +1684,10 @@ class ProductionTask2026(object):
         # to a connection that completed at the edge of the wait loop.
         for _index in range(3):
             self.navigation_mode_pub.publish(
-                String(data="body_projection"))
+                String(data="point"))
             rospy.sleep(0.1)
         rospy.loginfo(
-            "PRODUCTION_TASK collision mode switched to body_projection")
+            "PRODUCTION_TASK navigation mode locked to point for all legs")
 
     def wait_for_safe_start(self):
         deadline = rospy.Time.now() + rospy.Duration(self.safe_start_timeout)

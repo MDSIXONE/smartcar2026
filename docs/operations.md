@@ -654,44 +654,23 @@ active 且重新规划恢复，可继续观察；连续失败或状态转为 abo
 2. 车辆保持在 52，依次面向墙边观察点
    262 `(-2.50, 2.25)`、232 `(-1.75, 3.00)`、
    295 `(-1.75, 1.50)` 扫码。观察点只决定车头方向，车辆不得导航到墙边。
-3. 每个观察方向先静止识别 4 秒。没有新二维码时，以 `0.18 rad/s` 最多正转
-   一整圈并持续识别；一圈结束仍没有新结果则停车并终止任务。默认要求三次结果互不重复。
-4. 三个二维码全部识别后，任务先发布零速度并关闭扫码，但保持 `/usb_cam` 运行。
-   Python 2 任务节点通过 `cv_bridge` 从 `/usb_cam/image_raw` 保存当前帧，随后把图片
-   路径交给 Python 3 helper。helper 不再直接持有 `/dev/ucar_video`，避免与完整
-   supervisor 自动拉起的 ROS 相机争抢设备。
-5. 通过 `/ucar/navigation_mode` 将 CymPlanner 切换为
-   `body_projection`；控制律、速度参数和目标点算法不变，只把前视碰撞检查从点扩大为
-   车体，并在全局代价地图上只把原始 254 致命格（OccupancyGrid 100）判为实际接触。
-   原始 253 内切膨胀格（OccupancyGrid 99）只用于路径引导，不会被车体投影二次挡停；
-   未知区仍安全拒绝。
-6. 完整编号路线仍严格保持
-   `3 → 2 → 1 → 11 → 21 → 31 → 32 → 33 → 34 → 35 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 20 → 30 → 40 → 39 → 38 → 37`，
-   但连续共线点自动合并为
-   `3→1`、`1→31`、`31→35`、`35→4`、`4→10`、`10→40`、`40→37`
-   七个连续识别段。11、21 等中间编号只作为经过点，不再逐点停车。
-7. 长线段导航过程中，任务以 `navigation_ocr_poll_period` 周期保存最新 ROS 相机帧，
-   由 Python 3 helper 直接复用
-   `/home/ucar/ocr3/ppocr_trt/python/live_ppocr.py` 的 `PPOcr` CUDA 引擎和三类
-   中文候选词；不使用 Tesseract。候选置信度达到门限后，必须先取消当前 move_base
-   目标并得到终态，再连续确认新鲜 `/odom_raw` 三轴速度低于停车阈值；只有停车门禁
-   通过后才允许对准、雷达匹配和保存。移动 OCR 在单任务异步 worker 中运行，主状态机
-   在推理期间继续检查 action、安全门和超时；迟到候选不会覆盖已经结束的目标。
-   对准通过 move_base 发送同位置的小角度朝向目标，继续使用车体轮廓碰撞检查，不由
-   任务节点直接发布非零 `/cmd_vel`。处理完成后恢复当前长线段原终点。
-   若识别框中心没有落在图像水平中心的 ±18 px 内，任务只发布受限纯角速度，停车后
-   重新拍照验证，最多 6 次。
-8. 居中后等待一帧新的 `/scan`，取正前方 ±3° 有限距离的中位数，并使用该扫描时间的
-   `map ← laser` TF 投影墙面交点。最近点只在 JSON 的
-   `wall_reference_point_numbers` 中查询；匹配误差超过 `0.18 m` 不会计入正式结果。
-   JSON 保留 1–418 的旧编号，新增 419–445 中间线端点、446–451 左右墙顶点和
-   452–459 左右墙边中点。
-9. 观察发生在长线段中的实际停车位置，不再强制回到 11、21 等旧中心点。对准和雷达
-   采集完成后，任务重新向当前段原终点发送 move_base 目标；若恢复规划或导航失败，
-   任务停车中止，不会跳过该段。
-10. 任务结束于点 37。每次尝试都写入
-    `~/.ros/ucar_2026_observations/run_*/observations.json`；同一墙点只保留置信度
-    最高的一次，最终必须得到 3 个不同墙点及其 OCR 内容，否则保存部分结果并将任务标为失败。
+3. 每个观察方向收到新且去重后的二维码便立即前往下一个方向；未识别时才以
+   `0.18 rad/s` 最多正转一整圈。整圈没有新结果则停车并终止任务。
+4. 二维码结束后关闭扫码与相机采集，启动 Python 3 OCR helper；生产阶段的相机只在每一个
+   已到达目标时重新开启，转圈扫描、复拍、测距结束后立即再次暂停。
+5. 任务在安全门通过、**任何** `move_base` 目标之前锁存连续发布三次
+   `/ucar/navigation_mode = point`。因此 52、二维码朝向、生产路线和 OCR 复拍的所有导航
+   目标均使用 CymPlanner 前视路径点模式；自动任务不会发布 `body_projection`。
+6. 生产目标路线固定为 `12 → 23 → 14 → 25 → 16`。每到一个目标才进行最多一整圈的
+   异步 OCR 搜索；一整圈无候选只记录结果并前往下一目标，不会在行驶途中 OCR。
+7. 首个 OCR 候选会先零速并经过新鲜低速里程计停车门；若推理返回时车辆已经多转，任务
+   先回到候选帧朝向，再进行居中、前方雷达测距、TF 投影和墙点匹配。居中仍通过受控
+   move_base 同位置小角度目标完成，完成前必须再次停车。
+8. 雷达处理使用正前方 ±3° 的有限距离中位数和同一时间的 `map ← laser` TF；最近点只在
+   JSON 的 `wall_reference_point_numbers` 中查询，误差大于 `0.18 m` 不计入正式结果。
+9. 每次运行把 `target_scan_events` 和有效 `observations` 写入
+   `~/.ros/ucar_2026_observations/run_*/observations.json`；结束时仍需得到 3 个不同的有效
+   墙点及 OCR 内容，否则保存部分结果并将任务标为失败。
 
 从本地仓库同步本次任务文件；不要在小车端创建备份目录或压缩包：
 
@@ -1680,12 +1659,14 @@ roslaunch yolo2025 2026.launch full_task_enabled:=true
 
 `ucar_cym_planner_params.yaml` 的控制参数分为两套：
 
-- `mode1_point/*`：二维码/普通点碰撞阶段；
-- `mode2_body_projection/*`：生产路线真实车体阶段。
+- `mode1_point/*`：二维码/普通点碰撞阶段；当前 2026 自动任务的 52、二维码朝向、
+  生产路线和 OCR 复拍导航均锁定在这一模式；
+- `mode2_body_projection/*`：真实车体实验和手工回退模式；当前自动任务不会发布它。
 
-修改生产路线速度优先调整模式 2 的 `max_vel_x`、`max_vel_theta` 和
-`heading_slowdown_min_scale`。后者为紧转弯时的最低线速度比例；实际比例为
-`max(该值, cos(abs(航向误差))²)`。YAML 修改后必须重启 move_base 才会加载。
+当前前视点回退沿用 `mode1_point` 已有速度，未借此改动速度参数。若以后明确要调整
+自动任务速度，应调整模式 1 的 `max_vel_x`、`max_vel_theta`，并重新验证门洞；模式 2 的
+`heading_slowdown_min_scale` 与 `command_sweep_*` 不在当前自动任务控制链上。YAML 修改后
+必须重启 move_base 才会加载。
 `command_sweep_time` 和 `command_sweep_step` 控制候选 Twist 的未来车体扫掠，
 生产模式默认 `0.40 s`、`0.025 s`，不应为了提速而关闭。模式 2 的
 `command_sweep_time` 若配置为 `0` 或负数，规划器会记录错误并强制恢复为
@@ -1918,3 +1899,53 @@ catkin_test_results --verbose build/test_results/ucar_2026
 `TF_NAN_INPUT` 都必须先发布零速度并重启导航/里程计链路。完成后使用
 `bash ~/ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh` 停止所有任务终端，不能在后台
 遗留 launch。
+
+## 2026 全程前视点回退
+
+当前自动任务在安全门通过、任一 `move_base` 目标前，等待 CymPlanner 连接
+`/ucar/navigation_mode` 并锁存连续发布三次 `point`。因此起点到 52、二维码朝向、
+`12 → 23 → 14 → 25 → 16` 和 OCR 居中复拍的导航目标都使用前视点模式；二维码/OCR 的
+原地扫描仍由任务直接受控的角速度完成，不属于 CymPlanner 模式切换。任务不再在二维码后
+发布 `body_projection`。CymPlanner 的 footprint、局部 costmap、动态障碍链、NaN/TF 门和
+`cost >= 253` 的前视点阻挡阈值均未放宽；body/elastic 源码保留，供后续独立实验或回退，
+但当前任务不可达这些分支。
+
+这一回退不提供 body projection 的完整矩形 footprint 与 0.40 秒 Twist sweep 证明；并且会
+使用 `mode1_point` 的现有速度上限。用户要求本轮不调速，因此首轮实车必须有人看护，并在
+门洞附近准备急停；任何 status `4`、NaN 或 `TF_NAN_INPUT` 都不得自动重跑。
+
+只部署、构建和测试（不启动 ROS、不发布速度）时，必须逐个指定远端子目录，不能把多个
+源文件一次复制到包根目录：
+
+```powershell
+$VEHICLE_HOST = 'ucar@<按 rosmaster/NETWORK_CONFIGURATION.md 发现的小车地址>'
+
+scp ucar_ws/src/ucar_2026/scripts/production_task_2026.py `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/scripts/"
+scp ucar_ws/src/ucar_2026/test/test_production_task_geometry.py `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/test/"
+scp ucar_ws/src/ucar_2026/launch/2026.launch `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/launch/"
+```
+
+然后在车端以当次动态发现的 `<MASTER_IP>` 构建并运行 Python 2 回归：
+
+```bash
+cd ~/ucar_ws
+source /opt/ros/melodic/setup.bash
+unset ROS_HOSTNAME
+export ROS_MASTER_URI="http://<MASTER_IP>:11311"
+export ROS_IP="$(ip -4 route get <MASTER_IP> | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+catkin_make --pkg ucar_2026 -DCATKIN_ENABLE_TESTING=ON
+source devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_MASTER_URI="http://<MASTER_IP>:11311"
+export ROS_IP="$(ip -4 route get <MASTER_IP> | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+~/ucar_ws/src/ucar_2026/scripts/run_melodic_python2.sh \
+  ~/ucar_ws/src/ucar_2026/test/test_production_task_geometry.py -v
+```
+
+用户明确允许实车后，启动唯一 WSL Master 并完成原有有限 odom/TF/雷达安全门。任务内部会在
+安全门通过后、前往 52 前锁存 `point`；`rostopic echo -n 1 /ucar/navigation_mode` 只能用于
+观察该已执行的锁定，不能替代或延后任务内部的安全门。结束时仍只用
+`~/ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh` 停车/停 launch，并停止 WSL Master。

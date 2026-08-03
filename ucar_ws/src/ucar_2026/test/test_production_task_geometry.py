@@ -214,6 +214,158 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         with self.assertRaises(task_module.MissionAbort):
             self.task.verify_position(16, "normal point 16")
 
+    def test_point_mode_is_published_without_body_projection(self):
+        messages = []
+
+        class NavigationModePublisher(object):
+            def get_num_connections(self):
+                return 1
+
+            def publish(self, message):
+                messages.append(message.data)
+
+        self.task.navigation_mode_pub = NavigationModePublisher()
+        self.task.navigation_mode_connect_timeout = 0.5
+        self.task.require_safe = lambda: None
+        self.task.publish_state = lambda _state: None
+
+        self.task.switch_to_point_mode()
+
+        self.assertEqual(messages, ["point", "point", "point"])
+
+    def test_point_mode_is_selected_before_staging_navigation(self):
+        events = []
+
+        class StopAtStaging(Exception):
+            pass
+
+        class MoveBase(object):
+            def wait_for_server(self, _timeout):
+                return True
+
+        self.task.move_base = MoveBase()
+        self.task.move_base_ready_timeout = 1.0
+        self.task.publish_state = lambda _state: None
+        self.task.wait_for_safe_start = lambda: events.append("safe_start")
+        self.task.switch_to_point_mode = lambda: events.append("point_mode")
+        self.task.resume_production_only = False
+        self.task.staging_point_number = 52
+        self.task.qr_observation_numbers = [262]
+        self.task.points = {52: (-1.75, 2.25), 262: (-2.50, 2.25)}
+
+        def navigate_to(*_args, **_kwargs):
+            events.append("staging_navigation")
+            raise StopAtStaging()
+
+        self.task.navigate_to = navigate_to
+        with self.assertRaises(StopAtStaging):
+            self.task.run_mission()
+
+        self.assertEqual(
+            events, ["safe_start", "point_mode", "staging_navigation"])
+
+    def test_point_mode_is_selected_before_resumed_production_navigation(self):
+        events = []
+
+        class StopAtFirstProductionLeg(Exception):
+            pass
+
+        class MoveBase(object):
+            def wait_for_server(self, _timeout):
+                return True
+
+        class QrPublisher(object):
+            def publish(self, _message):
+                pass
+
+        self.task.move_base = MoveBase()
+        self.task.move_base_ready_timeout = 1.0
+        self.task.publish_state = lambda _state: None
+        self.task.wait_for_safe_start = lambda: events.append("safe_start")
+        self.task.switch_to_point_mode = lambda: events.append("point_mode")
+        self.task.resume_production_only = True
+        self.task.qr_enable_pub = QrPublisher()
+        self.task.prepare_result_directory = lambda: None
+        self.task.use_ros_camera_for_ocr = True
+        self.task.camera_image_topic = "/usb_cam/image_raw"
+        self.task.start_native_ocr = lambda: None
+        self.task.production_route_numbers = [12]
+        self.task.production_navigation_legs = [(52, 12)]
+        self.task.production_observation_headings = [0.0]
+
+        def navigate_target_and_scan(*_args, **_kwargs):
+            events.append("production_navigation")
+            raise StopAtFirstProductionLeg()
+
+        self.task.navigate_target_and_scan = navigate_target_and_scan
+        with self.assertRaises(StopAtFirstProductionLeg):
+            self.task.run_mission()
+
+        self.assertEqual(
+            events, ["safe_start", "point_mode", "production_navigation"])
+
+    def test_qr_completion_does_not_switch_before_first_production_leg(self):
+        events = []
+
+        class StopAtFirstProductionLeg(Exception):
+            pass
+
+        class MoveBase(object):
+            def wait_for_server(self, _timeout):
+                return True
+
+            def cancel_all_goals(self):
+                pass
+
+        class QrPublisher(object):
+            def publish(self, _message):
+                pass
+
+        self.task.move_base = MoveBase()
+        self.task.move_base_ready_timeout = 1.0
+        self.task.publish_state = lambda _state: None
+        self.task.wait_for_safe_start = lambda: events.append("safe_start")
+        self.task.switch_to_point_mode = lambda: events.append("point_mode")
+        self.task.switch_to_body_projection = lambda: self.fail(
+            "QR completion must not select body_projection")
+        self.task.resume_production_only = False
+        self.task.staging_point_number = 52
+        self.task.qr_observation_numbers = [262]
+        self.task.points = {52: (-1.75, 2.25), 262: (-2.50, 2.25)}
+        self.task.stop_motion = lambda: None
+        self.task.wait_for_chassis_stop = lambda _context: None
+        self.task.wait_for_qr_scanner = lambda: None
+        self.task.start_ros_camera_and_wait = lambda _context: None
+        self.task.qr_enable_pub = QrPublisher()
+        self.task.scan_observation_point = (
+            lambda _number: events.append("qr_scan"))
+        self.task.stop_ros_camera_streaming = lambda required=True: None
+        self.task.prepare_result_directory = lambda: None
+        self.task.use_ros_camera_for_ocr = True
+        self.task.camera_image_topic = "/usb_cam/image_raw"
+        self.task.start_native_ocr = lambda: events.append("ocr_start")
+        self.task.production_route_numbers = [12]
+        self.task.production_navigation_legs = [(52, 12)]
+        self.task.production_observation_headings = [0.0]
+
+        def navigate_to(_number, _yaw, label):
+            events.append(label)
+
+        self.task.navigate_to = navigate_to
+
+        def navigate_target_and_scan(*_args, **_kwargs):
+            events.append("production_navigation")
+            raise StopAtFirstProductionLeg()
+
+        self.task.navigate_target_and_scan = navigate_target_and_scan
+        with self.assertRaises(StopAtFirstProductionLeg):
+            self.task.run_mission()
+
+        self.assertEqual(
+            events,
+            ["safe_start", "point_mode", "STAGING_52", "qr_scan",
+             "ocr_start", "production_navigation"])
+
     def test_camera_stream_start_and_stop_are_idempotent(self):
         events = []
         self.task.use_ros_camera_for_ocr = True
