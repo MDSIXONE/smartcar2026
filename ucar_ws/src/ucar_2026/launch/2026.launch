@@ -109,9 +109,8 @@
             <param name="start_delay" value="$(arg task_start_delay)"/>
             <param name="staging_point_number" value="52"/>
             <rosparam param="qr_observation_numbers">[262, 232, 295]</rosparam>
-            <!-- Every target is a separately guarded leg.  The task derives
-                 its four adjacent middle-wall endpoints from grid metadata;
-                 a confirmed hit skips this target and advances to the next. -->
+            <!-- Each target is reached before one OCR search revolution.  A
+                 candidate is centred/ranged; no candidate goes straight on. -->
             <rosparam param="production_route_numbers">[12, 23, 14, 25, 16]</rosparam>
             <rosparam param="production_observation_headings_deg">[-45, 45, -45, 45, 45]</rosparam>
             <!-- Timeout only: a fresh QR event advances immediately. -->
@@ -140,11 +139,9 @@
             <param name="ocr_side" value="640"/>
             <param name="camera_mirror" value="true"/>
             <param name="ocr_min_confidence" value="0.30"/>
-            <param name="straight_segment_angle_tolerance_deg" value="1.0"/>
-            <param name="navigation_ocr_poll_period" value="0.20"/>
-            <param name="navigation_ocr_candidate_confidence" value="60.0"/>
-            <param name="navigation_ocr_rearm_distance_m" value="0.25"/>
-            <param name="navigation_ocr_max_observations_per_segment" value="4"/>
+            <param name="ocr_scan_rotation_speed" value="0.18"/>
+            <param name="ocr_scan_poll_period" value="0.20"/>
+            <param name="ocr_scan_candidate_confidence" value="60.0"/>
             <param name="goal_cancel_timeout" value="3.0"/>
             <param name="stop_confirmation_timeout" value="2.0"/>
             <param name="stopped_odom_speed_epsilon" value="0.02"/>

@@ -25,7 +25,6 @@ from production_task_geometry import (  # noqa: E402
     bearing,
     build_straight_segments,
     load_numbered_points,
-    load_middle_target_guard_points,
     load_wall_reference_points,
     needs_recenter,
     normalize_angle,
@@ -120,20 +119,6 @@ class ProductionTaskGeometryTest(unittest.TestCase):
                 DEFAULT_PRODUCTION_ROUTE, self.points,
                 math.radians(1.0)),
             [(12, 23), (23, 14), (14, 25), (25, 16)])
-
-    def test_middle_target_guards_are_derived_from_adjacent_endpoints(self):
-        guards = load_middle_target_guard_points(
-            self.grid_path, DEFAULT_PRODUCTION_ROUTE)
-        self.assertEqual(
-            dict((number, sorted(points))
-                 for number, points in guards.items()),
-            {
-                12: [419, 420, 428, 429],
-                23: [429, 430, 438, 439],
-                14: [421, 422, 430, 431],
-                25: [431, 432, 440, 441],
-                16: [423, 424, 432, 433],
-            })
 
     def test_straight_segments_break_on_reverse_leg_and_turn(self):
         reverse_points = {
@@ -441,39 +426,70 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         with self.assertRaises(task_module.MissionAbort):
             self.task.cancel_navigation_for_observation("test")
 
-    def test_target_guard_matches_only_the_current_target_endpoints(self):
-        self.task.target_guard_points = {
-            12: {419: (-2.0, 1.0), 420: (-1.5, 1.0),
-                 428: (-2.0, 0.5), 429: (-1.5, 0.5)},
-            23: {429: (-1.5, 0.5), 430: (-1.0, 0.5),
-                 438: (-1.5, 0.0), 439: (-1.0, 0.0)},
-        }
-        self.assertTrue(self.task.target_guard_triggered(
-            12, {"wall_point_number": 419}))
-        self.assertFalse(self.task.target_guard_triggered(
-            12, {"wall_point_number": 430}))
-        self.assertFalse(self.task.target_guard_triggered(
-            12, {}))
-        self.assertTrue(self.task.target_guard_triggered(
-            23, {"wall_point_number": 430}))
+    def test_arrival_scan_without_ocr_records_empty_and_continues(self):
+        events = []
+        self.task.use_ros_camera_for_ocr = True
+        self.task.target_scan_events = []
+        self.task.start_ros_camera_and_wait = (
+            lambda label: events.append(("camera_start", label)))
+        self.task.stop_ros_camera_streaming = (
+            lambda required=True: events.append(("camera_stop", required)))
+        self.task.rotate_full_revolution_for_ocr = (
+            lambda _label: (None, 2.0 * math.pi))
+        self.task.save_observation_summary = lambda: events.append("save")
+        self.task.publish_state = lambda state: events.append(("state", state))
 
-    def test_target_guard_candidates_keep_normal_wall_references(self):
-        self.task.wall_reference_points = {297: (-0.75, 1.5)}
-        self.task.target_guard_points = {12: {419: (-2.0, 1.0)}}
+        self.assertIsNone(self.task.scan_production_point(1, 52, 12, "target"))
         self.assertEqual(
-            self.task.wall_candidates_for_target(12),
-            {297: (-0.75, 1.5), 419: (-2.0, 1.0)})
+            self.task.target_scan_events[0]["outcome"],
+            "no_ocr_after_full_turn")
+        self.assertEqual(events[1][0], "camera_start")
+        self.assertEqual(events[-1], ("camera_stop", True))
 
-    def test_target_guard_ocr_stays_armed_after_three_observations(self):
-        self.task.observations = [
-            {"wall_point_number": 294, "text": "a", "confidence": 90.0},
-            {"wall_point_number": 295, "text": "b", "confidence": 90.0},
-            {"wall_point_number": 296, "text": "c", "confidence": 90.0},
-        ]
-        self.task.last_observation_pose = None
-        self.assertFalse(self.task.continuous_ocr_is_armed())
-        self.assertTrue(self.task.continuous_ocr_is_armed(
-            continue_for_target_guard=True))
+    def test_arrival_scan_restores_capture_yaw_before_observing(self):
+        calls = []
+        response = {
+            "image_path": "turn.png",
+            "capture_requested_at": "now",
+            "capture_requested_pose_map": [1.0, 2.0, 0.3],
+            "detection": {"text": "label", "confidence": 91.0},
+        }
+        self.task.use_ros_camera_for_ocr = False
+        self.task.target_scan_events = []
+        self.task.observations = []
+        self.task.publish_state = lambda _state: None
+        self.task.rotate_full_revolution_for_ocr = (
+            lambda _label: (response, 1.2))
+        self.task.restore_ocr_capture_yaw = (
+            lambda _response, _label: calls.append("restore"))
+
+        def observe(point_number, _label):
+            calls.append(("observe", point_number))
+            return {"aligned": True, "wall_point_number": 297}
+
+        self.task.observe_wall = observe
+        self.task.save_observation_summary = lambda: calls.append("save")
+        observation = self.task.scan_production_point(1, 52, 12, "target")
+
+        self.assertEqual(calls[0], "restore")
+        self.assertEqual(calls[1], ("observe", 12))
+        self.assertEqual(observation["turn_detection_pose_map"], [1.0, 2.0, 0.3])
+        self.assertEqual(self.task.target_scan_events[0]["wall_point_number"], 297)
+
+    def test_restore_capture_yaw_precedes_alignment_recapture(self):
+        calls = []
+        self.task.current_map_pose = lambda _context: (1.0, 2.0, 0.9)
+        self.task.navigate_coordinates = (
+            lambda *args, **kwargs: calls.append((args, kwargs)))
+        self.task.wait_for_chassis_stop = (
+            lambda context: calls.append(("stop", context)))
+        self.task.restore_ocr_capture_yaw(
+            {"capture_requested_pose_map": [1.0, 2.0, 0.3]}, "test")
+
+        self.assertEqual(calls[0][0][0:3], (1.0, 2.0, 0.3))
+        self.assertFalse(calls[0][1]["require_plan"])
+        self.assertTrue(calls[0][1]["require_action_success"])
+        self.assertEqual(calls[1], ("stop", "test restore capture yaw"))
 
     def test_cancel_race_returns_succeeded_to_caller(self):
         class FakeMoveBase(object):

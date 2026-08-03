@@ -1767,8 +1767,9 @@ rosparam get /move_base/cym_planner/CymPlanner/elastic_activation_cost
 `2026.launch` 中的 `/usb_cam` 节点保持存在，但默认以
 `camera_start_suspended:=true` 启动，不使用 RViz/相机时不采集。
 任务到达 52 且停车后才开启 QR 相机；QR 结束到 OCR 模型加载完成期间再次暂停；
-连续 OCR 路线开始前重新开启；成功、异常或 shutdown 时暂停。这里的“暂停”是
-`VIDIOC_STREAMOFF`，减少 USB/转换/发布负载但不释放设备 fd。若
+生产阶段在每个目标到达后才重新开启并暖机，完成该点的 360° OCR 搜索、复拍与测距后立刻
+暂停，成功、异常或 shutdown 时也暂停。这里的“暂停”是 `VIDIOC_STREAMOFF`，减少
+USB/转换/发布负载但不释放设备 fd。若
 `use_ros_camera_for_ocr=false` 需要原生 V4L2，仍必须走任务已有的精确
 `rosnode kill /usb_cam` 释放路径。
 
@@ -1860,29 +1861,21 @@ rosservice call /usb_cam/stop_capture
 CymPlanner 报 local costmap not current 并保持零速。任何 NaN、TF_NAN、地图墙
 缺失、相机无新帧或重复控制周期超 50 ms 都应立即停止，不得进入完整任务。
 
-## 2026 中间区目标守卫路线
+## 2026 中间区到点 OCR 转圈路线
 
-二维码阶段结束后的生产目标固定为 `12 → 23 → 14 → 25 → 16`。每一条目标腿都在
-移动中连续 OCR；出现候选后，任务先取消当前 move_base 目标、连续发布零速度并等待
-新鲜低速里程计，再做 OCR 居中和新鲜前向雷达投影。只有投影命中误差不超过
-`wall_match_max_error_m` 的守卫端点，才会跳过当前目标并立即将下一目标作为新的
-move_base 目标。因此不会仅凭一次移动中的 OCR 文本直接改变路径。
+二维码阶段结束后的生产目标固定为 `12 → 23 → 14 → 25 → 16`，每一目标均按以下状态机
+执行：导航到点并验证到达 → 开启相机 → 原地最多顺时针转 360° 进行异步 OCR → 关闭相机
+→ 前往下一个目标。行驶途中不会调用 OCR，也不会因 OCR 结果改变当前导航目标。
 
-四个守卫端点由 `production_full_grid_all_numbered.json` 的 middle centre / line endpoint
-几何实时派生，不在 launch 或脚本中硬编码。当前映射如下：
+转圈期间的第一个合格 OCR 候选会立即连续发布零速度并等待新鲜低速里程计；由于推理结果
+可能在车辆已继续旋转后才返回，任务会先原地回到候选帧的拍摄朝向并再次验证停车，之后才
+进行 OCR 框居中、前向雷达测距、TF 投影和墙点匹配。转满一圈仍无候选时，仅记录
+`no_ocr_after_full_turn`，立即进入下一目标，不会中止任务。
 
-| 目标 | 守卫端点 |
-| --- | --- |
-| 12 | 419, 420, 428, 429 |
-| 23 | 429, 430, 438, 439 |
-| 14 | 421, 422, 430, 431 |
-| 25 | 431, 432, 440, 441 |
-| 16 | 423, 424, 432, 433 |
-
-守卫触发会写入运行目录的 `observations.json`：`target_guard_events` 记录被跳过的目标、
-端点和来源腿；对应 OCR/雷达记录仍保留在 `observations` 中，可参与三个不同识别点的结果
-选择。末点 16 没有“下一点”时，任务会维持已确认停止状态、记录该守卫事件并结束生产路线，
-不会尝试跨越守卫点继续移动。
+运行目录的 `observations.json` 保留成功候选的 OCR、雷达和墙点结果，并以
+`target_scan_events` 审计每个目标的完整转圈或候选。生产完成后仍要求得到三个不同的有效
+墙点；不足三个时安全停止并报告任务失败。`ocr_scan_rotation_speed`、
+`ocr_scan_poll_period` 和 `ocr_scan_candidate_confidence` 可在 `2026.launch` 中调节。
 
 部署、构建和测试不启动 ROS、不发布速度。小车地址和 WSL Master 必须按
 `rosmaster/NETWORK_CONFIGURATION.md` 在当次网络中发现，示例中的变量不是固定 IP：

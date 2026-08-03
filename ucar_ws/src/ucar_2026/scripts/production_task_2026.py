@@ -10,12 +10,11 @@ Flow:
   3. Disable QR decoding and start the Python 3 OCR helper.  In the default
      configuration the helper consumes frames saved from the ROS usb_cam topic.
   4. Switch CymPlanner collision checking to body_projection.
-  5. Navigate the configured production targets in order.  OCR runs
-     continuously while move_base follows every target leg.  A candidate first
-     cancels navigation and passes a fresh-odometry stop gate; only then may
-     the task align the box and read the front lidar distance.  When that
-     projected hit is one of the target's four adjacent middle-wall endpoints,
-     the task records the guard event and advances directly to the next target.
+  5. Navigate each configured production target.  After arrival, turn at most
+     one full revolution while querying OCR.  A candidate stops the turn,
+     passes a fresh-odometry stop gate, then aligns the box and reads the front
+     lidar distance.  A full turn without a candidate proceeds immediately to
+     the next target.
   6. Save every attempt plus the three strongest distinct wall observations.
 
 The node never drives to the QR edge points: they lie on the field boundary.
@@ -52,10 +51,8 @@ from production_task_geometry import (
     DEFAULT_PRODUCTION_ROUTE,
     TaskDefinitionError,
     bearing,
-    build_straight_segments,
     is_finite,
     load_numbered_points,
-    load_middle_target_guard_points,
     load_wall_reference_points,
     needs_recenter,
     normalize_angle,
@@ -186,16 +183,14 @@ class ProductionTask2026(object):
             rospy.get_param("~ocr_helper_ready_timeout", 45.0))
         self.ocr_capture_timeout = float(
             rospy.get_param("~ocr_capture_timeout", 12.0))
-        self.navigation_ocr_poll_period = float(
-            rospy.get_param("~navigation_ocr_poll_period", 0.20))
-        self.navigation_ocr_candidate_confidence = float(
-            rospy.get_param(
-                "~navigation_ocr_candidate_confidence", 60.0))
-        self.navigation_ocr_rearm_distance = float(
-            rospy.get_param("~navigation_ocr_rearm_distance_m", 0.25))
-        self.navigation_ocr_max_observations_per_segment = max(
-            1, int(rospy.get_param(
-                "~navigation_ocr_max_observations_per_segment", 4)))
+        self.ocr_scan_rotation_speed = abs(float(rospy.get_param(
+            "~ocr_scan_rotation_speed", 0.18)))
+        self.ocr_scan_poll_period = float(rospy.get_param(
+            "~ocr_scan_poll_period",
+            rospy.get_param("~navigation_ocr_poll_period", 0.20)))
+        self.ocr_scan_candidate_confidence = float(rospy.get_param(
+            "~ocr_scan_candidate_confidence",
+            rospy.get_param("~navigation_ocr_candidate_confidence", 60.0)))
         self.ocr_min_confidence = float(
             rospy.get_param("~ocr_min_confidence", 0.30))
         self.ocr_alignment_tolerance_px = float(
@@ -240,25 +235,25 @@ class ProductionTask2026(object):
         if self.ocr_alignment_max_speed <= 0.0:
             raise TaskDefinitionError(
                 "ocr_alignment_max_speed must be positive")
-        continuous_ocr_values = (
-            self.navigation_ocr_poll_period,
-            self.navigation_ocr_candidate_confidence,
-            self.navigation_ocr_rearm_distance,
+        ocr_scan_values = (
+            self.ocr_scan_rotation_speed,
+            self.ocr_scan_poll_period,
+            self.ocr_scan_candidate_confidence,
             self.goal_cancel_timeout,
             self.stop_confirmation_timeout,
             self.stopped_odom_speed_epsilon,
         )
         if (
                 not all(is_finite(value)
-                        for value in continuous_ocr_values) or
-                self.navigation_ocr_poll_period <= 0.0 or
-                self.navigation_ocr_candidate_confidence < 0.0 or
+                        for value in ocr_scan_values) or
+                self.ocr_scan_rotation_speed <= 0.0 or
+                self.ocr_scan_poll_period <= 0.0 or
+                self.ocr_scan_candidate_confidence < 0.0 or
                 self.goal_cancel_timeout <= 0.0 or
                 self.stop_confirmation_timeout <= 0.0 or
-                self.stopped_odom_speed_epsilon < 0.0 or
-                self.navigation_ocr_rearm_distance < 0.0):
+                self.stopped_odom_speed_epsilon < 0.0):
             raise TaskDefinitionError(
-                "continuous OCR timing and stop-gate parameters are invalid")
+                "OCR turn-scan timing and stop-gate parameters are invalid")
         if not (
                 0.0 < self.post_turn_recenter_trigger <
                 self.arrival_tolerance):
@@ -272,11 +267,6 @@ class ProductionTask2026(object):
             self.production_route_numbers)
         self.points = load_numbered_points(self.grid_path)
         require_points(self.points, all_required_numbers)
-        self.production_segments = build_straight_segments(
-            self.production_route_numbers, self.points,
-            self.straight_segment_angle_tolerance)
-        self.target_guard_points = load_middle_target_guard_points(
-            self.grid_path, self.production_route_numbers)
         self.production_navigation_legs = [
             (self.staging_point_number, self.production_route_numbers[0])
         ] + list(zip(
@@ -323,10 +313,9 @@ class ProductionTask2026(object):
         self.ocr_process = None
         self.ocr_log_handle = None
         self.observations = []
-        self.target_guard_events = []
+        self.target_scan_events = []
         self.run_directory = None
         self.capture_sequence = 0
-        self.last_observation_pose = None
 
         rospy.Subscriber(
             "/odom_raw", Odometry, self.odom_cb, queue_size=20)
@@ -516,18 +505,14 @@ class ProductionTask2026(object):
         else:
             self.release_ros_camera()
         self.start_native_ocr()
-        if self.use_ros_camera_for_ocr:
-            self.start_ros_camera_and_wait("continuous production OCR")
         self.switch_to_body_projection()
 
         rospy.loginfo(
-            "PRODUCTION_TARGET_LEGS %s guards=%s",
-            self.production_navigation_legs,
-            dict((number, sorted(points))
-                 for number, points in self.target_guard_points.items()))
+            "PRODUCTION_TARGET_LEGS %s arrival_ocr_turn=360deg",
+            self.production_navigation_legs)
         for segment_index, (start_number, end_number) in enumerate(
                 self.production_navigation_legs, 1):
-            self.navigate_segment_with_continuous_ocr(
+            self.navigate_target_and_scan(
                 segment_index, start_number, end_number,
                 target_yaw=self.production_observation_headings[
                     segment_index - 1])
@@ -1020,18 +1005,6 @@ class ProductionTask2026(object):
             require_action_success=True)
         self.wait_for_chassis_stop(context + " protected alignment")
 
-    def continuous_ocr_is_armed(self, continue_for_target_guard=False):
-        if (
-                not continue_for_target_guard and
-                len(select_three_observations(self.observations)) >= 3):
-            return False
-        if self.last_observation_pose is None:
-            return True
-        current = self.current_map_pose("continuous OCR rearm")
-        return position_error(
-            current, self.last_observation_pose) >= (
-                self.navigation_ocr_rearm_distance)
-
     def wait_for_chassis_stop(self, context):
         """Require fresh low-velocity odometry before any alignment rotation."""
         deadline = (
@@ -1130,10 +1103,195 @@ class ProductionTask2026(object):
             "move_base_status=%d",
             label, end_number, error, status)
 
+    def navigate_target_and_scan(
+            self, leg_index, start_number, end_number, target_yaw):
+        """Reach one target before performing its bounded OCR turn scan."""
+        target = self.points[end_number]
+        label = "PRODUCTION_TARGET_%03d" % end_number
+        self.publish_state(label)
+        rospy.loginfo(
+            "PRODUCTION_TARGET_GOAL index=%d/%d start=%d end=%d "
+            "target=(%.3f, %.3f) yaw=%.3f",
+            leg_index, len(self.production_navigation_legs),
+            start_number, end_number, target[0], target[1], target_yaw)
+        self.navigate_coordinates(
+            target[0], target[1], target_yaw, label, require_plan=True)
+        self.scan_production_point(leg_index, start_number, end_number, label)
+
+    def scan_production_point(
+            self, leg_index, start_number, point_number, target_label):
+        """Search one arrived target for at most 360 degrees of OCR."""
+        scan_label = "PRODUCTION_OCR_TURN_%03d" % point_number
+        self.publish_state(scan_label)
+        if self.use_ros_camera_for_ocr:
+            self.start_ros_camera_and_wait(scan_label)
+        try:
+            response, turn_progress = self.rotate_full_revolution_for_ocr(
+                scan_label)
+            event = {
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "target_point_number": int(point_number),
+                "segment_index": int(leg_index),
+                "segment_start_point_number": int(start_number),
+                "turn_progress_radians": float(turn_progress),
+            }
+            if response is None:
+                event["outcome"] = "no_ocr_after_full_turn"
+                self.target_scan_events.append(event)
+                self.save_observation_summary()
+                rospy.loginfo(
+                    "PRODUCTION_OCR_TURN_EMPTY target=%d progress=%.3f; "
+                    "continuing to next target",
+                    point_number, turn_progress)
+                return None
+
+            detection = response["detection"]
+            self.restore_ocr_capture_yaw(response, scan_label)
+            observation_label = "%s_MATCH" % scan_label
+            self.publish_state(observation_label)
+            observation = self.observe_wall(point_number, observation_label)
+            observation.update({
+                "segment_index": int(leg_index),
+                "segment_start_point_number": int(start_number),
+                "segment_end_point_number": int(point_number),
+                "turn_progress_radians": float(turn_progress),
+                "turn_detection_image_path": response["image_path"],
+                "turn_detection": detection,
+                "turn_detection_capture_requested_at":
+                    response["capture_requested_at"],
+                "turn_detection_pose_map":
+                    list(response["capture_requested_pose_map"]),
+            })
+            event.update({
+                "outcome": "ocr_candidate",
+                "text": detection["text"],
+                "confidence": float(detection["confidence"]),
+                "observation_aligned": bool(observation["aligned"]),
+                "wall_point_number": observation.get("wall_point_number"),
+            })
+            self.observations.append(observation)
+            self.target_scan_events.append(event)
+            self.save_observation_summary()
+            rospy.loginfo(
+                "PRODUCTION_OCR_TURN_MATCH target=%d text=%s progress=%.3f",
+                point_number, json.dumps(detection["text"], ensure_ascii=True),
+                turn_progress)
+            return observation
+        finally:
+            if self.use_ros_camera_for_ocr:
+                self.stop_ros_camera_streaming(required=not rospy.is_shutdown())
+
+    def restore_ocr_capture_yaw(self, response, context):
+        """Return to the candidate frame yaw before the alignment re-capture."""
+        capture_pose = response.get("capture_requested_pose_map")
+        if not isinstance(capture_pose, (list, tuple)) or len(capture_pose) != 3:
+            raise MissionAbort(
+                "%s OCR candidate has no capture pose" % context)
+        if not all(is_finite(float(value)) for value in capture_pose):
+            raise MissionAbort(
+                "%s OCR candidate capture pose is not finite" % context)
+        current = self.current_map_pose(context + " restore yaw start")
+        self.navigate_coordinates(
+            current[0], current[1], float(capture_pose[2]),
+            context + " restore capture yaw",
+            require_plan=False, require_action_success=True)
+        self.wait_for_chassis_stop(context + " restore capture yaw")
+
+    def rotate_full_revolution_for_ocr(self, label):
+        """Turn with nonblocking OCR and return its first valid candidate."""
+        self.move_base.cancel_all_goals()
+        self.stop_motion()
+        self.wait_for_chassis_stop(label + " start")
+        self.require_safe()
+        direction = 1.0
+        speed = self.ocr_scan_rotation_speed
+        previous_yaw = self.current_odom_yaw(label)
+        progress = 0.0
+        target_progress = 2.0 * math.pi
+        timeout = target_progress / speed * self.rotation_timeout_scale + 2.0
+        deadline = rospy.Time.now() + rospy.Duration(timeout)
+        next_capture = rospy.Time.now()
+        capture_index = 0
+        capture_task = None
+        rate = rospy.Rate(self.rotation_control_rate)
+        rospy.loginfo(
+            "PRODUCTION_OCR_TURN_START label=%s speed=%.3f timeout=%.1f",
+            label, speed, timeout)
+        try:
+            while not rospy.is_shutdown() and rospy.Time.now() < deadline:
+                self.require_safe()
+                if capture_task is not None and capture_task["done"].is_set():
+                    completed_task = capture_task
+                    capture_task = None
+                    response = self.finish_async_motion_ocr(completed_task)
+                    if is_navigation_ocr_candidate(
+                            response, self.ocr_scan_candidate_confidence):
+                        self.stop_motion()
+                        self.wait_for_chassis_stop(label + " candidate")
+                        rospy.loginfo(
+                            "PRODUCTION_OCR_TURN_CANDIDATE label=%s "
+                            "progress=%.3f text=%s confidence=%.1f",
+                            label, progress,
+                            json.dumps(response["detection"]["text"],
+                                       ensure_ascii=True),
+                            response["detection"]["confidence"])
+                        return response, progress
+                    self.discard_unmatched_motion_frame(response)
+                    next_capture = (
+                        rospy.Time.now() +
+                        rospy.Duration(self.ocr_scan_poll_period))
+
+                current_yaw = self.current_odom_yaw(label)
+                progress += positive_turn_increment(
+                    previous_yaw, current_yaw, direction)
+                previous_yaw = current_yaw
+                if progress >= (
+                        target_progress - self.rotation_completion_tolerance):
+                    self.stop_motion()
+                    self.wait_for_chassis_stop(label + " complete")
+                    if capture_task is not None:
+                        completed_task = capture_task
+                        capture_task = None
+                        response = self.finish_async_motion_ocr(
+                            completed_task, keep_stopped=True)
+                        if is_navigation_ocr_candidate(
+                                response,
+                                self.ocr_scan_candidate_confidence):
+                            rospy.loginfo(
+                                "PRODUCTION_OCR_TURN_FINAL_CANDIDATE "
+                                "label=%s progress=%.3f", label, progress)
+                            return response, progress
+                        self.discard_unmatched_motion_frame(response)
+                    rospy.loginfo(
+                        "PRODUCTION_OCR_TURN_COMPLETE label=%s progress=%.3f",
+                        label, progress)
+                    return None, progress
+
+                if (
+                        capture_task is None and
+                        rospy.Time.now() >= next_capture):
+                    capture_index += 1
+                    capture_task = self.start_async_motion_ocr(
+                        "%s_capture_%04d" % (label, capture_index))
+
+                command = Twist()
+                command.angular.z = direction * speed
+                self.cmd_vel_pub.publish(command)
+                rate.sleep()
+        finally:
+            self.stop_motion()
+            if capture_task is not None:
+                self.cleanup_async_motion_ocr(capture_task)
+        raise MissionAbort(
+            "%s did not complete a 360-degree OCR turn within %.1f s" %
+            (label, timeout))
+
     def navigate_segment_with_continuous_ocr(
             self, segment_index, start_number, end_number,
             target_yaw=None):
-        """Navigate one guarded target leg, stopping only for OCR candidates."""
+        """Retired safety gate: production OCR may not run while moving."""
+        raise MissionAbort(
+            "continuous moving OCR is retired; use navigate_target_and_scan")
         start_coordinate = self.points[start_number]
         end_coordinate = self.points[end_number]
         if target_yaw is None:
@@ -1492,10 +1650,7 @@ class ProductionTask2026(object):
         payload = {
             "route": self.production_route_numbers,
             "target_legs": self.production_navigation_legs,
-            "target_guard_points": dict(
-                (str(number), sorted(points))
-                for number, points in self.target_guard_points.items()),
-            "target_guard_events": self.target_guard_events,
+            "target_scan_events": self.target_scan_events,
             "observations": self.observations,
             "recognized_points": select_three_observations(
                 self.observations),
