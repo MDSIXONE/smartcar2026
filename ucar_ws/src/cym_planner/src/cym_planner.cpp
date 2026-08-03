@@ -1,54 +1,261 @@
 #include "cym_planner.h"
-#include "cym_planner/velocity_profile.h"
+#include "cym_planner/global_cost_semantics.h"
 
+#include <cv_bridge/cv_bridge.h>
+#include <boost/thread/locks.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
 #include <pluginlib/class_list_macros.h>
-#include <sensor_msgs/PointCloud2.h>
-#include <sensor_msgs/point_cloud2_iterator.h>
-#include <std_msgs/String.h>
+#include <sensor_msgs/image_encodings.h>
 #include <tf/transform_datatypes.h>
 
 #include <algorithm>
 #include <cctype>
+#include <clocale>
 #include <cmath>
 #include <limits>
-#include <sstream>
+#include <vector>
 
 PLUGINLIB_EXPORT_CLASS(cym_planner::CymPlanner, nav_core::BaseLocalPlanner)
 
 namespace
 {
-constexpr double kPi = 3.14159265358979323846;
 
-double clampValue(double value, double lower, double upper)
+const double kTargetDistance = 0.20;
+const double kGoalPositionTolerance = 0.05;
+const double kPi = 3.14159265358979323846;
+
+double clampValue(double value, double minimum, double maximum)
 {
-    return std::max(lower, std::min(value, upper));
+    return cym_planner::finiteClamp(value, minimum, maximum);
 }
+
+bool poseIsFinite(const geometry_msgs::PoseStamped& pose)
+{
+    return std::isfinite(pose.pose.position.x) &&
+        std::isfinite(pose.pose.position.y) &&
+        std::isfinite(pose.pose.position.z) &&
+        std::isfinite(pose.pose.orientation.x) &&
+        std::isfinite(pose.pose.orientation.y) &&
+        std::isfinite(pose.pose.orientation.z) &&
+        std::isfinite(pose.pose.orientation.w);
+}
+
+bool commandIsFinite(const geometry_msgs::Twist& command)
+{
+    return std::isfinite(command.linear.x) &&
+        std::isfinite(command.linear.y) &&
+        std::isfinite(command.angular.z);
+}
+
+std::string normalizedFrameId(const std::string& frame_id)
+{
+    const std::string::size_type first =
+        frame_id.find_first_not_of('/');
+    return first == std::string::npos ?
+        std::string() : frame_id.substr(first);
+}
+
+class ControlCycleWatchdog
+{
+public:
+    ControlCycleWatchdog()
+        : started_(ros::WallTime::now())
+    {
+    }
+
+    ~ControlCycleWatchdog()
+    {
+        const double elapsed =
+            (ros::WallTime::now() - started_).toSec();
+        if(elapsed > 0.05)
+        {
+            ROS_ERROR_THROTTLE(
+                1.0,
+                "cym_planner: control cycle exceeded 50 ms: %.1f ms",
+                elapsed * 1000.0);
+        }
+    }
+
+private:
+    ros::WallTime started_;
+};
 
 double normalizeAngle(double angle)
 {
     while(angle > kPi)
-    {
         angle -= 2.0 * kPi;
-    }
     while(angle < -kPi)
-    {
         angle += 2.0 * kPi;
-    }
     return angle;
 }
 
-template <typename T>
-void readPlannerParam(const ros::NodeHandle& planner_nh,
-                      const ros::NodeHandle& legacy_nh,
+template<typename T>
+void readPlannerParam(const ros::NodeHandle& primary,
+                      const ros::NodeHandle& canonical,
+                      const ros::NodeHandle& legacy,
                       const std::string& key,
                       T& value,
                       const T& default_value)
 {
-    if(!planner_nh.getParam(key, value))
+    if(primary.getParam(key, value) ||
+       canonical.getParam(key, value) ||
+       legacy.getParam(key, value))
     {
-        legacy_nh.param<T>(key, value, default_value);
+        return;
     }
+    value = default_value;
 }
+
+cym_planner::PlannerTuning pointDefaults()
+{
+    cym_planner::PlannerTuning tuning;
+    tuning.linear_x_gain = 1.5;
+    tuning.linear_x_kd = 0.5;
+    tuning.angular_gain = 2.5;
+    tuning.angular_kd = 0.4;
+    tuning.max_vel_x = 0.5;
+    tuning.max_vel_theta = 1.0;
+    tuning.final_yaw_gain = 2.0;
+    tuning.final_yaw_max_vel = 1.0;
+    tuning.final_yaw_tolerance = 0.10;
+    tuning.final_linear_x_gain = 1.0;
+    tuning.obstacle_lookahead_distance = 0.25;
+    tuning.obstacle_cost_threshold = 253;
+    tuning.carry_speed_scale = 1.0;
+    tuning.heading_slowdown_min_scale = 1.0;
+    tuning.command_sweep_time = 0.0;
+    tuning.command_sweep_step = 0.025;
+    return tuning;
+}
+
+cym_planner::PlannerTuning bodyProjectionDefaults()
+{
+    cym_planner::PlannerTuning tuning;
+    tuning.linear_x_gain = 0.9;
+    tuning.linear_x_kd = 0.2;
+    tuning.angular_gain = 2.0;
+    tuning.angular_kd = 0.2;
+    tuning.max_vel_x = 0.22;
+    tuning.max_vel_theta = 0.55;
+    tuning.final_yaw_gain = 1.5;
+    tuning.final_yaw_max_vel = 0.35;
+    tuning.final_yaw_tolerance = 0.10;
+    tuning.final_linear_x_gain = 0.6;
+    tuning.obstacle_lookahead_distance = 0.30;
+    tuning.obstacle_cost_threshold = 253;
+    tuning.carry_speed_scale = 1.0;
+    tuning.heading_slowdown_min_scale = 0.15;
+    tuning.command_sweep_time = 0.40;
+    tuning.command_sweep_step = 0.025;
+    return tuning;
+}
+
+void readTuning(
+    const ros::NodeHandle& primary,
+    const ros::NodeHandle& canonical,
+    const ros::NodeHandle& legacy,
+    const std::string& prefix,
+    const cym_planner::PlannerTuning& defaults,
+    cym_planner::PlannerTuning& tuning)
+{
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/linear_x_gain",
+                     tuning.linear_x_gain, defaults.linear_x_gain);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/linear_x_kd",
+                     tuning.linear_x_kd, defaults.linear_x_kd);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/angular_gain",
+                     tuning.angular_gain, defaults.angular_gain);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/angular_kd",
+                     tuning.angular_kd, defaults.angular_kd);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/max_vel_x",
+                     tuning.max_vel_x, defaults.max_vel_x);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/max_vel_theta",
+                     tuning.max_vel_theta, defaults.max_vel_theta);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/final_yaw_gain",
+                     tuning.final_yaw_gain, defaults.final_yaw_gain);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/final_yaw_max_vel",
+                     tuning.final_yaw_max_vel,
+                     defaults.final_yaw_max_vel);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/final_yaw_tolerance",
+                     tuning.final_yaw_tolerance,
+                     defaults.final_yaw_tolerance);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/final_linear_x_gain",
+                     tuning.final_linear_x_gain,
+                     defaults.final_linear_x_gain);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/obstacle_lookahead_distance",
+                     tuning.obstacle_lookahead_distance,
+                     defaults.obstacle_lookahead_distance);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/obstacle_cost_threshold",
+                     tuning.obstacle_cost_threshold,
+                     defaults.obstacle_cost_threshold);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/carry_speed_scale",
+                     tuning.carry_speed_scale,
+                     defaults.carry_speed_scale);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/heading_slowdown_min_scale",
+                     tuning.heading_slowdown_min_scale,
+                     defaults.heading_slowdown_min_scale);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/command_sweep_time",
+                     tuning.command_sweep_time,
+                     defaults.command_sweep_time);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/command_sweep_step",
+                     tuning.command_sweep_step,
+                     defaults.command_sweep_step);
+}
+
+void sanitizeTuning(cym_planner::PlannerTuning& tuning)
+{
+    tuning.linear_x_gain = std::max(0.0, tuning.linear_x_gain);
+    tuning.linear_x_kd = std::max(0.0, tuning.linear_x_kd);
+    tuning.angular_gain = std::max(0.0, tuning.angular_gain);
+    tuning.angular_kd = std::max(0.0, tuning.angular_kd);
+    tuning.max_vel_x = std::max(0.0, tuning.max_vel_x);
+    tuning.max_vel_theta = std::max(0.0, tuning.max_vel_theta);
+    tuning.final_yaw_gain = std::max(0.0, tuning.final_yaw_gain);
+    tuning.final_yaw_max_vel =
+        std::max(0.0, tuning.final_yaw_max_vel);
+    tuning.final_yaw_tolerance =
+        clampValue(tuning.final_yaw_tolerance, 0.01, kPi);
+    tuning.final_linear_x_gain =
+        std::max(0.0, tuning.final_linear_x_gain);
+    tuning.obstacle_lookahead_distance =
+        std::max(0.0, tuning.obstacle_lookahead_distance);
+    tuning.obstacle_cost_threshold = static_cast<int>(
+        clampValue(
+            static_cast<double>(tuning.obstacle_cost_threshold),
+            0.0, 255.0));
+    tuning.carry_speed_scale =
+        clampValue(tuning.carry_speed_scale, 0.05, 1.0);
+    tuning.heading_slowdown_min_scale =
+        clampValue(tuning.heading_slowdown_min_scale, 0.0, 1.0);
+    tuning.command_sweep_time =
+        clampValue(tuning.command_sweep_time, 0.0, 1.0);
+    if(!std::isfinite(tuning.command_sweep_step) ||
+       tuning.command_sweep_step <= 0.0)
+    {
+        ROS_ERROR(
+            "cym_planner: command_sweep_step must be finite and positive; "
+            "forcing safety default 0.025 s");
+        tuning.command_sweep_step = 0.025;
+    }
+    tuning.command_sweep_step =
+        clampValue(tuning.command_sweep_step, 0.005, 0.05);
+}
+
 }  // namespace
 
 namespace cym_planner
@@ -56,21 +263,36 @@ namespace cym_planner
 
 CymPlanner::CymPlanner()
     : initialized_(false),
-      tf_listener_(nullptr),
-      costmap_ros_(nullptr),
+      tf_listener_(NULL),
+      costmap_ros_(NULL),
+      debug_images_enabled_(false),
+      escape_enabled_(false),
       target_index_(0),
       pose_adjusting_(false),
       goal_reached_(false),
       carry_mode_(false),
-      main_legacy_previous_linear_error_(0.0),
-      main_legacy_previous_control_time_(ros::Time(0)),
-      main_legacy_linear_derivative_initialized_(false),
-      previous_laser_command_time_(ros::Time(0)),
-      laser_blocked_since_(ros::Time(0)),
-      laser_blocked_zero_published_(false),
-      laser_avoidance_enabled_(false),
-      have_scan_(false)
+      body_projection_enabled_(false),
+      escape_blocked_since_(ros::Time(0)),
+      escape_wait_until_(ros::Time(0)),
+      escape_motion_started_(ros::Time(0)),
+      escape_active_(false),
+      escape_attempts_(0),
+      escape_total_distance_(0.0),
+      escape_start_world_x_(0.0),
+      escape_start_world_y_(0.0),
+      escape_start_world_yaw_(0.0),
+      escape_direction_base_x_(0.0),
+      escape_direction_base_y_(0.0),
+      escape_direction_world_x_(0.0),
+      escape_direction_world_y_(0.0),
+      previous_linear_error_(0.0),
+      previous_linear_control_time_(ros::Time(0)),
+      linear_derivative_initialized_(false),
+      previous_heading_error_(0.0),
+      previous_heading_control_time_(ros::Time(0)),
+      angular_derivative_initialized_(false)
 {
+    setlocale(LC_ALL, "");
 }
 
 CymPlanner::~CymPlanner()
@@ -82,330 +304,247 @@ void CymPlanner::initialize(std::string name, tf2_ros::Buffer* /* tf */,
                             costmap_2d::Costmap2DROS* costmap_ros)
 {
     if(initialized_)
-    {
-        ROS_WARN("cym_planner: initialize called more than once; ignoring duplicate call");
         return;
-    }
 
-    costmap_ros_ = costmap_ros;
     tf_listener_ = new tf::TransformListener();
+    costmap_ros_ = costmap_ros;
 
     ros::NodeHandle planner_nh("~/" + name);
+    ros::NodeHandle canonical_nh("~/cym_planner/CymPlanner");
     ros::NodeHandle legacy_nh("~/CymPlanner");
-    readPlannerParam(planner_nh, legacy_nh, "base_link_frame", base_link_frame_,
-                     std::string("base_link"));
-    readPlannerParam(planner_nh, legacy_nh, "scan_topic", scan_topic_,
-                     std::string("/scan_filtered"));
-    readPlannerParam(planner_nh, legacy_nh, "lookahead_distance", lookahead_distance_, 0.50);
-    readPlannerParam(planner_nh, legacy_nh, "linear_x_gain", linear_x_gain_, 1.50);
-    readPlannerParam(planner_nh, legacy_nh, "angular_gain", angular_gain_, 2.0);
-    readPlannerParam(planner_nh, legacy_nh, "max_vel_x", max_vel_x_, 0.5);
-    readPlannerParam(planner_nh, legacy_nh, "max_vel_theta", max_vel_theta_, 1.5);
-    readPlannerParam(planner_nh, legacy_nh, "final_yaw_gain", final_yaw_gain_, 2.0);
-    readPlannerParam(planner_nh, legacy_nh, "final_yaw_max_vel", final_yaw_max_vel_, 1.2);
-    readPlannerParam(planner_nh, legacy_nh, "final_yaw_tolerance", final_yaw_tolerance_, 0.10);
-    readPlannerParam(planner_nh, legacy_nh, "final_linear_x_gain", final_linear_x_gain_, 1.5);
-    readPlannerParam(planner_nh, legacy_nh, "goal_position_tolerance",
-                     goal_position_tolerance_, 0.05);
-    readPlannerParam(planner_nh, legacy_nh, "carry_speed_scale", carry_speed_scale_, 1.0);
-    readPlannerParam(planner_nh, legacy_nh, "main_legacy_target_distance",
-                     main_legacy_target_distance_, 0.20);
-    readPlannerParam(planner_nh, legacy_nh, "main_legacy_linear_x_gain",
-                     main_legacy_linear_x_gain_, 1.5);
-    readPlannerParam(planner_nh, legacy_nh, "main_legacy_linear_x_kd",
-                     main_legacy_linear_x_kd_, 0.05);
-    readPlannerParam(planner_nh, legacy_nh, "main_legacy_angular_gain",
-                     main_legacy_angular_gain_, 2.5);
-    readPlannerParam(planner_nh, legacy_nh, "main_legacy_max_vel_x",
-                     main_legacy_max_vel_x_, 0.5);
-    readPlannerParam(planner_nh, legacy_nh, "main_legacy_max_vel_theta",
-                     main_legacy_max_vel_theta_, 1.0);
-    readPlannerParam(planner_nh, legacy_nh, "main_legacy_final_yaw_gain",
-                     main_legacy_final_yaw_gain_, 2.0);
-    readPlannerParam(planner_nh, legacy_nh, "main_legacy_final_yaw_max_vel",
-                     main_legacy_final_yaw_max_vel_, 1.0);
-    readPlannerParam(planner_nh, legacy_nh, "main_legacy_final_yaw_tolerance",
-                     main_legacy_final_yaw_tolerance_, 0.10);
-    readPlannerParam(planner_nh, legacy_nh, "main_legacy_final_linear_x_gain",
-                     main_legacy_final_linear_x_gain_, 1.0);
-    readPlannerParam(planner_nh, legacy_nh, "main_legacy_goal_position_tolerance",
-                     main_legacy_goal_position_tolerance_, 0.05);
-    readPlannerParam(planner_nh, legacy_nh,
-                     "main_legacy_obstacle_lookahead_distance",
-                     main_legacy_obstacle_lookahead_distance_, 0.30);
-    readPlannerParam(planner_nh, legacy_nh, "main_legacy_obstacle_cost_threshold",
-                     main_legacy_obstacle_cost_threshold_, 253);
-    std::string navigation_mode;
-    readPlannerParam(planner_nh, legacy_nh, "navigation_mode", navigation_mode,
-                     std::string("laser_avoidance"));
-    if(!setNavigationMode(navigation_mode))
-    {
-        ROS_WARN("[DEBUG:MODE] cym_planner: invalid navigation_mode '%s'; using laser_avoidance",
-                 navigation_mode.c_str());
-        laser_avoidance_enabled_.store(true);
-    }
 
-    readPlannerParam(planner_nh, legacy_nh, "scan_timeout", scan_timeout_, 0.25);
-    readPlannerParam(planner_nh, legacy_nh, "scan_min_range", scan_min_range_, 0.03);
-    readPlannerParam(planner_nh, legacy_nh, "scan_max_range", scan_max_range_, 4.0);
-    readPlannerParam(planner_nh, legacy_nh, "laser_projection_step",
-                     laser_projection_step_, 0.03);
-    readPlannerParam(planner_nh, legacy_nh, "safety_margin", safety_margin_, 0.035);
-    readPlannerParam(planner_nh, legacy_nh, "braking_deceleration", braking_deceleration_, 3.0);
-    readPlannerParam(planner_nh, legacy_nh, "minimum_moving_clearance",
-                     minimum_moving_clearance_, 0.10);
-    readPlannerParam(planner_nh, legacy_nh, "laser_blocked_grace_period",
-                     laser_blocked_grace_period_, 0.25);
-    readPlannerParam(planner_nh, legacy_nh, "laser_blocked_hold_max_velocity",
-                     laser_blocked_hold_max_velocity_, 0.10);
-    readPlannerParam(planner_nh, legacy_nh, "laser_blocked_stop_deceleration",
-                     laser_blocked_stop_deceleration_, 0.25);
-    readPlannerParam(planner_nh, legacy_nh,
-                     "laser_blocked_stop_angular_deceleration",
-                     laser_blocked_stop_angular_deceleration_, 1.0);
-    readPlannerParam(planner_nh, legacy_nh,
-                     "laser_command_linear_rate_limit",
-                     laser_command_linear_rate_limit_, 0.50);
-    readPlannerParam(planner_nh, legacy_nh,
-                     "laser_command_angular_rate_limit",
-                     laser_command_angular_rate_limit_, 4.0);
-    readPlannerParam(planner_nh, legacy_nh, "reaction_time", reaction_time_, 0.05);
-    readPlannerParam(planner_nh, legacy_nh, "simulation_time", simulation_time_, 0.30);
-    readPlannerParam(planner_nh, legacy_nh, "simulation_step", simulation_step_, 0.05);
-    readPlannerParam(planner_nh, legacy_nh, "v_samples", v_samples_, 7);
-    readPlannerParam(planner_nh, legacy_nh, "w_samples", w_samples_, 9);
-    readPlannerParam(planner_nh, legacy_nh, "path_distance_weight",
-                     path_distance_weight_, 4.0);
-    readPlannerParam(planner_nh, legacy_nh, "heading_weight", heading_weight_, 0.8);
-    readPlannerParam(planner_nh, legacy_nh, "clearance_weight", clearance_weight_, 0.5);
-    readPlannerParam(planner_nh, legacy_nh, "velocity_weight", velocity_weight_, 0.5);
-    readPlannerParam(planner_nh, legacy_nh, "angular_velocity_weight",
-                     angular_velocity_weight_, 0.05);
-    readPlannerParam(planner_nh, legacy_nh, "minimum_progress_velocity",
-                     minimum_progress_velocity_, 0.05);
-    readPlannerParam(planner_nh, legacy_nh, "minimum_turn_velocity",
-                     minimum_turn_velocity_, 0.10);
-
-    lookahead_distance_ = std::max(0.05, lookahead_distance_);
-    max_vel_x_ = std::max(0.0, max_vel_x_);
-    max_vel_theta_ = std::max(0.0, max_vel_theta_);
-    final_yaw_gain_ = std::max(0.0, final_yaw_gain_);
-    final_yaw_max_vel_ = std::max(0.0, final_yaw_max_vel_);
-    final_yaw_tolerance_ = clampValue(final_yaw_tolerance_, 0.01, kPi);
-    final_linear_x_gain_ = std::max(0.0, final_linear_x_gain_);
-    goal_position_tolerance_ = std::max(0.01, goal_position_tolerance_);
-    carry_speed_scale_ = clampValue(carry_speed_scale_, 0.05, 1.0);
-    main_legacy_target_distance_ = std::max(0.01, main_legacy_target_distance_);
-    main_legacy_linear_x_gain_ = std::max(0.0, main_legacy_linear_x_gain_);
-    main_legacy_linear_x_kd_ = std::max(0.0, main_legacy_linear_x_kd_);
-    main_legacy_angular_gain_ = std::max(0.0, main_legacy_angular_gain_);
-    main_legacy_max_vel_x_ = std::max(0.0, main_legacy_max_vel_x_);
-    main_legacy_max_vel_theta_ = std::max(0.0, main_legacy_max_vel_theta_);
-    main_legacy_final_yaw_gain_ = std::max(0.0, main_legacy_final_yaw_gain_);
-    main_legacy_final_yaw_max_vel_ = std::max(
-        0.0, main_legacy_final_yaw_max_vel_);
-    main_legacy_final_yaw_tolerance_ = clampValue(
-        main_legacy_final_yaw_tolerance_, 0.01, kPi);
-    main_legacy_final_linear_x_gain_ = std::max(
-        0.0, main_legacy_final_linear_x_gain_);
-    main_legacy_goal_position_tolerance_ = std::max(
-        0.01, main_legacy_goal_position_tolerance_);
-    main_legacy_obstacle_lookahead_distance_ = std::max(
-        0.0, main_legacy_obstacle_lookahead_distance_);
-    main_legacy_obstacle_cost_threshold_ = static_cast<int>(
-        clampValue(static_cast<double>(main_legacy_obstacle_cost_threshold_),
-                   0.0, 255.0));
-    scan_timeout_ = std::max(0.05, scan_timeout_);
-    scan_min_range_ = std::max(0.0, scan_min_range_);
-    scan_max_range_ = std::max(scan_min_range_ + 0.01, scan_max_range_);
-    laser_projection_step_ = clampValue(
-        laser_projection_step_, 0.01, 0.10);
-    safety_margin_ = std::max(0.0, safety_margin_);
-    braking_deceleration_ = std::max(0.01, braking_deceleration_);
-    minimum_moving_clearance_ = std::max(0.0, minimum_moving_clearance_);
-    laser_blocked_grace_period_ = std::max(0.0, laser_blocked_grace_period_);
-    laser_blocked_hold_max_velocity_ = std::max(
-        0.0, laser_blocked_hold_max_velocity_);
-    laser_blocked_stop_deceleration_ = std::max(
-        0.01, laser_blocked_stop_deceleration_);
-    laser_blocked_stop_angular_deceleration_ = std::max(
-        0.01, laser_blocked_stop_angular_deceleration_);
-    laser_command_linear_rate_limit_ = std::max(
-        0.01, laser_command_linear_rate_limit_);
-    laser_command_angular_rate_limit_ = std::max(
-        0.01, laser_command_angular_rate_limit_);
-    reaction_time_ = std::max(0.0, reaction_time_);
-    simulation_time_ = std::max(0.05, simulation_time_);
-    simulation_step_ = clampValue(simulation_step_, 0.01, simulation_time_);
-    v_samples_ = std::max(2, v_samples_);
-    w_samples_ = std::max(3, w_samples_);
-    minimum_progress_velocity_ = std::max(0.0, minimum_progress_velocity_);
-    minimum_turn_velocity_ = std::max(0.0, minimum_turn_velocity_);
-
-    footprint_min_x_ = std::numeric_limits<double>::infinity();
-    footprint_max_x_ = -std::numeric_limits<double>::infinity();
-    footprint_min_y_ = std::numeric_limits<double>::infinity();
-    footprint_max_y_ = -std::numeric_limits<double>::infinity();
-    const std::vector<geometry_msgs::Point>& footprint = costmap_ros_->getRobotFootprint();
-    for(const geometry_msgs::Point& point : footprint)
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "base_link_frame", base_link_frame_, std::string("base_link"));
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "odom_frame", odom_frame_, std::string("odom"));
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "debug_images_enabled", debug_images_enabled_, false);
+    readTuning(
+        planner_nh, canonical_nh, legacy_nh,
+        "mode1_point", pointDefaults(), point_tuning_);
+    readTuning(
+        planner_nh, canonical_nh, legacy_nh,
+        "mode2_body_projection", bodyProjectionDefaults(),
+        body_projection_tuning_);
+    sanitizeTuning(point_tuning_);
+    sanitizeTuning(body_projection_tuning_);
+    if(body_projection_tuning_.command_sweep_time <= 0.0)
     {
-        footprint_min_x_ = std::min(footprint_min_x_, point.x);
-        footprint_max_x_ = std::max(footprint_max_x_, point.x);
-        footprint_min_y_ = std::min(footprint_min_y_, point.y);
-        footprint_max_y_ = std::max(footprint_max_y_, point.y);
+        ROS_ERROR(
+            "cym_planner: mode2 command_sweep_time must be positive; "
+            "forcing safety default 0.40 s");
+        body_projection_tuning_.command_sweep_time = 0.40;
     }
-    if(footprint.empty())
+    bool requested_escape_enabled = false;
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "escape_enabled", requested_escape_enabled, false);
+    escape_enabled_ = false;
+    if(requested_escape_enabled)
     {
-        ROS_WARN("cym_planner: costmap footprint is empty; using 0.30 m x 0.20 m fallback");
-        footprint_min_x_ = -0.15;
-        footprint_max_x_ = 0.15;
-        footprint_min_y_ = -0.10;
-        footprint_max_y_ = 0.10;
+        ROS_ERROR(
+            "cym_planner: escape_enabled=true was requested but is ignored; "
+            "bounded escape remains hard-disabled pending safety fixes");
     }
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "escape_blocked_timeout", escape_blocked_timeout_, 0.4);
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "escape_replan_wait", escape_replan_wait_, 0.4);
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "escape_step_distance", escape_step_distance_, 0.02);
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "escape_projection_step", escape_projection_step_, 0.005);
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "escape_speed", escape_speed_, 0.04);
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "escape_max_total_distance",
+                     escape_max_total_distance_, 0.08);
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "escape_heading_tolerance",
+                     escape_heading_tolerance_, 0.05);
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "escape_max_attempts", escape_max_attempts_, 4);
+
+    escape_blocked_timeout_ =
+        clampValue(escape_blocked_timeout_, 0.10, 2.0);
+    escape_replan_wait_ = clampValue(escape_replan_wait_, 0.10, 2.0);
+    escape_step_distance_ = clampValue(escape_step_distance_, 0.005, 0.03);
+    escape_projection_step_ =
+        clampValue(escape_projection_step_, 0.002, 0.01);
+    escape_speed_ = clampValue(escape_speed_, 0.01, 0.08);
+    escape_max_total_distance_ =
+        clampValue(escape_max_total_distance_, escape_step_distance_, 0.10);
+    escape_heading_tolerance_ =
+        clampValue(escape_heading_tolerance_, 0.02, 0.10);
+    escape_max_attempts_ = std::max(1, std::min(10, escape_max_attempts_));
 
     ros::NodeHandle public_nh;
     carry_mode_sub_ = public_nh.subscribe(
         "/ucar/carry_mode", 1, &CymPlanner::carryModeCallback, this);
     navigation_mode_sub_ = public_nh.subscribe(
         "/ucar/navigation_mode", 1, &CymPlanner::navigationModeCallback, this);
-    scan_sub_ = public_nh.subscribe(scan_topic_, 1, &CymPlanner::scanCallback, this);
-    laser_points_pub_ = planner_nh.advertise<sensor_msgs::PointCloud2>("laser_points", 1);
-    candidate_trajectories_pub_ = planner_nh.advertise<visualization_msgs::MarkerArray>(
-        "candidate_trajectories", 1);
-    selected_trajectory_pub_ = planner_nh.advertise<visualization_msgs::Marker>(
-        "selected_trajectory", 1);
-    lookahead_footprint_pub_ = planner_nh.advertise<visualization_msgs::Marker>(
-        "lookahead_footprint", 1, true);
-    safety_state_pub_ = planner_nh.advertise<std_msgs::String>("safety_state", 1, true);
+    if(debug_images_enabled_)
+    {
+        debug_map_pub_ =
+            canonical_nh.advertise<sensor_msgs::Image>("debug_map", 1);
+        debug_plan_pub_ =
+            canonical_nh.advertise<sensor_msgs::Image>("debug_plan", 1);
+    }
 
     initialized_ = true;
-    ROS_INFO("[DEBUG:MODE] cym_planner initialized in %s mode; direct laser input=%s, "
-             "scan timeout=%.2f s, projected-footprint step=%.2f m",
-             navigationModeName(), scan_topic_.c_str(), scan_timeout_,
-             laser_projection_step_);
-}
-
-bool CymPlanner::setNavigationMode(const std::string& requested_mode)
-{
-    std::string normalized_mode = requested_mode;
-    std::transform(normalized_mode.begin(), normalized_mode.end(), normalized_mode.begin(),
-                   [](unsigned char character) { return std::tolower(character); });
-    if(normalized_mode == "laser_avoidance" || normalized_mode == "laser" ||
-       normalized_mode == "avoidance")
-    {
-        laser_avoidance_enabled_.store(true);
-        return true;
-    }
-    if(normalized_mode == "main_legacy" || normalized_mode == "main")
-    {
-        laser_avoidance_enabled_.store(false);
-        return true;
-    }
-    return false;
-}
-
-const char* CymPlanner::navigationModeName() const
-{
-    return laser_avoidance_enabled_.load() ? "laser_avoidance" : "main_legacy";
-}
-
-void CymPlanner::navigationModeCallback(const std_msgs::String::ConstPtr& message)
-{
-    const bool previous_laser_avoidance = laser_avoidance_enabled_.load();
-    if(!setNavigationMode(message->data))
-    {
-        ROS_WARN("[DEBUG:MODE] cym_planner: ignoring unsupported navigation mode '%s'; "
-                 "use main_legacy or laser_avoidance",
-                 message->data.c_str());
-        return;
-    }
-
-    if(previous_laser_avoidance != laser_avoidance_enabled_.load())
-    {
-        resetLaserBrakingState();
-        ROS_WARN("[DEBUG:MODE] cym_planner switched to %s mode",
-                  navigationModeName());
-    }
+    ROS_WARN(
+        "cym_planner initialized | mode1 point max %.2f m/s %.2f rad/s | "
+        "mode2 body max %.2f m/s %.2f rad/s turn_scale %.2f | "
+        "debug images %s | escape %s",
+        point_tuning_.max_vel_x, point_tuning_.max_vel_theta,
+        body_projection_tuning_.max_vel_x,
+        body_projection_tuning_.max_vel_theta,
+        body_projection_tuning_.heading_slowdown_min_scale,
+        debug_images_enabled_ ? "enabled" : "disabled",
+        escape_enabled_ ? "enabled" : "disabled");
 }
 
 void CymPlanner::carryModeCallback(const std_msgs::Bool::ConstPtr& message)
 {
     if(carry_mode_ == message->data)
-    {
         return;
-    }
     carry_mode_ = message->data;
-    ROS_INFO("cym_planner carry mode %s; speed scale %.2f",
+    const PlannerTuning& tuning = activeTuning();
+    ROS_WARN("cym_planner carry mode %s; speed scale %.2f",
              carry_mode_ ? "enabled" : "disabled",
-             carry_mode_ ? carry_speed_scale_ : 1.0);
+             carry_mode_ ? tuning.carry_speed_scale : 1.0);
 }
 
-void CymPlanner::scanCallback(const sensor_msgs::LaserScan::ConstPtr& scan)
+void CymPlanner::navigationModeCallback(const std_msgs::String::ConstPtr& message)
 {
-    if(!initialized_ || scan->header.frame_id.empty())
+    std::string mode = message->data;
+    std::transform(mode.begin(), mode.end(), mode.begin(),
+                   [](unsigned char value) {
+                       return static_cast<char>(std::tolower(value));
+                   });
+
+    bool requested_body_mode = body_projection_enabled_;
+    if(mode == "body" || mode == "body_projection" || mode == "footprint" ||
+       mode == "laser_avoidance")
     {
+        requested_body_mode = true;
+    }
+    else if(mode == "point" || mode == "path_point" || mode == "direct_line" ||
+            mode == "main" || mode == "main_legacy")
+    {
+        requested_body_mode = false;
+    }
+    else
+    {
+        ROS_WARN("cym_planner: unsupported navigation mode '%s'; "
+                 "use point or body_projection", message->data.c_str());
         return;
     }
 
-    tf::StampedTransform laser_to_base;
-    try
-    {
-        tf_listener_->lookupTransform(base_link_frame_, scan->header.frame_id,
-                                      scan->header.stamp, laser_to_base);
-    }
-    catch(const tf::TransformException&)
-    {
-        try
-        {
-            // The laser is rigidly mounted.  During startup the exact scan stamp
-            // can precede TF reception by one cycle, while the latest transform is
-            // still geometrically correct for this fixed link.
-            tf_listener_->lookupTransform(base_link_frame_, scan->header.frame_id,
-                                          ros::Time(0), laser_to_base);
-        }
-        catch(const tf::TransformException& ex)
-        {
-            ROS_WARN_THROTTLE(1.0, "cym_planner: cannot transform laser %s to %s: %s",
-                              scan->header.frame_id.c_str(), base_link_frame_.c_str(), ex.what());
-            return;
-        }
-    }
+    if(requested_body_mode == body_projection_enabled_)
+        return;
+    body_projection_enabled_ = requested_body_mode;
+    resetControllerState();
+    resetEscapeRecovery();
+    const PlannerTuning& tuning = activeTuning();
+    ROS_WARN(
+        "cym_planner switched to %s | linear P/D %.2f/%.2f "
+        "angular P/D %.2f/%.2f max %.2f m/s %.2f rad/s",
+        body_projection_enabled_ ?
+            "mode2_body_projection" : "mode1_point",
+        tuning.linear_x_gain, tuning.linear_x_kd,
+        tuning.angular_gain, tuning.angular_kd,
+        tuning.max_vel_x, tuning.max_vel_theta);
+}
 
-    std::vector<LaserPoint> filtered_points;
-    filtered_points.reserve(scan->ranges.size());
-    const double max_range = std::min(static_cast<double>(scan->range_max), scan_max_range_);
-    for(std::size_t index = 0; index < scan->ranges.size(); ++index)
-    {
-        const double range = scan->ranges[index];
-        if(!std::isfinite(range) || range < scan_min_range_ || range > max_range)
-        {
-            continue;
-        }
-        const double angle = scan->angle_min + index * scan->angle_increment;
-        const tf::Vector3 laser_point(range * std::cos(angle), range * std::sin(angle), 0.0);
-        const tf::Vector3 base_point = laser_to_base * laser_point;
-        // A 360-degree Gazebo ray sensor can see the robot mesh behind its
-        // forward-mounted origin.  Self returns are necessarily inside the
-        // physical footprint and must not be treated as external obstacles.
-        // Points on or outside the boundary remain core collision input.
-        if(base_point.x() > footprint_min_x_ &&
-           base_point.x() < footprint_max_x_ &&
-           base_point.y() > footprint_min_y_ &&
-           base_point.y() < footprint_max_y_)
-        {
-            continue;
-        }
-        filtered_points.push_back({base_point.x(), base_point.y()});
-    }
+void CymPlanner::resetControllerState()
+{
+    previous_linear_error_ = 0.0;
+    previous_linear_control_time_ = ros::Time(0);
+    linear_derivative_initialized_ = false;
+    previous_heading_error_ = 0.0;
+    previous_heading_control_time_ = ros::Time(0);
+    angular_derivative_initialized_ = false;
+}
 
-    const ros::Time stamp = scan->header.stamp.isZero() ? ros::Time::now() : scan->header.stamp;
+const PlannerTuning& CymPlanner::activeTuning() const
+{
+    return selectPlannerTuning(
+        body_projection_enabled_,
+        point_tuning_,
+        body_projection_tuning_);
+}
+
+void CymPlanner::resetEscapeRecovery()
+{
+    escape_blocked_since_ = ros::Time(0);
+    escape_wait_until_ = ros::Time(0);
+    escape_motion_started_ = ros::Time(0);
+    escape_active_ = false;
+    escape_attempts_ = 0;
+    escape_total_distance_ = 0.0;
+    escape_start_world_x_ = 0.0;
+    escape_start_world_y_ = 0.0;
+    escape_start_world_yaw_ = 0.0;
+    escape_direction_base_x_ = 0.0;
+    escape_direction_base_y_ = 0.0;
+    escape_direction_world_x_ = 0.0;
+    escape_direction_world_y_ = 0.0;
+}
+
+bool CymPlanner::currentCostmapPose(
+    geometry_msgs::PoseStamped& pose) const
+{
+    return costmap_ros_->getRobotPose(pose) && poseIsFinite(pose);
+}
+
+bool CymPlanner::commandSweepIsSafe(
+    const geometry_msgs::Twist& command,
+    const costmap_2d::Costmap2D& local_costmap,
+    cv::Mat& map_image)
+{
+    if(!commandIsFinite(command))
+        return false;
+    const PlannerTuning& tuning = activeTuning();
+    if(tuning.command_sweep_time <= 0.0)
+        return true;
+
+    geometry_msgs::PoseStamped pose;
+    if(!currentCostmapPose(pose))
+        return false;
+    const int steps = std::max(
+        1, static_cast<int>(std::ceil(
+            tuning.command_sweep_time / tuning.command_sweep_step)));
+    const double period =
+        tuning.command_sweep_time / static_cast<double>(steps);
+    double yaw = tf::getYaw(pose.pose.orientation);
+    for(int step = 0; step <= steps; ++step)
     {
-        std::lock_guard<std::mutex> lock(scan_mutex_);
-        laser_points_ = filtered_points;
-        last_scan_stamp_ = stamp;
-        have_scan_ = true;
+        if(step > 0)
+        {
+            const double cosine = std::cos(yaw);
+            const double sine = std::sin(yaw);
+            pose.pose.position.x +=
+                (cosine * command.linear.x -
+                 sine * command.linear.y) * period;
+            pose.pose.position.y +=
+                (sine * command.linear.x +
+                 cosine * command.linear.y) * period;
+            yaw = normalizeAngle(yaw + command.angular.z * period);
+            pose.pose.orientation = tf::createQuaternionMsgFromYaw(yaw);
+        }
+        const FootprintBlockage blockage =
+            inspectFootprint(pose, local_costmap, map_image, false);
+        if(blockage.blocked)
+        {
+            ROS_WARN_THROTTLE(
+                1.0,
+                "cym_planner: candidate command footprint sweep blocked "
+                "at %.3f s",
+                static_cast<double>(step) * period);
+            return false;
+        }
     }
-    publishLaserPoints(filtered_points, stamp);
+    return true;
 }
 
 bool CymPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& plan)
@@ -414,1114 +553,788 @@ bool CymPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& plan)
     target_index_ = 0;
     pose_adjusting_ = false;
     goal_reached_ = false;
-    main_legacy_previous_linear_error_ = 0.0;
-    main_legacy_previous_control_time_ = ros::Time(0);
-    main_legacy_linear_derivative_initialized_ = false;
-    // A replacement global plan can arrive while the vehicle is moving.
-    // Preserve the last laser command so replanning cannot restart the local
-    // controller at an unrelated full-speed sample.  Navigation mode changes
-    // still perform the complete reset at their stationary task boundary.
-    resetLaserBlockedState();
+    resetControllerState();
     return !global_plan_.empty();
 }
 
-bool CymPlanner::transformPlanPose(const geometry_msgs::PoseStamped& source,
-                                   const std::string& target_frame,
-                                   geometry_msgs::PoseStamped& result) const
+bool CymPlanner::transformPlanPose(
+    const geometry_msgs::PoseStamped& source,
+    const std::string& target_frame,
+    geometry_msgs::PoseStamped& result) const
 {
-    geometry_msgs::PoseStamped stamped_source = source;
-    stamped_source.header.stamp = ros::Time(0);
+    geometry_msgs::PoseStamped unstamped = source;
+    unstamped.header.stamp = ros::Time(0);
     try
     {
-        tf_listener_->transformPose(target_frame, stamped_source, result);
+        tf_listener_->transformPose(target_frame, unstamped, result);
         return true;
     }
-    catch(const tf::TransformException& ex)
+    catch(const tf::TransformException& error)
     {
-        ROS_WARN_THROTTLE(1.0, "cym_planner: cannot transform plan from %s to %s: %s",
-                          source.header.frame_id.c_str(), target_frame.c_str(), ex.what());
+        ROS_WARN_THROTTLE(1.0, "cym_planner: cannot transform plan pose to %s: %s",
+                          target_frame.c_str(), error.what());
         return false;
     }
 }
 
-bool CymPlanner::selectTargetPose(geometry_msgs::PoseStamped& target_pose,
-                                  double lookahead_distance)
+bool CymPlanner::selectTargetPose(geometry_msgs::PoseStamped& target_pose)
 {
-    for(int index = target_index_; index < static_cast<int>(global_plan_.size()); ++index)
+    bool have_target = false;
+    for(int index = target_index_;
+        index < static_cast<int>(global_plan_.size()); ++index)
     {
         geometry_msgs::PoseStamped pose_base;
         if(!transformPlanPose(global_plan_[index], base_link_frame_, pose_base))
-        {
             return false;
-        }
 
         target_pose = pose_base;
-        const double distance = std::hypot(pose_base.pose.position.x, pose_base.pose.position.y);
-        if(distance >= lookahead_distance || index == static_cast<int>(global_plan_.size()) - 1)
+        have_target = true;
+        const double distance = std::hypot(
+            pose_base.pose.position.x, pose_base.pose.position.y);
+        if(distance > kTargetDistance ||
+           index == static_cast<int>(global_plan_.size()) - 1)
         {
             target_index_ = index;
-            return true;
+            break;
         }
     }
-    return false;
+    return have_target;
 }
 
-bool CymPlanner::isCostmapPathBlocked(double lookahead_distance, int cost_threshold)
+CymPlanner::FootprintBlockage CymPlanner::inspectFootprint(
+    const geometry_msgs::PoseStamped& pose_costmap,
+    const costmap_2d::Costmap2D& local_costmap,
+    cv::Mat& map_image,
+    bool report_contact)
 {
-    if(lookahead_distance <= 0.0)
+    FootprintBlockage result;
+    if(!poseIsFinite(pose_costmap))
     {
-        return false;
+        result.blocked = true;
+        return result;
+    }
+    if(normalizedFrameId(pose_costmap.header.frame_id) !=
+       normalizedFrameId(costmap_ros_->getGlobalFrameID()))
+    {
+        ROS_ERROR_THROTTLE(
+            1.0,
+            "cym_planner: footprint frame '%s' does not match local "
+            "costmap frame '%s'",
+            pose_costmap.header.frame_id.c_str(),
+            costmap_ros_->getGlobalFrameID().c_str());
+        result.blocked = true;
+        return result;
+    }
+    if(local_costmap.getResolution() <= 0.0 ||
+       local_costmap.getSizeInCellsX() == 0 ||
+       local_costmap.getSizeInCellsY() == 0)
+    {
+        ROS_ERROR_THROTTLE(
+            1.0, "cym_planner: invalid local costmap snapshot");
+        result.blocked = true;
+        return result;
     }
 
-    costmap_2d::Costmap2D* costmap = costmap_ros_->getCostmap();
-    const std::string costmap_frame = costmap_ros_->getGlobalFrameID();
-    const int start_index = std::max(0, std::min(
-        target_index_, static_cast<int>(global_plan_.size()) - 1));
-    bool have_previous_pose = false;
-    double previous_x = 0.0;
-    double previous_y = 0.0;
-    double checked_distance = 0.0;
-    geometry_msgs::PoseStamped lookahead_pose;
-    bool have_lookahead_pose = false;
+    const std::vector<geometry_msgs::Point>& footprint =
+        costmap_ros_->getRobotFootprint();
+    if(footprint.size() < 3)
+    {
+        ROS_WARN_THROTTLE(
+            1.0, "cym_planner: invalid footprint; body projection stopped");
+        result.blocked = true;
+        return result;
+    }
 
-    for(int index = start_index; index < static_cast<int>(global_plan_.size()); ++index)
+    const double yaw = tf::getYaw(pose_costmap.pose.orientation);
+    if(!std::isfinite(yaw))
+    {
+        result.blocked = true;
+        return result;
+    }
+    const double cosine = std::cos(yaw);
+    const double sine = std::sin(yaw);
+    std::vector<cv::Point> polygon;
+    polygon.reserve(footprint.size());
+    for(const geometry_msgs::Point& point : footprint)
+    {
+        if(!std::isfinite(point.x) || !std::isfinite(point.y))
+        {
+            result.blocked = true;
+            return result;
+        }
+        const double world_x = pose_costmap.pose.position.x +
+            cosine * point.x - sine * point.y;
+        const double world_y = pose_costmap.pose.position.y +
+            sine * point.x + cosine * point.y;
+        unsigned int map_x = 0;
+        unsigned int map_y = 0;
+        if(!local_costmap.worldToMap(world_x, world_y, map_x, map_y))
+        {
+            ROS_WARN_THROTTLE(
+                1.0, "cym_planner: projected footprint leaves local costmap");
+            result.blocked = true;
+            return result;
+        }
+        polygon.push_back(cv::Point(
+            static_cast<int>(map_x), static_cast<int>(map_y)));
+    }
+
+    const cv::Rect bounds = cv::boundingRect(polygon);
+    const int maximum_x = std::min(
+        bounds.x + bounds.width,
+        static_cast<int>(local_costmap.getSizeInCellsX()));
+    const int maximum_y = std::min(
+        bounds.y + bounds.height,
+        static_cast<int>(local_costmap.getSizeInCellsY()));
+    for(int y = std::max(0, bounds.y); y < maximum_y; ++y)
+    {
+        for(int x = std::max(0, bounds.x); x < maximum_x; ++x)
+        {
+            if(cv::pointPolygonTest(
+                   polygon, cv::Point2f(x + 0.5f, y + 0.5f), false) < 0.0)
+            {
+                continue;
+            }
+            const unsigned char cost = local_costmap.getCost(
+                static_cast<unsigned int>(x),
+                static_cast<unsigned int>(y));
+            if(localCellBlocksProjectedFootprint(cost))
+            {
+                double blocked_world_x = 0.0;
+                double blocked_world_y = 0.0;
+                local_costmap.mapToWorld(
+                    static_cast<unsigned int>(x),
+                    static_cast<unsigned int>(y),
+                    blocked_world_x, blocked_world_y);
+                result.blocked = true;
+                result.recoverable = cost == 254;
+                result.contact_count = result.recoverable ? 1u : 0u;
+                result.contact_world_x = blocked_world_x;
+                result.contact_world_y = blocked_world_y;
+                if(report_contact)
+                {
+                    ROS_WARN_THROTTLE(
+                        1.0,
+                        "cym_planner: projected footprint contacts local %s cell "
+                        "at (%.3f, %.3f), cost=%u",
+                        cost == 255 ? "unknown" : "lethal",
+                        blocked_world_x, blocked_world_y,
+                        static_cast<unsigned int>(cost));
+                }
+                if(!map_image.empty())
+                {
+                    cv::circle(
+                        map_image,
+                        cv::Point(x, y),
+                        2, cv::Scalar(0, 0, 255), -1);
+                }
+                if(report_contact)
+                {
+                    ROS_DEBUG_THROTTLE(
+                        1.0,
+                        "cym_planner body projection pose=(%.3f, %.3f, %.3f)",
+                        pose_costmap.pose.position.x,
+                        pose_costmap.pose.position.y,
+                        yaw);
+                }
+                return result;
+            }
+        }
+    }
+    return result;
+}
+
+CymPlanner::FootprintBlockage CymPlanner::checkPathBlocked(
+    const costmap_2d::Costmap2D& local_costmap,
+    cv::Mat& map_image)
+{
+    FootprintBlockage path_blockage;
+    const PlannerTuning& tuning = activeTuning();
+    const std::string costmap_frame = costmap_ros_->getGlobalFrameID();
+    geometry_msgs::PoseStamped current_pose;
+    if(!currentCostmapPose(current_pose))
+    {
+        path_blockage.blocked = true;
+        return path_blockage;
+    }
+    if(body_projection_enabled_)
+    {
+        path_blockage =
+            inspectFootprint(current_pose, local_costmap, map_image, true);
+        if(path_blockage.blocked)
+            return path_blockage;
+    }
+
+    std::vector<geometry_msgs::PoseStamped> costmap_plan;
+    costmap_plan.reserve(global_plan_.size());
+    int start_index = 0;
+    double nearest_distance = std::numeric_limits<double>::infinity();
+    for(int index = 0;
+        index < static_cast<int>(global_plan_.size()); ++index)
     {
         geometry_msgs::PoseStamped pose_costmap;
-        if(!transformPlanPose(global_plan_[index], costmap_frame, pose_costmap))
+        if(!transformPlanPose(global_plan_[index], costmap_frame, pose_costmap) ||
+           !poseIsFinite(pose_costmap))
         {
-            return true;
+            path_blockage.blocked = true;
+            return path_blockage;
+        }
+        costmap_plan.push_back(pose_costmap);
+        const double distance = std::hypot(
+            pose_costmap.pose.position.x - current_pose.pose.position.x,
+            pose_costmap.pose.position.y - current_pose.pose.position.y);
+        if(distance < nearest_distance)
+        {
+            nearest_distance = distance;
+            start_index = index;
+        }
+        unsigned int map_x = 0;
+        unsigned int map_y = 0;
+        if(local_costmap.worldToMap(
+               pose_costmap.pose.position.x,
+               pose_costmap.pose.position.y,
+               map_x, map_y))
+        {
+            if(!map_image.empty())
+            {
+                cv::circle(map_image, cv::Point(map_x, map_y), 1,
+                           cv::Scalar(255, 0, 255), -1);
+            }
+        }
+    }
+
+    double checked_distance = 0.0;
+    double previous_x = 0.0;
+    double previous_y = 0.0;
+    bool have_previous_point = false;
+    for(int index = start_index;
+        index < static_cast<int>(costmap_plan.size()); ++index)
+    {
+        const geometry_msgs::PoseStamped& pose_costmap = costmap_plan[index];
+        unsigned int map_x = 0;
+        unsigned int map_y = 0;
+        if(!local_costmap.worldToMap(
+               pose_costmap.pose.position.x,
+               pose_costmap.pose.position.y, map_x, map_y))
+        {
+            path_blockage.blocked = true;
+            return path_blockage;
         }
 
-        if(have_previous_pose)
+        if(have_previous_point)
         {
-            checked_distance += std::hypot(pose_costmap.pose.position.x - previous_x,
-                                           pose_costmap.pose.position.y - previous_y);
+            checked_distance += std::hypot(
+                pose_costmap.pose.position.x - previous_x,
+                pose_costmap.pose.position.y - previous_y);
         }
         previous_x = pose_costmap.pose.position.x;
         previous_y = pose_costmap.pose.position.y;
-        have_previous_pose = true;
-        if(checked_distance > lookahead_distance)
-        {
+        have_previous_point = true;
+        if(checked_distance > tuning.obstacle_lookahead_distance)
             break;
-        }
 
-        lookahead_pose = pose_costmap;
-        have_lookahead_pose = true;
-        unsigned int map_x = 0;
-        unsigned int map_y = 0;
-        if(costmap->worldToMap(pose_costmap.pose.position.x, pose_costmap.pose.position.y,
-                               map_x, map_y) &&
-           costmap->getCost(map_x, map_y) >= cost_threshold)
+        if(body_projection_enabled_)
         {
-            publishLookaheadFootprint(lookahead_pose, costmap_frame);
-            ROS_WARN_THROTTLE(1.0,
-                              "cym_planner: auxiliary costmap reports blocked global path; requesting replan");
-            return true;
-        }
-    }
-
-    if(have_lookahead_pose)
-    {
-        publishLookaheadFootprint(lookahead_pose, costmap_frame);
-    }
-    return false;
-}
-
-bool CymPlanner::checkLaserPathProjection(
-    const std::vector<LaserPoint>& points,
-    double lookahead_distance,
-    bool& projection_blocked)
-{
-    projection_blocked = false;
-    if(lookahead_distance <= 0.0 || global_plan_.empty())
-    {
-        return true;
-    }
-
-    geometry_msgs::PoseStamped projected_pose;
-    projected_pose.header.frame_id = base_link_frame_;
-    projected_pose.header.stamp = ros::Time::now();
-    projected_pose.pose.orientation = tf::createQuaternionMsgFromYaw(0.0);
-
-    const auto projectionTouchesLaser =
-        [this, &points](double robot_x, double robot_y, double robot_yaw,
-                        LaserPoint& touching_point)
-        {
-            const double cos_yaw = std::cos(robot_yaw);
-            const double sin_yaw = std::sin(robot_yaw);
-            for(const LaserPoint& point : points)
-            {
-                const double translated_x = point.x - robot_x;
-                const double translated_y = point.y - robot_y;
-                const double local_x =
-                    cos_yaw * translated_x + sin_yaw * translated_y;
-                const double local_y =
-                    -sin_yaw * translated_x + cos_yaw * translated_y;
-                if(local_x >= footprint_min_x_ &&
-                   local_x <= footprint_max_x_ &&
-                   local_y >= footprint_min_y_ &&
-                   local_y <= footprint_max_y_)
-                {
-                    touching_point = point;
-                    return true;
-                }
-            }
-            return false;
-        };
-
-    const auto checkProjection =
-        [this, &projectionTouchesLaser, &projected_pose,
-         &projection_blocked](double robot_x, double robot_y, double robot_yaw)
-        {
-            projected_pose.pose.position.x = robot_x;
-            projected_pose.pose.position.y = robot_y;
-            projected_pose.pose.orientation =
-                tf::createQuaternionMsgFromYaw(robot_yaw);
-            LaserPoint touching_point{0.0, 0.0};
-            if(!projectionTouchesLaser(
-                   robot_x, robot_y, robot_yaw, touching_point))
-            {
-                return false;
-            }
-            projection_blocked = true;
-            publishLookaheadFootprint(projected_pose, base_link_frame_);
-            ROS_WARN_THROTTLE(
-                1.0,
-                "cym_planner: laser point (%.3f, %.3f) touches projected "
-                "vehicle footprint at (%.3f, %.3f, %.3f); requesting replan",
-                touching_point.x, touching_point.y,
-                robot_x, robot_y, robot_yaw);
-            return true;
-        };
-
-    // The first projection is the current physical footprint.  Subsequent
-    // projections densely sweep that rectangle along the same global-plan
-    // segment followed by the origin/main controller.
-    if(checkProjection(0.0, 0.0, 0.0))
-    {
-        return true;
-    }
-
-    const int start_index = std::max(
-        0, std::min(target_index_,
-                    static_cast<int>(global_plan_.size()) - 1));
-    double previous_x = 0.0;
-    double previous_y = 0.0;
-    double previous_yaw = 0.0;
-    double checked_distance = 0.0;
-    bool have_forward_projection = false;
-
-    for(int index = start_index;
-        index < static_cast<int>(global_plan_.size());
-        ++index)
-    {
-        geometry_msgs::PoseStamped pose_base;
-        if(!transformPlanPose(
-               global_plan_[index], base_link_frame_, pose_base))
-        {
-            return false;
-        }
-
-        const double current_x = pose_base.pose.position.x;
-        const double current_y = pose_base.pose.position.y;
-        const double current_yaw = tf::getYaw(pose_base.pose.orientation);
-        const double delta_x = current_x - previous_x;
-        const double delta_y = current_y - previous_y;
-        const double segment_distance = std::hypot(delta_x, delta_y);
-        if(segment_distance <= 1e-6)
-        {
-            previous_yaw = current_yaw;
-            continue;
-        }
-
-        const double remaining_distance =
-            lookahead_distance - checked_distance;
-        if(remaining_distance <= 1e-6)
-        {
-            break;
-        }
-        const double projected_distance =
-            std::min(segment_distance, remaining_distance);
-        const int sample_count = std::max(
-            1, static_cast<int>(
-                   std::ceil(projected_distance / laser_projection_step_)));
-        const double yaw_delta =
-            normalizeAngle(current_yaw - previous_yaw);
-
-        for(int sample = 1; sample <= sample_count; ++sample)
-        {
-            const double segment_offset =
-                projected_distance * static_cast<double>(sample) /
-                static_cast<double>(sample_count);
-            const double segment_fraction =
-                segment_offset / segment_distance;
-            const double projected_x =
-                previous_x + delta_x * segment_fraction;
-            const double projected_y =
-                previous_y + delta_y * segment_fraction;
-            const double projected_yaw =
-                normalizeAngle(previous_yaw + yaw_delta * segment_fraction);
-            have_forward_projection = true;
-            projected_pose.pose.position.x = projected_x;
-            projected_pose.pose.position.y = projected_y;
-            projected_pose.pose.orientation =
-                tf::createQuaternionMsgFromYaw(projected_yaw);
-            if(checkProjection(projected_x, projected_y, projected_yaw))
-            {
-                return true;
-            }
-        }
-
-        checked_distance += projected_distance;
-        if(projected_distance + 1e-6 < segment_distance)
-        {
-            break;
-        }
-        previous_x = current_x;
-        previous_y = current_y;
-        previous_yaw = current_yaw;
-    }
-
-    if(have_forward_projection)
-    {
-        publishLookaheadFootprint(projected_pose, base_link_frame_);
-    }
-    return true;
-}
-
-bool CymPlanner::copyFreshLaserPoints(std::vector<LaserPoint>& points,
-                                      ros::Time& scan_stamp) const
-{
-    std::lock_guard<std::mutex> lock(scan_mutex_);
-    if(!have_scan_)
-    {
-        return false;
-    }
-    const double age = (ros::Time::now() - last_scan_stamp_).toSec();
-    if(age > scan_timeout_)
-    {
-        return false;
-    }
-    points = laser_points_;
-    scan_stamp = last_scan_stamp_;
-    return true;
-}
-
-double CymPlanner::clearanceToFootprint(double point_x, double point_y,
-                                        double robot_x, double robot_y,
-                                        double robot_yaw) const
-{
-    const double translated_x = point_x - robot_x;
-    const double translated_y = point_y - robot_y;
-    const double cos_yaw = std::cos(robot_yaw);
-    const double sin_yaw = std::sin(robot_yaw);
-    const double local_x = cos_yaw * translated_x + sin_yaw * translated_y;
-    const double local_y = -sin_yaw * translated_x + cos_yaw * translated_y;
-
-    const double min_x = footprint_min_x_ - safety_margin_;
-    const double max_x = footprint_max_x_ + safety_margin_;
-    const double min_y = footprint_min_y_ - safety_margin_;
-    const double max_y = footprint_max_y_ + safety_margin_;
-    const double dx = std::max(std::max(min_x - local_x, 0.0), local_x - max_x);
-    const double dy = std::max(std::max(min_y - local_y, 0.0), local_y - max_y);
-    return std::hypot(dx, dy);
-}
-
-double CymPlanner::forwardClearance(const std::vector<LaserPoint>& points) const
-{
-    const double lateral_limit = std::max(std::abs(footprint_min_y_),
-                                          std::abs(footprint_max_y_)) + safety_margin_;
-    double nearest_clearance = std::numeric_limits<double>::infinity();
-    for(const LaserPoint& point : points)
-    {
-        if(point.x >= footprint_max_x_ && std::abs(point.y) <= lateral_limit)
-        {
-            nearest_clearance = std::min(nearest_clearance, point.x - footprint_max_x_);
-        }
-    }
-    return nearest_clearance;
-}
-
-CymPlanner::CandidateTrajectory CymPlanner::simulateTrajectory(
-    double linear_velocity, double angular_velocity, const std::vector<LaserPoint>& points,
-    double front_clearance) const
-{
-    CandidateTrajectory candidate;
-    candidate.linear_velocity = linear_velocity;
-    candidate.angular_velocity = angular_velocity;
-    candidate.clearance = scan_max_range_;
-    candidate.score = -std::numeric_limits<double>::infinity();
-    candidate.valid = true;
-
-    const double stopping_distance = safety_margin_ + linear_velocity * reaction_time_ +
-        linear_velocity * linear_velocity / (2.0 * braking_deceleration_);
-    if(linear_velocity > 0.0 && front_clearance < stopping_distance)
-    {
-        candidate.valid = false;
-        return candidate;
-    }
-
-    double robot_x = 0.0;
-    double robot_y = 0.0;
-    double robot_yaw = 0.0;
-    const int steps = std::max(1, static_cast<int>(std::ceil(simulation_time_ / simulation_step_)));
-    for(int step = 0; step < steps; ++step)
-    {
-        robot_x += linear_velocity * std::cos(robot_yaw) * simulation_step_;
-        robot_y += linear_velocity * std::sin(robot_yaw) * simulation_step_;
-        robot_yaw = normalizeAngle(robot_yaw + angular_velocity * simulation_step_);
-        candidate.poses.push_back({robot_x, robot_y, robot_yaw});
-
-        for(const LaserPoint& point : points)
-        {
-            const double clearance = clearanceToFootprint(
-                point.x, point.y, robot_x, robot_y, robot_yaw);
-            candidate.clearance = std::min(candidate.clearance, clearance);
-            if(clearance <= 0.0)
-            {
-                candidate.valid = false;
-                return candidate;
-            }
-        }
-    }
-    return candidate;
-}
-
-void CymPlanner::rememberLaserCommand(const geometry_msgs::Twist& cmd_vel)
-{
-    previous_laser_command_ = cmd_vel;
-    previous_laser_command_time_ = ros::Time::now();
-}
-
-void CymPlanner::resetLaserBlockedState()
-{
-    laser_blocked_since_ = ros::Time(0);
-    laser_blocked_zero_published_ = false;
-}
-
-void CymPlanner::resetLaserBrakingState()
-{
-    previous_laser_command_ = geometry_msgs::Twist();
-    previous_laser_command_time_ = ros::Time(0);
-    resetLaserBlockedState();
-}
-
-bool CymPlanner::computeLaserBlockedCommand(geometry_msgs::Twist& cmd_vel)
-{
-    if(laser_blocked_zero_published_)
-    {
-        publishSafetyState(
-            "STOP: direct-laser slow stop complete; requesting global replan");
-        ROS_WARN_THROTTLE(
-            1.0,
-            "cym_planner: persistent direct-laser blockage after slow stop; "
-            "requesting global replan");
-        return false;
-    }
-
-    const ros::Time control_time = ros::Time::now();
-    if(laser_blocked_since_.isZero())
-    {
-        laser_blocked_since_ = control_time;
-    }
-
-    const double blocked_duration =
-        std::max(0.0, (control_time - laser_blocked_since_).toSec());
-    const double previous_command_age = previous_laser_command_time_.isZero()
-        ? std::numeric_limits<double>::infinity()
-        : std::max(
-              0.0, (control_time - previous_laser_command_time_).toSec());
-    const bool previous_command_is_fresh =
-        previous_command_age <= std::max(0.10, laser_blocked_grace_period_);
-    const bool previous_command_is_slow =
-        std::max(0.0, previous_laser_command_.linear.x) <=
-            laser_blocked_hold_max_velocity_ &&
-        (std::abs(previous_laser_command_.linear.x) > 0.005 ||
-         std::abs(previous_laser_command_.angular.z) > 0.01);
-
-    // A single pitched or noisy scan must not turn into a one-cycle zero Twist.
-    // At no more than 0.10 m/s the default 0.25 s grace can move the base by at
-    // most 2.5 cm.  Faster commands skip this grace and start ramping down now.
-    if(blocked_duration < laser_blocked_grace_period_ &&
-       previous_command_is_fresh && previous_command_is_slow)
-    {
-        cmd_vel = previous_laser_command_;
-        rememberLaserCommand(cmd_vel);
-        publishSafetyState(
-            "HOLDING: transient direct-laser blockage; keeping prior low-speed command");
-        return true;
-    }
-
-    double control_period = 0.05;
-    if(previous_command_is_fresh)
-    {
-        control_period = clampValue(previous_command_age, 0.01, 0.10);
-    }
-    const double next_linear_velocity = approachVelocity(
-        std::max(0.0, previous_laser_command_.linear.x),
-        0.0, laser_blocked_stop_deceleration_, control_period);
-    const double next_angular_velocity = approachVelocity(
-        previous_laser_command_.angular.z,
-        0.0, laser_blocked_stop_angular_deceleration_, control_period);
-    constexpr double kStoppedLinearVelocity = 0.005;
-    constexpr double kStoppedAngularVelocity = 0.01;
-    if(next_linear_velocity <= kStoppedLinearVelocity &&
-       std::abs(next_angular_velocity) <= kStoppedAngularVelocity)
-    {
-        cmd_vel = geometry_msgs::Twist();
-        rememberLaserCommand(cmd_vel);
-        laser_blocked_zero_published_ = true;
-        publishSafetyState(
-            "DECELERATING: persistent direct-laser blockage reached zero");
-        return true;
-    }
-
-    cmd_vel.linear.x = next_linear_velocity;
-    cmd_vel.angular.z = next_angular_velocity;
-    rememberLaserCommand(cmd_vel);
-    std::ostringstream state;
-    state.setf(std::ios::fixed);
-    state.precision(2);
-    state << "DECELERATING: persistent direct-laser blockage v="
-          << next_linear_velocity << " w=" << next_angular_velocity;
-    publishSafetyState(state.str());
-    return true;
-}
-
-void CymPlanner::computeSmoothedLaserCommand(
-    const CandidateTrajectory& selected,
-    const std::vector<LaserPoint>& laser_points,
-    double front_clearance,
-    geometry_msgs::Twist& cmd_vel)
-{
-    const ros::Time control_time = ros::Time::now();
-    const double previous_command_age = previous_laser_command_time_.isZero()
-        ? std::numeric_limits<double>::infinity()
-        : std::max(
-              0.0, (control_time - previous_laser_command_time_).toSec());
-    const bool previous_command_is_fresh =
-        previous_command_age <= std::max(0.20, scan_timeout_);
-    const double control_period = previous_command_is_fresh
-        ? clampValue(previous_command_age, 0.01, 0.10)
-        : 0.05;
-    const double current_linear_velocity = previous_command_is_fresh
-        ? previous_laser_command_.linear.x : 0.0;
-    const double current_angular_velocity = previous_command_is_fresh
-        ? previous_laser_command_.angular.z : 0.0;
-    const double smoothed_linear_velocity = approachVelocity(
-        current_linear_velocity, selected.linear_velocity,
-        laser_command_linear_rate_limit_, control_period);
-    const double smoothed_angular_velocity = approachVelocity(
-        current_angular_velocity, selected.angular_velocity,
-        laser_command_angular_rate_limit_, control_period);
-
-    // Preserve continuity on both axes when that interpolated arc is safe.  If
-    // it is not, retain one smoothed axis at a time before falling back to the
-    // original laser-validated target.  Smoothing therefore cannot manufacture
-    // an unchecked collision trajectory.
-    const double trial_linear_velocity[] = {
-        smoothed_linear_velocity,
-        selected.linear_velocity,
-        smoothed_linear_velocity,
-        selected.linear_velocity,
-    };
-    const double trial_angular_velocity[] = {
-        smoothed_angular_velocity,
-        smoothed_angular_velocity,
-        selected.angular_velocity,
-        selected.angular_velocity,
-    };
-    for(std::size_t index = 0;
-        index < sizeof(trial_linear_velocity) / sizeof(double);
-        ++index)
-    {
-        const CandidateTrajectory trial = simulateTrajectory(
-            trial_linear_velocity[index], trial_angular_velocity[index],
-            laser_points, front_clearance);
-        if(!trial.valid)
-        {
-            continue;
-        }
-        cmd_vel.linear.x = trial_linear_velocity[index];
-        cmd_vel.angular.z = trial_angular_velocity[index];
-        rememberLaserCommand(cmd_vel);
-        return;
-    }
-
-    // Defensive fallback: `selected` was already validated while constructing
-    // the candidate set.
-    cmd_vel.linear.x = selected.linear_velocity;
-    cmd_vel.angular.z = selected.angular_velocity;
-    rememberLaserCommand(cmd_vel);
-}
-
-void CymPlanner::publishLaserPoints(const std::vector<LaserPoint>& points,
-                                    const ros::Time& stamp) const
-{
-    sensor_msgs::PointCloud2 cloud;
-    cloud.header.frame_id = base_link_frame_;
-    cloud.header.stamp = stamp;
-    sensor_msgs::PointCloud2Modifier modifier(cloud);
-    modifier.setPointCloud2FieldsByString(1, "xyz");
-    modifier.resize(points.size());
-    sensor_msgs::PointCloud2Iterator<float> x_iterator(cloud, "x");
-    sensor_msgs::PointCloud2Iterator<float> y_iterator(cloud, "y");
-    sensor_msgs::PointCloud2Iterator<float> z_iterator(cloud, "z");
-    for(const LaserPoint& point : points)
-    {
-        *x_iterator = static_cast<float>(point.x);
-        *y_iterator = static_cast<float>(point.y);
-        *z_iterator = 0.03F;
-        ++x_iterator;
-        ++y_iterator;
-        ++z_iterator;
-    }
-    laser_points_pub_.publish(cloud);
-}
-
-void CymPlanner::publishTrajectoryDebug(
-    const std::vector<CandidateTrajectory>& candidates, int selected_index) const
-{
-    const ros::Time now = ros::Time::now();
-    visualization_msgs::MarkerArray marker_array;
-    visualization_msgs::Marker clear_marker;
-    clear_marker.header.frame_id = base_link_frame_;
-    clear_marker.header.stamp = now;
-    clear_marker.action = visualization_msgs::Marker::DELETEALL;
-    marker_array.markers.push_back(clear_marker);
-
-    for(std::size_t index = 0; index < candidates.size(); ++index)
-    {
-        const CandidateTrajectory& candidate = candidates[index];
-        visualization_msgs::Marker marker;
-        marker.header.frame_id = base_link_frame_;
-        marker.header.stamp = now;
-        marker.ns = "cym_planner_candidates";
-        marker.id = static_cast<int>(index);
-        marker.type = visualization_msgs::Marker::LINE_STRIP;
-        marker.action = visualization_msgs::Marker::ADD;
-        marker.scale.x = 0.008;
-        marker.color.a = candidate.valid ? 0.35 : 0.25;
-        marker.color.r = candidate.valid ? 0.15F : 1.0F;
-        marker.color.g = candidate.valid ? 0.65F : 0.10F;
-        marker.color.b = candidate.valid ? 1.0F : 0.10F;
-        marker.lifetime = ros::Duration(0.25);
-        for(const TrajectoryPose& pose : candidate.poses)
-        {
-            geometry_msgs::Point point;
-            point.x = pose.x;
-            point.y = pose.y;
-            point.z = 0.04;
-            marker.points.push_back(point);
-        }
-        marker_array.markers.push_back(marker);
-    }
-    candidate_trajectories_pub_.publish(marker_array);
-
-    visualization_msgs::Marker selected_marker;
-    selected_marker.header.frame_id = base_link_frame_;
-    selected_marker.header.stamp = now;
-    selected_marker.ns = "cym_planner_selected";
-    selected_marker.id = 0;
-    selected_marker.type = visualization_msgs::Marker::LINE_STRIP;
-    selected_marker.scale.x = 0.025;
-    selected_marker.color.r = 0.0F;
-    selected_marker.color.g = 1.0F;
-    selected_marker.color.b = 0.10F;
-    selected_marker.color.a = 1.0F;
-    selected_marker.lifetime = ros::Duration(0.25);
-    if(selected_index < 0)
-    {
-        selected_marker.action = visualization_msgs::Marker::DELETE;
-    }
-    else
-    {
-        selected_marker.action = visualization_msgs::Marker::ADD;
-        for(const TrajectoryPose& pose : candidates[selected_index].poses)
-        {
-            geometry_msgs::Point point;
-            point.x = pose.x;
-            point.y = pose.y;
-            point.z = 0.05;
-            selected_marker.points.push_back(point);
-        }
-    }
-    selected_trajectory_pub_.publish(selected_marker);
-}
-
-void CymPlanner::publishLookaheadFootprint(const geometry_msgs::PoseStamped& lookahead_pose,
-                                           const std::string& costmap_frame) const
-{
-    const std::vector<geometry_msgs::Point>& footprint = costmap_ros_->getRobotFootprint();
-    if(footprint.empty())
-    {
-        return;
-    }
-    visualization_msgs::Marker marker;
-    marker.header.frame_id = costmap_frame;
-    marker.header.stamp = ros::Time::now();
-    marker.ns = "cym_planner_costmap";
-    marker.id = 0;
-    marker.type = visualization_msgs::Marker::LINE_STRIP;
-    marker.action = visualization_msgs::Marker::ADD;
-    marker.pose = lookahead_pose.pose;
-    marker.pose.position.z += 0.03;
-    marker.scale.x = 0.02;
-    marker.color.r = 0.05F;
-    marker.color.g = 0.95F;
-    marker.color.b = 0.95F;
-    marker.color.a = 1.0F;
-    marker.points = footprint;
-    marker.points.push_back(footprint.front());
-    lookahead_footprint_pub_.publish(marker);
-}
-
-void CymPlanner::publishSafetyState(const std::string& state) const
-{
-    std_msgs::String message;
-    message.data = state;
-    safety_state_pub_.publish(message);
-}
-
-bool CymPlanner::computeMainLegacyCommands(
-    geometry_msgs::Twist& cmd_vel,
-    bool use_laser_projection)
-{
-    cmd_vel = geometry_msgs::Twist();
-
-    if(use_laser_projection)
-    {
-        std::vector<LaserPoint> laser_points;
-        ros::Time scan_stamp;
-        if(!copyFreshLaserPoints(laser_points, scan_stamp))
-        {
-            publishSafetyState(
-                "STOP: laser projection scan unavailable or stale");
-            ROS_WARN_THROTTLE(
-                1.0,
-                "cym_planner: refusing projected-footprint path following "
-                "without a fresh %s scan",
-                scan_topic_.c_str());
-            return false;
-        }
-
-        bool projection_blocked = false;
-        if(!checkLaserPathProjection(
-               laser_points,
-               main_legacy_obstacle_lookahead_distance_,
-               projection_blocked))
-        {
-            publishSafetyState(
-                "STOP: cannot transform laser vehicle projection");
-            return false;
-        }
-        if(projection_blocked)
-        {
-            publishSafetyState(
-                "STOP: laser touches projected vehicle footprint");
-            return false;
-        }
-    }
-    else
-    {
-        // The pre-pickup phase stays byte-for-byte equivalent in behaviour to
-        // origin/main: the rolling costmap hands blocked paths back to
-        // move_base/global_planner for replanning.
-        if(isCostmapPathBlocked(main_legacy_obstacle_lookahead_distance_,
-                                main_legacy_obstacle_cost_threshold_))
-        {
-            publishSafetyState(
-                "STOP: main_legacy costmap requests global replan");
-            return false;
-        }
-    }
-
-    geometry_msgs::PoseStamped final_pose;
-    if(!transformPlanPose(global_plan_.back(), base_link_frame_, final_pose))
-    {
-        publishSafetyState("STOP: main_legacy cannot transform final plan pose");
-        return false;
-    }
-    const double final_distance = std::hypot(
-        final_pose.pose.position.x, final_pose.pose.position.y);
-    if(!pose_adjusting_ &&
-       final_distance < main_legacy_goal_position_tolerance_)
-    {
-        pose_adjusting_ = true;
-    }
-
-    const double motion_scale = carry_mode_ ? carry_speed_scale_ : 1.0;
-    if(pose_adjusting_)
-    {
-        const double final_yaw = tf::getYaw(final_pose.pose.orientation);
-        cmd_vel.angular.z = clampValue(
-            final_yaw * main_legacy_final_yaw_gain_ * motion_scale,
-            -main_legacy_final_yaw_max_vel_ * motion_scale,
-            main_legacy_final_yaw_max_vel_ * motion_scale);
-        cmd_vel.linear.x = final_pose.pose.position.x *
-            main_legacy_final_linear_x_gain_ * motion_scale;
-        if(std::abs(final_yaw) < main_legacy_final_yaw_tolerance_)
-        {
-            goal_reached_ = true;
-            cmd_vel = geometry_msgs::Twist();
-            publishSafetyState("GOAL_REACHED");
+            path_blockage =
+                inspectFootprint(
+                    pose_costmap, local_costmap, map_image, true);
         }
         else
         {
-            publishSafetyState("ACTIVE: origin/main final-pose alignment");
+            if(!map_image.empty())
+            {
+                cv::circle(map_image, cv::Point(map_x, map_y), 1,
+                           cv::Scalar(0, 0, 255), -1);
+            }
+            path_blockage.blocked =
+                local_costmap.getCost(map_x, map_y) >=
+                    tuning.obstacle_cost_threshold;
         }
-        return true;
+        if(path_blockage.blocked)
+        {
+            ROS_WARN_THROTTLE(
+                1.0, "cym_planner: blocked forward %s; requesting global replan",
+                body_projection_enabled_ ? "vehicle footprint" : "path point");
+            return path_blockage;
+        }
     }
+    return path_blockage;
+}
 
-    geometry_msgs::PoseStamped target_pose;
-    if(!selectTargetPose(target_pose, main_legacy_target_distance_))
+bool CymPlanner::escapePreviewIsSafe(
+    const geometry_msgs::PoseStamped& current_pose,
+    const costmap_2d::Costmap2D& local_costmap,
+    double direction_world_x,
+    double direction_world_y,
+    double distance,
+    cv::Mat& map_image)
+{
+    const FootprintBlockage current_blockage =
+        inspectFootprint(current_pose, local_costmap, map_image, false);
+    const int sample_count = std::max(
+        1, static_cast<int>(
+            std::ceil(distance / escape_projection_step_)));
+    FootprintBlockage preview_blockage;
+    for(int sample = 1; sample <= sample_count; ++sample)
     {
-        publishSafetyState("STOP: main_legacy cannot select local path target");
+        const double sample_distance =
+            distance * static_cast<double>(sample) /
+            static_cast<double>(sample_count);
+        geometry_msgs::PoseStamped preview_pose = current_pose;
+        preview_pose.pose.position.x +=
+            direction_world_x * sample_distance;
+        preview_pose.pose.position.y +=
+            direction_world_y * sample_distance;
+        preview_blockage =
+            inspectFootprint(
+                preview_pose, local_costmap, map_image, false);
+        if(!escapeIntermediateDoesNotWorsen(
+               current_blockage.contact_count,
+               preview_blockage.contact_count,
+               preview_blockage.blocked,
+               preview_blockage.recoverable))
+        {
+            return false;
+        }
+    }
+    return escapePreviewImproves(
+        current_blockage.contact_count,
+        preview_blockage.contact_count,
+        preview_blockage.blocked,
+        preview_blockage.recoverable);
+}
+
+bool CymPlanner::computeEscapeCommand(
+    const FootprintBlockage& path_blockage,
+    const costmap_2d::Costmap2D& local_costmap,
+    cv::Mat& map_image,
+    geometry_msgs::Twist& cmd_vel)
+{
+    cmd_vel = geometry_msgs::Twist();
+    if(!body_projection_enabled_ || !path_blockage.recoverable)
+        return false;
+
+    geometry_msgs::PoseStamped current_pose;
+    if(!currentCostmapPose(current_pose))
+    {
+        ROS_ERROR_THROTTLE(
+            1.0, "cym_planner: escape recovery has no current robot pose");
         return false;
     }
 
-    const double heading_error = std::atan2(
-        target_pose.pose.position.y, target_pose.pose.position.x);
-    cmd_vel.linear.y = 0.0;
-    cmd_vel.angular.z = clampValue(
-        heading_error * main_legacy_angular_gain_ * motion_scale,
-        -main_legacy_max_vel_theta_ * motion_scale,
-        main_legacy_max_vel_theta_ * motion_scale);
-    const double heading_speed_scale = std::max(
-        0.25, std::cos(std::min(std::abs(heading_error), kPi / 2.0)));
-
-    const double linear_error = target_pose.pose.position.x;
-    const ros::Time control_time = ros::Time::now();
-    double linear_error_derivative = 0.0;
-    if(main_legacy_linear_derivative_initialized_)
+    const ros::Time now = ros::Time::now();
+    const double current_yaw = tf::getYaw(current_pose.pose.orientation);
+    if(escape_active_)
     {
-        const double control_period =
-            (control_time - main_legacy_previous_control_time_).toSec();
-        if(control_period > 1e-3)
+        const double travelled = std::hypot(
+            current_pose.pose.position.x - escape_start_world_x_,
+            current_pose.pose.position.y - escape_start_world_y_);
+        if(std::abs(normalizeAngle(
+               current_yaw - escape_start_world_yaw_)) >
+           escape_heading_tolerance_)
         {
-            linear_error_derivative = clampValue(
-                (linear_error - main_legacy_previous_linear_error_) /
-                    control_period,
-                -2.0, 2.0);
+            ROS_ERROR(
+                "cym_planner: escape recovery heading drift exceeded %.3f rad; "
+                "stopping recovery",
+                escape_heading_tolerance_);
+            resetEscapeRecovery();
+            return false;
+        }
+
+        const double motion_timeout =
+            2.0 * escape_step_distance_ / escape_speed_ + 0.50;
+        if((now - escape_motion_started_).toSec() > motion_timeout)
+        {
+            ROS_ERROR(
+                "cym_planner: escape recovery could not move %.3f m within "
+                "%.2f s; stopping recovery",
+                escape_step_distance_, motion_timeout);
+            resetEscapeRecovery();
+            return false;
+        }
+
+        if(travelled >= escape_step_distance_)
+        {
+            escape_active_ = false;
+            ++escape_attempts_;
+            escape_total_distance_ += travelled;
+            escape_wait_until_ =
+                now + ros::Duration(escape_replan_wait_);
+            escape_blocked_since_ = now;
+            ROS_WARN(
+                "cym_planner: escape step complete attempt=%d/%d "
+                "distance=%.3f m total=%.3f/%.3f m; holding %.2f s",
+                escape_attempts_, escape_max_attempts_, travelled,
+                escape_total_distance_, escape_max_total_distance_,
+                escape_replan_wait_);
+            return true;
+        }
+
+        const double remaining =
+            std::max(0.005, escape_step_distance_ - travelled);
+        if(!escapePreviewIsSafe(
+               current_pose,
+               local_costmap,
+               escape_direction_world_x_,
+               escape_direction_world_y_,
+               remaining,
+               map_image))
+        {
+            ROS_ERROR(
+                "cym_planner: escape direction is no longer collision-improving; "
+                "stopping recovery");
+            resetEscapeRecovery();
+            return false;
+        }
+
+        cmd_vel.linear.x = escape_direction_base_x_ * escape_speed_;
+        cmd_vel.linear.y = escape_direction_base_y_ * escape_speed_;
+        cmd_vel.angular.z = 0.0;
+        return true;
+    }
+
+    if(!escape_wait_until_.isZero() && now < escape_wait_until_)
+    {
+        ROS_WARN_THROTTLE(
+            1.0, "cym_planner: holding still for global replan after escape");
+        return true;
+    }
+    escape_wait_until_ = ros::Time(0);
+
+    if(escape_blocked_since_.isZero())
+    {
+        escape_blocked_since_ = now;
+        ROS_WARN(
+            "cym_planner: recoverable footprint blockage; holding %.2f s "
+            "before a bounded translation",
+            escape_blocked_timeout_);
+        return true;
+    }
+    if((now - escape_blocked_since_).toSec() < escape_blocked_timeout_)
+        return true;
+
+    if(!escapeBudgetAllows(
+           escape_attempts_,
+           escape_max_attempts_,
+           escape_total_distance_,
+           escape_step_distance_,
+           escape_max_total_distance_))
+    {
+        ROS_ERROR(
+            "cym_planner: escape recovery limit reached attempts=%d/%d "
+            "distance=%.3f/%.3f m; returning control failure",
+            escape_attempts_, escape_max_attempts_,
+            escape_total_distance_, escape_max_total_distance_);
+        resetEscapeRecovery();
+        return false;
+    }
+
+    const std::vector<geometry_msgs::Point>& footprint =
+        costmap_ros_->getRobotFootprint();
+    double half_length = 0.0;
+    double half_width = 0.0;
+    for(const geometry_msgs::Point& point : footprint)
+    {
+        half_length = std::max(half_length, std::abs(point.x));
+        half_width = std::max(half_width, std::abs(point.y));
+    }
+    const EscapeDirection direction = selectEscapeDirection(
+        current_pose.pose.position.x,
+        current_pose.pose.position.y,
+        current_yaw,
+        path_blockage.contact_world_x,
+        path_blockage.contact_world_y,
+        half_length,
+        half_width);
+    if(!direction.valid)
+    {
+        ROS_ERROR("cym_planner: cannot determine a safe escape side");
+        resetEscapeRecovery();
+        return false;
+    }
+    if(!escapePreviewIsSafe(
+           current_pose,
+           local_costmap,
+           direction.world_x,
+           direction.world_y,
+           escape_step_distance_,
+           map_image))
+    {
+        ROS_ERROR(
+            "cym_planner: proposed %.3f m escape from %s contact does not "
+            "improve footprint clearance",
+            escape_step_distance_,
+            escapeContactSideName(direction.contact_side));
+        resetEscapeRecovery();
+        return false;
+    }
+
+    escape_active_ = true;
+    escape_motion_started_ = now;
+    escape_start_world_x_ = current_pose.pose.position.x;
+    escape_start_world_y_ = current_pose.pose.position.y;
+    escape_start_world_yaw_ = current_yaw;
+    escape_direction_base_x_ = direction.base_x;
+    escape_direction_base_y_ = direction.base_y;
+    escape_direction_world_x_ = direction.world_x;
+    escape_direction_world_y_ = direction.world_y;
+    ROS_WARN(
+        "cym_planner: escape start side=%s base_direction=(%.0f,%.0f) "
+        "step=%.3f m speed=%.3f m/s attempt=%d/%d",
+        escapeContactSideName(direction.contact_side),
+        escape_direction_base_x_, escape_direction_base_y_,
+        escape_step_distance_, escape_speed_,
+        escape_attempts_ + 1, escape_max_attempts_);
+
+    cmd_vel.linear.x = escape_direction_base_x_ * escape_speed_;
+    cmd_vel.linear.y = escape_direction_base_y_ * escape_speed_;
+    cmd_vel.angular.z = 0.0;
+    return true;
+}
+
+void CymPlanner::publishDebugMap(
+    const cv::Mat& map_image,
+    const std::string& frame_id) const
+{
+    if(map_image.empty() || debug_map_pub_.getNumSubscribers() == 0)
+        return;
+    cv::Mat flipped_image;
+    cv::flip(map_image, flipped_image, -1);
+    std_msgs::Header header;
+    header.stamp = ros::Time::now();
+    header.frame_id = frame_id;
+    debug_map_pub_.publish(
+        cv_bridge::CvImage(header, sensor_msgs::image_encodings::BGR8,
+                           flipped_image).toImageMsg());
+}
+
+void CymPlanner::publishDebugPlan() const
+{
+    if(debug_plan_pub_.getNumSubscribers() == 0)
+        return;
+
+    cv::Mat plan_image(600, 600, CV_8UC3, cv::Scalar(0, 0, 0));
+    for(const geometry_msgs::PoseStamped& plan_pose : global_plan_)
+    {
+        geometry_msgs::PoseStamped pose_base;
+        if(!transformPlanPose(plan_pose, base_link_frame_, pose_base))
+            continue;
+        const int cv_x = 300 -
+            static_cast<int>(pose_base.pose.position.x * 100.0);
+        const int cv_y = 300 -
+            static_cast<int>(pose_base.pose.position.y * 100.0);
+        if(cv_x >= 0 && cv_x < plan_image.cols &&
+           cv_y >= 0 && cv_y < plan_image.rows)
+        {
+            cv::circle(plan_image, cv::Point(cv_x, cv_y), 1,
+                       cv::Scalar(255, 0, 255), -1);
         }
     }
-    main_legacy_previous_linear_error_ = linear_error;
-    main_legacy_previous_control_time_ = control_time;
-    main_legacy_linear_derivative_initialized_ = true;
+    cv::circle(plan_image, cv::Point(300, 300), 15,
+               body_projection_enabled_ ?
+                   cv::Scalar(0, 165, 255) : cv::Scalar(0, 255, 0), 2);
+    cv::line(plan_image, cv::Point(65, 300), cv::Point(510, 300),
+             cv::Scalar(0, 255, 0), 1);
+    cv::line(plan_image, cv::Point(300, 45), cv::Point(300, 555),
+             cv::Scalar(0, 255, 0), 1);
 
-    const double linear_control =
-        (linear_error * main_legacy_linear_x_gain_ +
-         linear_error_derivative * main_legacy_linear_x_kd_) * motion_scale;
-    cmd_vel.linear.x = std::max(
-        0.0,
-        std::min(linear_control, main_legacy_max_vel_x_ * motion_scale) *
-            heading_speed_scale);
-    publishTrajectoryDebug(std::vector<CandidateTrajectory>(), -1);
-    publishSafetyState(use_laser_projection
-        ? "ACTIVE: origin/main CymPlanner with laser vehicle projection"
-        : "ACTIVE: origin/main CymPlanner with local-costmap replanning");
-    return true;
+    std_msgs::Header header;
+    header.stamp = ros::Time::now();
+    header.frame_id = base_link_frame_;
+    debug_plan_pub_.publish(
+        cv_bridge::CvImage(header, sensor_msgs::image_encodings::BGR8,
+                           plan_image).toImageMsg());
 }
 
 bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
 {
+    ControlCycleWatchdog cycle_watchdog;
     cmd_vel = geometry_msgs::Twist();
-    if(!initialized_ || global_plan_.empty())
+    if(global_plan_.empty())
+        return false;
+    if(!costmap_ros_ || !costmap_ros_->isCurrent())
     {
-        publishSafetyState("STOP: empty global plan");
+        ROS_ERROR_THROTTLE(
+            1.0, "cym_planner: local costmap is not current; holding zero");
         return false;
     }
 
-    // Both task phases now use exactly the origin/main line-following control
-    // law.  The post-pickup mode changes only the obstacle predicate: direct
-    // laser points are tested against the vehicle footprint swept along the
-    // lookahead path, and a touch returns false so move_base replans.
-    return computeMainLegacyCommands(
-        cmd_vel, laser_avoidance_enabled_.load());
+    costmap_2d::Costmap2D* costmap = costmap_ros_->getCostmap();
+    if(!costmap)
+        return false;
+    costmap_2d::Costmap2D local_costmap;
+    {
+        costmap_2d::Costmap2D::mutex_t* mutex = costmap->getMutex();
+        boost::unique_lock<costmap_2d::Costmap2D::mutex_t> lock(*mutex);
+        local_costmap = *costmap;
+    }
+    const unsigned int size_x = local_costmap.getSizeInCellsX();
+    const unsigned int size_y = local_costmap.getSizeInCellsY();
+    if(size_x == 0 || size_y == 0 || local_costmap.getResolution() <= 0.0)
+        return false;
 
-    std::vector<LaserPoint> laser_points;
-    ros::Time scan_stamp;
-    if(!copyFreshLaserPoints(laser_points, scan_stamp))
+    cv::Mat map_image;
+    const bool debug_map_active =
+        debug_images_enabled_ && debug_map_pub_.getNumSubscribers() > 0;
+    if(debug_map_active)
     {
-        publishSafetyState("STOP: laser scan unavailable or stale");
-        ROS_WARN_THROTTLE(1.0, "cym_planner: refusing to move without a fresh %s scan",
-                          scan_topic_.c_str());
-        return false;
+        map_image = cv::Mat(
+            size_y, size_x, CV_8UC3, cv::Scalar(128, 128, 128));
+        for(unsigned int y = 0; y < size_y; ++y)
+        {
+            for(unsigned int x = 0; x < size_x; ++x)
+            {
+                const unsigned char cost = local_costmap.getCost(x, y);
+                cv::Vec3b& pixel = map_image.at<cv::Vec3b>(y, x);
+                if(cost == 0)
+                    pixel = cv::Vec3b(128, 128, 128);
+                else if(cost == 253)
+                    pixel = cv::Vec3b(255, 255, 0);
+                else if(cost == 254)
+                    pixel = cv::Vec3b(0, 0, 0);
+                else
+                    pixel = cv::Vec3b(255 - cost, 0, 255 - cost);
+            }
+        }
     }
-    if(laser_points.empty())
+
+    const FootprintBlockage path_blockage =
+        checkPathBlocked(local_costmap, map_image);
+    bool escape_command_valid = false;
+    if(escape_enabled_ &&
+       path_blockage.blocked &&
+       body_projection_enabled_ &&
+       path_blockage.recoverable)
     {
-        publishSafetyState("STOP: laser scan has no valid points");
-        return false;
+        escape_command_valid =
+            computeEscapeCommand(
+                path_blockage, local_costmap, map_image, cmd_vel);
     }
+    if(!map_image.empty())
+        map_image.at<cv::Vec3b>(size_y / 2, size_x / 2) =
+            cv::Vec3b(0, 255, 0);
+    if(debug_images_enabled_)
+    {
+        publishDebugMap(map_image, costmap_ros_->getGlobalFrameID());
+        publishDebugPlan();
+    }
+    if(path_blockage.blocked)
+        return escape_command_valid;
+    resetEscapeRecovery();
 
     geometry_msgs::PoseStamped final_pose;
-    if(!transformPlanPose(global_plan_.back(), base_link_frame_, final_pose))
-    {
-        publishSafetyState("STOP: cannot transform final plan pose");
+    if(!transformPlanPose(global_plan_.back(), base_link_frame_, final_pose) ||
+       !poseIsFinite(final_pose))
         return false;
-    }
-    const double final_distance = std::hypot(final_pose.pose.position.x, final_pose.pose.position.y);
-    if(final_distance < goal_position_tolerance_)
-    {
-        pose_adjusting_ = true;
-    }
 
-    if(pose_adjusting_ &&
-       std::abs(tf::getYaw(final_pose.pose.orientation)) < final_yaw_tolerance_)
+    const double final_distance = std::hypot(
+        final_pose.pose.position.x, final_pose.pose.position.y);
+    if(!std::isfinite(final_distance))
+        return false;
+    if(!pose_adjusting_ && final_distance < kGoalPositionTolerance)
+        pose_adjusting_ = true;
+
+    const PlannerTuning& tuning = activeTuning();
+    const double motion_scale =
+        carry_mode_ ? tuning.carry_speed_scale : 1.0;
+    if(pose_adjusting_)
     {
-        goal_reached_ = true;
-        rememberLaserCommand(cmd_vel);
-        publishSafetyState("GOAL_REACHED");
+        const double final_yaw = tf::getYaw(final_pose.pose.orientation);
+        if(!std::isfinite(final_yaw))
+            return false;
+        cmd_vel.angular.z = clampValue(
+            final_yaw * tuning.final_yaw_gain * motion_scale,
+            -tuning.final_yaw_max_vel * motion_scale,
+            tuning.final_yaw_max_vel * motion_scale);
+        cmd_vel.linear.x = clampValue(
+            final_pose.pose.position.x *
+                tuning.final_linear_x_gain * motion_scale,
+            -tuning.max_vel_x * motion_scale,
+            tuning.max_vel_x * motion_scale);
+        const bool final_yaw_reached =
+            std::abs(final_yaw) < tuning.final_yaw_tolerance;
+        if(final_yaw_reached)
+        {
+            cmd_vel = geometry_msgs::Twist();
+        }
+        if(!commandIsFinite(cmd_vel) ||
+           (body_projection_enabled_ &&
+             !commandSweepIsSafe(cmd_vel, local_costmap, map_image)))
+        {
+            cmd_vel = geometry_msgs::Twist();
+            return false;
+        }
+        if(final_yaw_reached)
+        {
+            goal_reached_ = true;
+            ROS_WARN("cym_planner: goal reached");
+        }
         return true;
     }
 
     geometry_msgs::PoseStamped target_pose;
-    double desired_linear_velocity = 0.0;
-    double desired_angular_velocity = 0.0;
-    const double motion_scale = carry_mode_ ? carry_speed_scale_ : 1.0;
-    if(pose_adjusting_)
-    {
-        target_pose = final_pose;
-        // The positional tolerance has already been met.  Keep the vehicle
-        // stationary and let the laser-validated trajectories solve only the
-        // final orientation; advancing here can turn a small pose error into a
-        // large arc around the goal.
-        desired_linear_velocity = 0.0;
-        const double final_yaw_error = tf::getYaw(final_pose.pose.orientation);
-        const double proportional_yaw_velocity =
-            final_yaw_error * final_yaw_gain_ * motion_scale;
-        // A rollout scores its pose at simulation_time_.  Limiting the command
-        // to the angle that can be completed inside that horizon prevents a
-        // high legacy yaw gain from overshooting the terminal orientation.
-        const double horizon_yaw_velocity =
-            final_yaw_error / simulation_time_ * motion_scale;
-        const double yaw_velocity_limit = std::min(
-            final_yaw_max_vel_ * motion_scale, std::abs(horizon_yaw_velocity));
-        desired_angular_velocity = clampValue(
-            proportional_yaw_velocity, -yaw_velocity_limit, yaw_velocity_limit);
-    }
-    else
-    {
-        if(!selectTargetPose(target_pose, lookahead_distance_))
-        {
-            publishSafetyState("STOP: cannot select local path target");
-            return false;
-        }
-        const double heading_error = std::atan2(target_pose.pose.position.y,
-                                                target_pose.pose.position.x);
-        const double nominal_linear_velocity = clampValue(
-            target_pose.pose.position.x * linear_x_gain_ * motion_scale,
-            0.0, max_vel_x_ * motion_scale);
-        // Do not enter a tight bend at straight-line speed.  Squared cosine
-        // keeps gentle curves fast while giving the angular controller time to
-        // turn the complete physical footprint before it reaches the wall.
-        const double heading_cosine = std::cos(heading_error);
-        const double turn_speed_scale = clampValue(
-            heading_cosine * heading_cosine, 0.15, 1.0);
-        desired_linear_velocity = nominal_linear_velocity * turn_speed_scale;
-        desired_angular_velocity = clampValue(
-            heading_error * angular_gain_ * motion_scale,
-            -max_vel_theta_ * motion_scale, max_vel_theta_ * motion_scale);
-    }
+    if(!selectTargetPose(target_pose) || !poseIsFinite(target_pose))
+        return false;
 
-    const double max_angular_velocity = pose_adjusting_
-        ? final_yaw_max_vel_ * motion_scale : max_vel_theta_ * motion_scale;
-    const double front_clearance = forwardClearance(laser_points);
-    std::vector<double> angular_candidates;
-    angular_candidates.reserve(static_cast<std::size_t>(w_samples_ + 6));
-    const auto append_angular_candidate =
-        [&angular_candidates, max_angular_velocity](double value)
+    const ros::Time control_time = ros::Time::now();
+    const double heading_error = std::atan2(
+        target_pose.pose.position.y, target_pose.pose.position.x);
+    if(!std::isfinite(heading_error))
+        return false;
+    double heading_derivative = 0.0;
+    if(angular_derivative_initialized_)
+    {
+        const double period =
+            (control_time - previous_heading_control_time_).toSec();
+        if(std::isfinite(period) && period > 1e-3)
         {
-            const double bounded = clampValue(
-                value, -max_angular_velocity, max_angular_velocity);
-            for(const double existing : angular_candidates)
-            {
-                if(std::abs(existing - bounded) < 1e-6)
-                {
-                    return;
-                }
-            }
-            angular_candidates.push_back(bounded);
-        };
-    for(int w_index = 0; w_index < w_samples_; ++w_index)
-    {
-        const double center = 0.5 * static_cast<double>(w_samples_ - 1);
-        const double angular_offset = (static_cast<double>(w_index) - center) /
-            std::max(1.0, center) * max_angular_velocity;
-        append_angular_candidate(desired_angular_velocity + angular_offset);
-    }
-    // Near a wall, a full desired turn can collide over the rollout horizon
-    // even though a slower turn in the same direction is safe.  Always sample
-    // an idle command plus fractional target-directed turns; otherwise the
-    // shifted angular grid can omit w=0 and every candidate is rejected.
-    append_angular_candidate(0.0);
-    if(std::abs(desired_angular_velocity) > 1e-6)
-    {
-        append_angular_candidate(std::copysign(
-            minimum_turn_velocity_, desired_angular_velocity));
-    }
-    append_angular_candidate(desired_angular_velocity * 0.25);
-    append_angular_candidate(desired_angular_velocity * 0.50);
-    append_angular_candidate(desired_angular_velocity * 0.75);
-    append_angular_candidate(desired_angular_velocity);
-
-    std::vector<CandidateTrajectory> candidates;
-    candidates.reserve(
-        static_cast<std::size_t>(v_samples_) * angular_candidates.size());
-    int selected_index = -1;
-    double best_score = -std::numeric_limits<double>::infinity();
-    // In path-following mode, heading points at the local path target.  Once
-    // position is within tolerance, the target is instead the goal's final
-    // orientation.  Using atan2(y, x) in this branch tends to zero and makes
-    // the scorer prefer w = 0, which is why the previous rollout stopped
-    // turning at the destination.
-    const double target_heading = pose_adjusting_
-        ? tf::getYaw(target_pose.pose.orientation)
-        : std::atan2(target_pose.pose.position.y, target_pose.pose.position.x);
-
-    for(int v_index = 0; v_index < v_samples_; ++v_index)
-    {
-        const double fraction = static_cast<double>(v_index) /
-            static_cast<double>(v_samples_ - 1);
-        const double candidate_linear_velocity = desired_linear_velocity * fraction;
-        for(const double candidate_angular_velocity : angular_candidates)
-        {
-            CandidateTrajectory candidate = simulateTrajectory(
-                candidate_linear_velocity, candidate_angular_velocity, laser_points,
-                front_clearance);
-            if(candidate.valid &&
-               candidate.linear_velocity >= minimum_progress_velocity_ &&
-               candidate.clearance < minimum_moving_clearance_)
-            {
-                // Merely avoiding geometric overlap is not enough for the
-                // dynamic cones.  A near-zero-clearance arc lets the physical
-                // body touch and climb a cone before the next scan arrives.
-                candidate.valid = false;
-            }
-            if(candidate.valid && !candidate.poses.empty())
-            {
-                const TrajectoryPose& end_pose = candidate.poses.back();
-                const double path_error = std::hypot(
-                    end_pose.x - target_pose.pose.position.x,
-                    end_pose.y - target_pose.pose.position.y);
-                const double heading_error = std::abs(normalizeAngle(target_heading - end_pose.yaw));
-                const double normalized_speed = desired_linear_velocity > 1e-4
-                    ? candidate.linear_velocity / desired_linear_velocity : 0.0;
-                candidate.score =
-                    -path_distance_weight_ * path_error
-                    -heading_weight_ * heading_error
-                    +clearance_weight_ * std::min(candidate.clearance, scan_max_range_)
-                    +velocity_weight_ * normalized_speed
-                    -angular_velocity_weight_ * std::abs(
-                        candidate.angular_velocity - desired_angular_velocity);
-                if(candidate.score > best_score)
-                {
-                    best_score = candidate.score;
-                    selected_index = static_cast<int>(candidates.size());
-                }
-            }
-            candidates.push_back(candidate);
+            heading_derivative = clampValue(
+                normalizeAngle(heading_error - previous_heading_error_) / period,
+                -4.0, 4.0);
         }
     }
+    previous_heading_error_ = heading_error;
+    previous_heading_control_time_ = control_time;
+    angular_derivative_initialized_ = true;
+    cmd_vel.angular.z = clampValue(
+        (heading_error * tuning.angular_gain +
+         heading_derivative * tuning.angular_kd) * motion_scale,
+        -tuning.max_vel_theta * motion_scale,
+        tuning.max_vel_theta * motion_scale);
 
-    if(selected_index < 0)
+    const double linear_error = target_pose.pose.position.x;
+    if(!std::isfinite(linear_error))
+        return false;
+    double linear_derivative = 0.0;
+    if(linear_derivative_initialized_)
     {
-        publishTrajectoryDebug(candidates, selected_index);
-        ROS_WARN_THROTTLE(1.0,
-                          "cym_planner: laser point cloud rejects every rollout; "
-                          "applying continuous slow stop");
-        return computeLaserBlockedCommand(cmd_vel);
-    }
-
-    if(!pose_adjusting_)
-    {
-        int best_safe_forward_index = -1;
-        int best_goal_directed_turn_index = -1;
-        double best_safe_forward_score = -std::numeric_limits<double>::infinity();
-        double smallest_turn_heading_error = std::numeric_limits<double>::infinity();
-        double best_turn_score = -std::numeric_limits<double>::infinity();
-        const double initial_heading_error = std::abs(normalizeAngle(target_heading));
-
-        for(std::size_t index = 0; index < candidates.size(); ++index)
+        const double period =
+            (control_time - previous_linear_control_time_).toSec();
+        if(std::isfinite(period) && period > 1e-3)
         {
-            const CandidateTrajectory& candidate = candidates[index];
-            if(candidate.valid &&
-               candidate.linear_velocity >= minimum_progress_velocity_)
-            {
-                if(candidate.score > best_safe_forward_score)
-                {
-                    best_safe_forward_score = candidate.score;
-                    best_safe_forward_index = static_cast<int>(index);
-                }
-            }
-
-            // At a pickup bay the global target can be behind the vehicle while
-            // the shelf blocks every *forward* rollout.  That is not a lidar
-            // deadlock: a collision-free turn that reduces the heading error is
-            // the required first step before forward progress becomes possible.
-            // Never accept an arbitrary stationary spin here; it must make a
-            // measurable improvement toward the current global-plan target.
-            if(candidate.valid && !candidate.poses.empty() &&
-               candidate.linear_velocity < minimum_progress_velocity_ &&
-               std::abs(candidate.angular_velocity) >= minimum_turn_velocity_)
-            {
-                const double end_heading_error = std::abs(normalizeAngle(
-                    target_heading - candidate.poses.back().yaw));
-                constexpr double kMinimumHeadingImprovement = 0.01;
-                if(end_heading_error < initial_heading_error - kMinimumHeadingImprovement &&
-                   (end_heading_error < smallest_turn_heading_error ||
-                    (end_heading_error == smallest_turn_heading_error &&
-                     candidate.score > best_turn_score)))
-                {
-                    smallest_turn_heading_error = end_heading_error;
-                    best_turn_score = candidate.score;
-                    best_goal_directed_turn_index = static_cast<int>(index);
-                }
-            }
-        }
-
-        const CandidateTrajectory& selected = candidates[selected_index];
-        const bool selected_command_is_idle =
-            selected.linear_velocity < minimum_progress_velocity_ &&
-            std::abs(selected.angular_velocity) < minimum_turn_velocity_;
-        if(best_safe_forward_index < 0)
-        {
-            if(best_goal_directed_turn_index < 0)
-            {
-                publishTrajectoryDebug(candidates, selected_index);
-                ROS_WARN_THROTTLE(1.0,
-                                  "cym_planner: no forward lidar rollout; applying transient hold or slow stop");
-                return computeLaserBlockedCommand(cmd_vel);
-            }
-
-            selected_index = best_goal_directed_turn_index;
-            ROS_INFO_THROTTLE(1.0,
-                              "cym_planner: no forward lidar rollout; rotating toward the global-plan target");
-        }
-        else if(selected_command_is_idle)
-        {
-            // The scorer may tie on an idle command.  If a laser-safe forward
-            // rollout exists, choose it so navigation cannot silently stall.
-            selected_index = best_safe_forward_index;
+            linear_derivative = clampValue(
+                (linear_error - previous_linear_error_) / period,
+                -2.0, 2.0);
         }
     }
-
-    resetLaserBlockedState();
-    publishTrajectoryDebug(candidates, selected_index);
-    const CandidateTrajectory& selected = candidates[selected_index];
-
-    computeSmoothedLaserCommand(
-        selected, laser_points, front_clearance, cmd_vel);
-    std::ostringstream state;
-    state.setf(std::ios::fixed);
-    state.precision(2);
-    state << "ACTIVE: direct laser rollout selected"
-          << " v=" << selected.linear_velocity
-          << " w=" << selected.angular_velocity
-          << " command_v=" << cmd_vel.linear.x
-          << " command_w=" << cmd_vel.angular.z
-          << " clearance=" << selected.clearance;
-    publishSafetyState(state.str());
+    previous_linear_error_ = linear_error;
+    previous_linear_control_time_ = control_time;
+    linear_derivative_initialized_ = true;
+    const double turn_speed_scale = headingSpeedScale(
+        heading_error, tuning.heading_slowdown_min_scale);
+    cmd_vel.linear.x = clampValue(
+        (linear_error * tuning.linear_x_gain +
+         linear_derivative * tuning.linear_x_kd) *
+            motion_scale * turn_speed_scale,
+        0.0, tuning.max_vel_x * motion_scale);
+    cmd_vel.linear.y = 0.0;
+    if(!commandIsFinite(cmd_vel) ||
+       (body_projection_enabled_ &&
+        !commandSweepIsSafe(cmd_vel, local_costmap, map_image)))
+    {
+        cmd_vel = geometry_msgs::Twist();
+        return false;
+    }
     return true;
 }
 

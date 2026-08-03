@@ -18,6 +18,7 @@ ROS 1 不会自动发现 Master。两台设备即使连接到同一 Wi-Fi，仍�
 2. 在控制电脑 WSL 中启动 Master：
 
    ```bash
+   unset ROS_IP ROS_HOSTNAME ROS_MASTER_URI
    ~/start_ros_master.sh
    ```
 
@@ -45,6 +46,27 @@ ROS 1 不会自动发现 Master。两台设备即使连接到同一 Wi-Fi，仍�
 它按以下顺序选择地址：命令行 `ROS_IP`、命令行 `ROS_INTERFACE`、Windows 当前具有默认网关的物理网卡、WSL 路由地址、其他 WSL 全局 IPv4 地址。当前 WSL 为镜像网络模式，因此 WSL 可以直接使用 Windows 的 Wi-Fi 局域网地址。
 
 通常不要填写任何固定地址；直接运行两个启动脚本即可。
+
+`start_ros_master.sh` 还会为它启动的 ROS Master 进程树启用仓库中的
+`python_http10_compat/sitecustomize.py`，将 XML-RPC 服务端协议固定为 HTTP/1.0。
+这是因为小车的 Linux 4.9 内核通过 WSL 镜像网络访问 HTTP/1.1 Master 时，
+`system.multicall` 响应会间歇性停留在 WSL 发送队列，导致车端 `roslaunch` 卡在
+`load_parameters starting ...`。该兼容层不修改系统 ROS 文件，也不影响 ROS
+话题数据使用的 TCPROS。
+
+更新本机启动脚本和兼容层：
+
+```bash
+mkdir -p ~/.config/smartcar/python_http10_compat
+cp /mnt/d/WORK/ALLCODE/smartcar2026/simulationforreal/ucar_source_code/rosmaster/start_ros_master.sh \
+  ~/start_ros_master.sh
+cp /mnt/d/WORK/ALLCODE/smartcar2026/simulationforreal/ucar_source_code/rosmaster/python_http10_compat/sitecustomize.py \
+  ~/.config/smartcar/python_http10_compat/sitecustomize.py
+chmod 0755 ~/start_ros_master.sh
+```
+
+启动行必须显示 `XML-RPC=HTTP/1.0`。若兼容文件缺失或没有生效，脚本会在启动
+Master 前报错退出。
 
 ### 需要手动覆盖时
 
@@ -82,7 +104,17 @@ powershell.exe -NoProfile -Command "(Get-NetIPConfiguration | Where-Object { $_.
 
 ## 小车端
 
-每次启动小车 ROS 节点的终端，必须在所有 `source` 命令之后执行以下内容。将 `MASTER_IP` 替换为本次控制电脑启动脚本显示的地址：
+日常启动不要手工复制下方的网络命令，直接运行：
+
+```bash
+bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh
+```
+
+根据提示只输入控制电脑启动脚本显示的 WSL Master 地址。脚本会自动完成环境加载、
+动态地址推导、Master 连通检查和无自动目标导航启动。
+
+以下内容仅供维护人员理解脚本原理。每次启动小车 ROS 节点的终端，网络变量必须在所有
+`source` 命令之后设置：
 
 ```bash
 source /opt/ros/melodic/setup.bash
@@ -156,3 +188,4 @@ rosparam list
 | Master 显示 `198.18.*` / `100.*` | 这是代理、VPN 或虚拟网卡；在控制电脑 `ros_network.env` 中设置正确的 `ROS_IP` 或 `ROS_INTERFACE`。 |
 | 小车启动了自己的 roscore | 停止它；小车所有节点必须连接控制电脑 WSL 的唯一 Master。 |
 | 更换 Wi-Fi 后旧 shell 仍失败 | 关闭旧终端，重新 `source` 环境并按本页重新导出变量；不要复用旧 shell 的 ROS 环境变量。 |
+| 车端 `roslaunch` 卡在 `load_parameters starting ...` | 确认 WSL 启动行含 `XML-RPC=HTTP/1.0`；重新部署上文的 Master 启动脚本和兼容层，停止旧 Master 后再启动。 |

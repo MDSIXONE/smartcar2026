@@ -1,3 +1,28 @@
 <launch>
-    <include file="$(find ucar_2026)/launch/2026.launch"/>
+    <arg name="full_task_enabled" default="false"/>
+
+    <include file="$(find ucar_2026)/launch/2026.launch">
+        <arg name="scan_relay_enabled"
+             value="$(eval not arg('full_task_enabled'))"/>
+    </include>
+
+    <group if="$(arg full_task_enabled)">
+        <!-- ucar_2026 already owns /usb_cam. -->
+        <include file="$(find yolo2025)/launch/qrcode.launch">
+            <arg name="start_camera" value="false"/>
+        </include>
+
+        <!-- Complete flow: startup goal, QR heading sweep and numbered
+             production route. This node also owns scan forwarding while the
+             full task is active. -->
+        <node pkg="yolo2025" type="2026.py" name="navigation_2026"
+              output="screen" required="true"
+              launch-prefix="$(find ucar_2026)/scripts/run_melodic_python2.sh">
+            <param name="startup_goal_enabled" value="true"/>
+            <param name="qr_scan_enabled" value="true"/>
+            <param name="production_route_enabled" value="true"/>
+            <param name="production_square_centers_path"
+                   value="$(find yolo2025)/config/production_square_centers.json"/>
+        </node>
+    </group>
 </launch>

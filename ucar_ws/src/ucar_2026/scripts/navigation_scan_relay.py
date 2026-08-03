@@ -163,8 +163,16 @@ class NavigationScanRelay(object):
         return filtered
 
     def scan_cb(self, scan):
-        self.scan_pub.publish(scan)
-        self.global_scan_pub.publish(self.filter_global_scan(scan))
+        if rospy.is_shutdown():
+            return
+        try:
+            self.scan_pub.publish(scan)
+            self.global_scan_pub.publish(self.filter_global_scan(scan))
+        except rospy.ROSException:
+            # roslaunch can close publishers while the final queued scan
+            # callback is still running.  Suppress only that shutdown race.
+            if not rospy.is_shutdown():
+                raise
 
 
 if __name__ == '__main__':

@@ -9,15 +9,16 @@ add_compile_options(-std=c++11)
 ## is used, also find other catkin packages
 find_package(catkin REQUIRED COMPONENTS
   costmap_2d
+  cv_bridge
   geometry_msgs
   nav_core
+  nav_msgs
   pluginlib
   roscpp
   sensor_msgs
   std_msgs
   tf
   tf2_ros
-  visualization_msgs
 )
 
 ## Uncomment this if the package has a setup.py. This macro ensures
@@ -108,7 +109,7 @@ find_package(catkin REQUIRED COMPONENTS
 catkin_package(
   INCLUDE_DIRS include
   LIBRARIES cym_planner
-  CATKIN_DEPENDS costmap_2d geometry_msgs nav_core pluginlib roscpp sensor_msgs std_msgs tf tf2_ros visualization_msgs
+  CATKIN_DEPENDS costmap_2d cv_bridge geometry_msgs nav_core nav_msgs pluginlib roscpp sensor_msgs std_msgs tf tf2_ros
 )
 
 ###########
@@ -210,6 +211,15 @@ if(CATKIN_ENABLE_TESTING)
   )
   catkin_add_gtest(cym_planner_velocity_profile_test
     test/test_velocity_profile.cpp
+  )
+  catkin_add_gtest(cym_planner_global_cost_semantics_test
+    test/global_cost_semantics_test.cpp
+  )
+  catkin_add_gtest(cym_planner_escape_recovery_test
+    test/escape_recovery_test.cpp
+  )
+  catkin_add_gtest(cym_planner_planner_tuning_test
+    test/planner_tuning_test.cpp
   )
 endif()
 

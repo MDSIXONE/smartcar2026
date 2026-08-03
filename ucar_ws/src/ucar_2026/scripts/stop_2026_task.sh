@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Stop the real-vehicle ucar_2026 launch task, including its legacy yolo2025
 # wrapper.  This script never starts or stops roscore.
-set -euo pipefail
+set -eo pipefail
 
 configured_master_uri="${ROS_MASTER_URI:-}"
 configured_master_ip="${MASTER_IP:-}"
 
 source /opt/ros/melodic/setup.bash
 source "$HOME/ucar_ws/devel/setup.bash"
+set -u
 
 unset ROS_HOSTNAME
 

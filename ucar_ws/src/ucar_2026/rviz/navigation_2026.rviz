@@ -89,6 +89,28 @@ Visualization Manager:
       Value: true
     - Class: rviz/Image
       Enabled: true
+      Image Topic: /move_base/cym_planner/CymPlanner/debug_map
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: CymPlanner CV Map
+      Normalize Range: true
+      Transport Hint: raw
+      Unreliable: false
+      Value: true
+    - Class: rviz/Image
+      Enabled: true
+      Image Topic: /move_base/cym_planner/CymPlanner/debug_plan
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: CymPlanner CV Plan
+      Normalize Range: true
+      Transport Hint: raw
+      Unreliable: false
+      Value: true
+    - Class: rviz/Image
+      Enabled: true
       Image Topic: /usb_cam/image_raw
       Max Value: 1
       Median window: 5
@@ -97,44 +119,6 @@ Visualization Manager:
       Normalize Range: true
       Transport Hint: raw
       Unreliable: false
-      Value: true
-    - Class: rviz/Marker
-      Enabled: true
-      Marker Topic: /move_base/cym_planner/CymPlanner/lookahead_footprint
-      Name: CymPlanner Lookahead Footprint
-      Value: true
-    - Alpha: 1
-      Autocompute Intensity Bounds: true
-      Autocompute Value Bounds:
-        Max Value: 10
-        Min Value: -10
-        Value: true
-      Axis: Z
-      Class: rviz/PointCloud2
-      Color: 20; 255; 160
-      Color Transformer: FlatColor
-      Decay Time: 0
-      Enabled: true
-      Name: CymPlanner Direct Laser Points
-      Position Transformer: XYZ
-      Queue Size: 5
-      Selectable: true
-      Size (Pixels): 4
-      Size (m): 0.025
-      Style: Points
-      Topic: /move_base/cym_planner/CymPlanner/laser_points
-      Value: true
-    - Class: rviz/MarkerArray
-      Enabled: true
-      Marker Topic: /move_base/cym_planner/CymPlanner/candidate_trajectories
-      Name: CymPlanner Candidate Trajectories
-      Queue Size: 10
-      Value: true
-    - Class: rviz/Marker
-      Enabled: true
-      Marker Topic: /move_base/cym_planner/CymPlanner/selected_trajectory
-      Name: CymPlanner Selected Trajectory
-      Queue Size: 10
       Value: true
     - Alpha: 1
       Buffer Length: 1

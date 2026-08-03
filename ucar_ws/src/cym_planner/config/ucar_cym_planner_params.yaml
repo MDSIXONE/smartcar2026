@@ -1,57 +1,59 @@
 cym_planner/CymPlanner:
-  # Keep the real-vehicle frame and filtered lidar chain.
   base_link_frame: base_link
-  scan_topic: /scan_filtered
-  scan_timeout: 0.4
-  scan_min_range: 0.03
-  scan_max_range: 3.0
+  odom_frame: odom
+  # 无 RViz 时关闭调试图像；碰撞检查不依赖此开关。
+  debug_images_enabled: false
 
-  # Use the current simulation controller on the vehicle: origin/main path
-  # following guarded by direct lidar points swept over the full footprint.
-  navigation_mode: laser_avoidance
-  main_legacy_target_distance: 0.20
-  main_legacy_linear_x_gain: 1.5
-  main_legacy_linear_x_kd: 0.05
-  main_legacy_angular_gain: 2.5
+  # 模式 1：point / main / main_legacy。
+  # 保留原来的点碰撞阶段速度；heading_slowdown_min_scale=1 表示不因转角降速。
+  mode1_point:
+    linear_x_gain: 1.5
+    linear_x_kd: 0.5
+    max_vel_x: 0.50
+    angular_gain: 2.5
+    angular_kd: 0.4
+    max_vel_theta: 1.00
+    heading_slowdown_min_scale: 1.00
+    command_sweep_time: 0.00
+    command_sweep_step: 0.025
+    final_yaw_gain: 2.0
+    final_yaw_max_vel: 1.00
+    final_yaw_tolerance: 0.10
+    final_linear_x_gain: 1.0
+    obstacle_lookahead_distance: 0.25
+    obstacle_cost_threshold: 253
+    carry_speed_scale: 1.0
 
-  # Preserve the proven real-vehicle limits instead of the simulation's
-  # high-speed Gazebo values.
-  main_legacy_max_vel_x: 0.5
-  main_legacy_max_vel_theta: 1.0
-  main_legacy_final_yaw_gain: 2.0
-  main_legacy_final_yaw_max_vel: 1.0
-  main_legacy_final_yaw_tolerance: 0.10
-  main_legacy_final_linear_x_gain: 1.0
-  main_legacy_goal_position_tolerance: 0.05
-  carry_speed_scale: 1.0
+  # 模式 2：body_projection / footprint / laser_avoidance。
+  # 生产路线默认更慢；转角越大，线速度按 cos² 缩小，但不低于下方比例。
+  # 常用调速入口：max_vel_x、max_vel_theta、heading_slowdown_min_scale。
+  mode2_body_projection:
+    linear_x_gain: 0.9
+    linear_x_kd: 0.2
+    max_vel_x: 0.22
+    angular_gain: 2.0
+    angular_kd: 0.2
+    max_vel_theta: 0.55
+    heading_slowdown_min_scale: 0.15
+    # 按实际 (linear.x, linear.y, angular.z) 对未来 0.4 s 车体姿态做扫掠。
+    command_sweep_time: 0.40
+    command_sweep_step: 0.025
+    final_yaw_gain: 1.5
+    final_yaw_max_vel: 0.35
+    final_yaw_tolerance: 0.10
+    final_linear_x_gain: 0.6
+    obstacle_lookahead_distance: 0.30
+    obstacle_cost_threshold: 253
+    carry_speed_scale: 1.0
 
-  # Project the 0.342 m x 0.256 m costmap footprint every 0.03 m over the
-  # next 0.30 m of the global path. Any filtered lidar touch fails closed and
-  # asks move_base/global_planner for a new route.
-  main_legacy_obstacle_lookahead_distance: 0.30
-  main_legacy_obstacle_cost_threshold: 253
-  laser_projection_step: 0.03
-  safety_margin: 0.035
-
-  # Retained by the imported simulation implementation for its bounded-stop
-  # and diagnostic helpers.
-  braking_deceleration: 3.0
-  minimum_moving_clearance: 0.10
-  laser_blocked_grace_period: 0.25
-  laser_blocked_hold_max_velocity: 0.10
-  laser_blocked_stop_deceleration: 0.25
-  laser_blocked_stop_angular_deceleration: 1.0
-  laser_command_linear_rate_limit: 0.50
-  laser_command_angular_rate_limit: 4.0
-  reaction_time: 0.05
-  simulation_time: 0.30
-  simulation_step: 0.05
-  v_samples: 7
-  w_samples: 9
-  path_distance_weight: 4.0
-  heading_weight: 0.8
-  clearance_weight: 0.5
-  velocity_weight: 0.5
-  angular_velocity_weight: 0.05
-  minimum_progress_velocity: 0.05
-  minimum_turn_velocity: 0.10
+  # 受限横移目前是次级兜底。Sol 安全复核发现状态保持、全接触格统计和本地动态
+  # 障碍检查仍需补齐，因此硬关闭；即使误改 true，当前源码也会拒绝并记录错误。
+  escape_enabled: false
+  escape_blocked_timeout: 0.4
+  escape_replan_wait: 0.4
+  escape_step_distance: 0.02
+  escape_projection_step: 0.005
+  escape_speed: 0.04
+  escape_max_attempts: 4
+  escape_max_total_distance: 0.08
+  escape_heading_tolerance: 0.05

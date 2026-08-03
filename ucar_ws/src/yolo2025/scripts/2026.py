@@ -133,6 +133,8 @@ class Navigation2026(object):
             rospy.Timer(rospy.Duration(self.startup_goal_delay), self.startup_goal_cb, oneshot=True)
 
     def scan_cb(self, msg):
+        if rospy.is_shutdown():
+            return
         out = LaserScan()
         out.header = msg.header
         out.angle_min = msg.angle_min
@@ -144,9 +146,14 @@ class Navigation2026(object):
         out.range_max = msg.range_max * self.scan_scale
         out.ranges = [distance * self.scan_scale for distance in msg.ranges]
         out.intensities = msg.intensities
-        self.scan_pub.publish(out)
-        if not self.production_global_obstacles_frozen:
-            self.global_scan_pub.publish(self.filtered_global_scan(out))
+        try:
+            self.scan_pub.publish(out)
+            if not self.production_global_obstacles_frozen:
+                self.global_scan_pub.publish(self.filtered_global_scan(out))
+        except rospy.ROSException:
+            # Subscriber callbacks can overlap roslaunch shutdown after the
+            # publishers have already been closed.
+            return
 
     @staticmethod
     def clone_scan(scan):
@@ -259,8 +266,10 @@ class Navigation2026(object):
         return filtered
 
     def startup_goal_cb(self, _event):
-        if not self.move_base.wait_for_server(rospy.Duration(15.0)):
-            rospy.logerr("move_base action server was not available within 15 seconds.")
+        if not self.move_base.wait_for_server(
+                rospy.Duration(self.startup_goal_ready_timeout)):
+            rospy.logerr("move_base action server was not available within %.1f seconds.",
+                         self.startup_goal_ready_timeout)
             return
 
         self.restore_task_motion("startup goal")

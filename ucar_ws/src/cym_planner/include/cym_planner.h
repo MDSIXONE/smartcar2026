@@ -6,18 +6,22 @@
 #include <geometry_msgs/Twist.h>
 #include <nav_core/base_local_planner.h>
 #include <ros/ros.h>
-#include <sensor_msgs/LaserScan.h>
+#include <sensor_msgs/Image.h>
 #include <std_msgs/Bool.h>
 #include <std_msgs/String.h>
 #include <tf/transform_listener.h>
 #include <tf2_ros/buffer.h>
-#include <visualization_msgs/Marker.h>
-#include <visualization_msgs/MarkerArray.h>
 
-#include <atomic>
-#include <mutex>
+#include "cym_planner/escape_recovery.h"
+#include "cym_planner/planner_tuning.h"
+
 #include <string>
 #include <vector>
+
+namespace cv
+{
+class Mat;
+}
 
 namespace cym_planner
 {
@@ -35,167 +39,112 @@ public:
     bool isGoalReached();
 
 private:
-    struct LaserPoint
+    struct FootprintBlockage
     {
-        double x;
-        double y;
-    };
+        FootprintBlockage()
+            : blocked(false),
+              recoverable(false),
+              contact_count(0),
+              contact_world_x(0.0),
+              contact_world_y(0.0)
+        {
+        }
 
-    struct TrajectoryPose
-    {
-        double x;
-        double y;
-        double yaw;
-    };
-
-    struct CandidateTrajectory
-    {
-        double linear_velocity;
-        double angular_velocity;
-        double clearance;
-        double score;
-        bool valid;
-        std::vector<TrajectoryPose> poses;
+        bool blocked;
+        bool recoverable;
+        unsigned int contact_count;
+        double contact_world_x;
+        double contact_world_y;
     };
 
     void carryModeCallback(const std_msgs::Bool::ConstPtr& message);
     void navigationModeCallback(const std_msgs::String::ConstPtr& message);
-    void scanCallback(const sensor_msgs::LaserScan::ConstPtr& scan);
-
-    bool setNavigationMode(const std::string& requested_mode);
-    const char* navigationModeName() const;
-
     bool transformPlanPose(const geometry_msgs::PoseStamped& source,
                            const std::string& target_frame,
                            geometry_msgs::PoseStamped& result) const;
-    bool selectTargetPose(geometry_msgs::PoseStamped& target_pose,
-                          double lookahead_distance);
-    bool computeMainLegacyCommands(geometry_msgs::Twist& cmd_vel,
-                                   bool use_laser_projection);
-    bool isCostmapPathBlocked(double lookahead_distance, int cost_threshold);
-    bool checkLaserPathProjection(const std::vector<LaserPoint>& points,
-                                  double lookahead_distance,
-                                  bool& projection_blocked);
-    bool copyFreshLaserPoints(std::vector<LaserPoint>& points,
-                              ros::Time& scan_stamp) const;
-    bool computeLaserBlockedCommand(geometry_msgs::Twist& cmd_vel);
-    void computeSmoothedLaserCommand(
-        const CandidateTrajectory& selected,
-        const std::vector<LaserPoint>& laser_points,
-        double front_clearance,
+    bool selectTargetPose(geometry_msgs::PoseStamped& target_pose);
+    FootprintBlockage checkPathBlocked(
+        const costmap_2d::Costmap2D& local_costmap,
+        cv::Mat& map_image);
+    FootprintBlockage inspectFootprint(
+        const geometry_msgs::PoseStamped& pose_costmap,
+        const costmap_2d::Costmap2D& local_costmap,
+        cv::Mat& map_image,
+        bool report_contact);
+    bool computeEscapeCommand(
+        const FootprintBlockage& path_blockage,
+        const costmap_2d::Costmap2D& local_costmap,
+        cv::Mat& map_image,
         geometry_msgs::Twist& cmd_vel);
-    void rememberLaserCommand(const geometry_msgs::Twist& cmd_vel);
-    void resetLaserBlockedState();
-    void resetLaserBrakingState();
-
-    CandidateTrajectory simulateTrajectory(double linear_velocity,
-                                           double angular_velocity,
-                                           const std::vector<LaserPoint>& points,
-                                           double front_clearance) const;
-    double clearanceToFootprint(double point_x, double point_y,
-                                double robot_x, double robot_y,
-                                double robot_yaw) const;
-    double forwardClearance(const std::vector<LaserPoint>& points) const;
-    void publishLaserPoints(const std::vector<LaserPoint>& points,
-                            const ros::Time& stamp) const;
-    void publishTrajectoryDebug(const std::vector<CandidateTrajectory>& candidates,
-                                int selected_index) const;
-    void publishLookaheadFootprint(const geometry_msgs::PoseStamped& lookahead_pose,
-                                   const std::string& costmap_frame) const;
-    void publishSafetyState(const std::string& state) const;
+    bool currentCostmapPose(geometry_msgs::PoseStamped& pose) const;
+    bool commandSweepIsSafe(
+        const geometry_msgs::Twist& command,
+        const costmap_2d::Costmap2D& local_costmap,
+        cv::Mat& map_image);
+    bool escapePreviewIsSafe(
+        const geometry_msgs::PoseStamped& current_pose,
+        const costmap_2d::Costmap2D& local_costmap,
+        double direction_world_x,
+        double direction_world_y,
+        double distance,
+        cv::Mat& map_image);
+    void resetEscapeRecovery();
+    void publishDebugMap(const cv::Mat& map_image,
+                         const std::string& frame_id) const;
+    void publishDebugPlan() const;
+    void resetControllerState();
+    const PlannerTuning& activeTuning() const;
 
     bool initialized_;
     tf::TransformListener* tf_listener_;
     costmap_2d::Costmap2DROS* costmap_ros_;
 
     std::string base_link_frame_;
-    std::string scan_topic_;
-    double lookahead_distance_;
-    double linear_x_gain_;
-    double angular_gain_;
-    double max_vel_x_;
-    double max_vel_theta_;
-    double final_yaw_gain_;
-    double final_yaw_max_vel_;
-    double final_yaw_tolerance_;
-    double final_linear_x_gain_;
-    double goal_position_tolerance_;
-    double carry_speed_scale_;
-    // Exact origin/main controller values used before pickup.  They are kept
-    // separate so the post-pickup laser rollout can evolve independently.
-    double main_legacy_target_distance_;
-    double main_legacy_linear_x_gain_;
-    double main_legacy_linear_x_kd_;
-    double main_legacy_angular_gain_;
-    double main_legacy_max_vel_x_;
-    double main_legacy_max_vel_theta_;
-    double main_legacy_final_yaw_gain_;
-    double main_legacy_final_yaw_max_vel_;
-    double main_legacy_final_yaw_tolerance_;
-    double main_legacy_final_linear_x_gain_;
-    double main_legacy_goal_position_tolerance_;
-    double main_legacy_obstacle_lookahead_distance_;
-    int main_legacy_obstacle_cost_threshold_;
-    double main_legacy_previous_linear_error_;
-    ros::Time main_legacy_previous_control_time_;
-    bool main_legacy_linear_derivative_initialized_;
-
-    double scan_timeout_;
-    double scan_min_range_;
-    double scan_max_range_;
-    double laser_projection_step_;
-    double safety_margin_;
-    double braking_deceleration_;
-    double minimum_moving_clearance_;
-    double laser_blocked_grace_period_;
-    double laser_blocked_hold_max_velocity_;
-    double laser_blocked_stop_deceleration_;
-    double laser_blocked_stop_angular_deceleration_;
-    double laser_command_linear_rate_limit_;
-    double laser_command_angular_rate_limit_;
-    double reaction_time_;
-    double simulation_time_;
-    double simulation_step_;
-    int v_samples_;
-    int w_samples_;
-    double path_distance_weight_;
-    double heading_weight_;
-    double clearance_weight_;
-    double velocity_weight_;
-    double angular_velocity_weight_;
-    double minimum_progress_velocity_;
-    double minimum_turn_velocity_;
-    double footprint_min_x_;
-    double footprint_max_x_;
-    double footprint_min_y_;
-    double footprint_max_y_;
+    std::string odom_frame_;
+    PlannerTuning point_tuning_;
+    PlannerTuning body_projection_tuning_;
+    bool debug_images_enabled_;
+    bool escape_enabled_;
+    double escape_blocked_timeout_;
+    double escape_replan_wait_;
+    double escape_step_distance_;
+    double escape_projection_step_;
+    double escape_speed_;
+    double escape_max_total_distance_;
+    double escape_heading_tolerance_;
+    int escape_max_attempts_;
 
     std::vector<geometry_msgs::PoseStamped> global_plan_;
     int target_index_;
     bool pose_adjusting_;
     bool goal_reached_;
     bool carry_mode_;
-    geometry_msgs::Twist previous_laser_command_;
-    ros::Time previous_laser_command_time_;
-    ros::Time laser_blocked_since_;
-    bool laser_blocked_zero_published_;
-    // true: origin/main path follower guarded by the direct-laser vehicle
-    // projection; false: origin/main path follower guarded by its costmap.
-    std::atomic<bool> laser_avoidance_enabled_;
+    bool body_projection_enabled_;
+    ros::Time escape_blocked_since_;
+    ros::Time escape_wait_until_;
+    ros::Time escape_motion_started_;
+    bool escape_active_;
+    int escape_attempts_;
+    double escape_total_distance_;
+    double escape_start_world_x_;
+    double escape_start_world_y_;
+    double escape_start_world_yaw_;
+    double escape_direction_base_x_;
+    double escape_direction_base_y_;
+    double escape_direction_world_x_;
+    double escape_direction_world_y_;
 
-    mutable std::mutex scan_mutex_;
-    std::vector<LaserPoint> laser_points_;
-    ros::Time last_scan_stamp_;
-    bool have_scan_;
+    double previous_linear_error_;
+    ros::Time previous_linear_control_time_;
+    bool linear_derivative_initialized_;
+    double previous_heading_error_;
+    ros::Time previous_heading_control_time_;
+    bool angular_derivative_initialized_;
 
     ros::Subscriber carry_mode_sub_;
     ros::Subscriber navigation_mode_sub_;
-    ros::Subscriber scan_sub_;
-    ros::Publisher laser_points_pub_;
-    ros::Publisher candidate_trajectories_pub_;
-    ros::Publisher selected_trajectory_pub_;
-    ros::Publisher lookahead_footprint_pub_;
-    ros::Publisher safety_state_pub_;
+    ros::Publisher debug_map_pub_;
+    ros::Publisher debug_plan_pub_;
 };
 
 }  // namespace cym_planner
