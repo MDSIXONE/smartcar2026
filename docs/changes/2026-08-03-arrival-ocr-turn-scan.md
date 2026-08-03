@@ -29,8 +29,14 @@
   Python 语法、launch XML 与 `git diff --check` 均通过。
 - 已在车端 Ubuntu 18.04 / Melodic 构建 `ucar_2026`；`catkin_test_results` 汇总
   `35 tests, 0 errors, 0 failures, 0 skipped`。整个阶段未启动 ROS 或实车。
+- 随后的首轮实车启动通过有限 odom、两段 TF 和雷达安全门，并成功完成 52 与 QR
+  `a/d/i`；相机在 QR 阶段按需启停。切换到 body projection 后，`52 → 12` 的
+  `move_base` action 返回 status `4`，任务在到达 12 和生产 OCR 之前安全中止。已显式
+  零速、停止小车 launch 和 WSL Master；结果与处理记录在 `犯错档案.md`。
 
 ## 已知限制
 
 - 异步任务保存的是 OCR 请求时的 map yaw，近似相机实际曝光时刻。若实车 OCR 推理延迟显著，
   后续可将相机帧回执与 TF 时间戳精确关联；当前版本已在复拍前回到该近似 yaw。
+- `52 → 12` 尚未完成真机 footprint/局部代价地图的失败归因；在明确 status `4` 的
+  CymPlanner/local-costmap 原因并完成静态诊断前，不应直接重复完整实车路线。
