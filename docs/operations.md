@@ -663,12 +663,25 @@ active 且重新规划恢复，可继续观察；连续失败或状态转为 abo
    目标均使用 CymPlanner 前视路径点模式；自动任务不会发布 `body_projection`。
 6. 生产目标路线固定为 `12 → 23 → 14 → 25 → 16`。每到一个目标才进行最多一整圈的
    异步 OCR 搜索；一整圈无候选只记录结果并前往下一目标，不会在行驶途中 OCR。
-7. 首个 OCR 候选会先零速并经过新鲜低速里程计停车门；若推理返回时车辆已经多转，任务
+7. 每个生产目标发送前和导航监督期间，都以 `/scan_global_obstacles` 检查该目标的四个中间
+   区端点。固定映射为 `12: 419/420/428/429`、`23: 429/430/438/439`、
+   `14: 421/422/430/431`、`25: 431/432/440/441`、`16: 423/424/432/433`。该扫描流是
+   全局障碍层的动态输入，静态地图墙回波已被 relay 掩除；不能以包含静态层和膨胀层的 raw
+   global costmap 代替。相同端点在连续两帧、投影误差不超过 `0.12 m` 时才成立，单帧噪声、
+   旧帧、全 `inf`、超时帧或缺 TF 都不会触发。没有能够以 `map ← laser` 投影的有效新扫描时，
+   `0.50 s` 预检超时会安全中止任务，绝不把扫描断流或 TF 故障当作无障碍。目标已经发出后，
+   同样持续看门狗最后一帧可投影扫描；断流/TF 持续失败超过该时限会先取消目标、零速并确认
+   停车，再中止任务。两帧的源时间戳间隔也不得超过该时限。
+8. 守卫命中时，若尚未发目标就保持零速并确认底盘停止；若正在导航则按
+   `cancel_goal → 零速 → action 取消确认 → stopped odom` 执行，再记录
+   `target_guard_events` 并直接规划下一个目标。被跳过的目标不启动相机、OCR 或 360° 转圈；
+   即使跳过 12，去 23 也从车辆的实际当前位置重新规划。16 被跳过时不会伪造“到达 16”。
+9. 首个 OCR 候选会先零速并经过新鲜低速里程计停车门；若推理返回时车辆已经多转，任务
    先回到候选帧朝向，再进行居中、前方雷达测距、TF 投影和墙点匹配。居中仍通过受控
    move_base 同位置小角度目标完成，完成前必须再次停车。
-8. 雷达处理使用正前方 ±3° 的有限距离中位数和同一时间的 `map ← laser` TF；最近点只在
+10. 雷达处理使用正前方 ±3° 的有限距离中位数和同一时间的 `map ← laser` TF；最近点只在
    JSON 的 `wall_reference_point_numbers` 中查询，误差大于 `0.18 m` 不计入正式结果。
-9. 每次运行把 `target_scan_events` 和有效 `observations` 写入
+11. 每次运行把 `target_guard_events`、`target_scan_events` 和有效 `observations` 写入
    `~/.ros/ucar_2026_observations/run_*/observations.json`；结束时仍需得到 3 个不同的有效
    墙点及 OCR 内容，否则保存部分结果并将任务标为失败。
 
@@ -1921,6 +1934,8 @@ catkin_test_results --verbose build/test_results/ucar_2026
 $VEHICLE_HOST = 'ucar@<按 rosmaster/NETWORK_CONFIGURATION.md 发现的小车地址>'
 
 scp ucar_ws/src/ucar_2026/scripts/production_task_2026.py `
+  ucar_ws/src/ucar_2026/scripts/production_task_geometry.py `
+  ucar_ws/src/ucar_2026/scripts/production_task_perception.py `
   "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/scripts/"
 scp ucar_ws/src/ucar_2026/test/test_production_task_geometry.py `
   "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/test/"

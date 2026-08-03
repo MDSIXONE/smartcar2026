@@ -53,6 +53,7 @@ from production_task_geometry import (
     bearing,
     is_finite,
     load_numbered_points,
+    load_middle_target_guard_points,
     load_wall_reference_points,
     needs_recenter,
     normalize_angle,
@@ -68,6 +69,7 @@ from production_task_perception import (
     odom_velocity_is_stopped,
     projected_wall_hit,
     select_three_observations,
+    target_guard_scan_matches,
 )
 
 
@@ -212,6 +214,19 @@ class ProductionTask2026(object):
             rospy.get_param("~lidar_forward_offset_m", 0.0))
         self.wall_match_max_error = float(
             rospy.get_param("~wall_match_max_error_m", 0.30))
+        # This is the same dynamically filtered source consumed by the
+        # global obstacle layer.  It deliberately excludes static-map walls,
+        # so a fixed field vertex cannot falsely skip a production target.
+        self.target_guard_scan_topic = str(rospy.get_param(
+            "~target_guard_scan_topic", "/scan_global_obstacles"))
+        self.target_guard_match_radius = float(rospy.get_param(
+            "~target_guard_match_radius_m", 0.12))
+        self.target_guard_confirmation_scans = int(rospy.get_param(
+            "~target_guard_confirmation_scans", 2))
+        self.target_guard_precheck_timeout = float(rospy.get_param(
+            "~target_guard_precheck_timeout", 0.50))
+        self.target_guard_scan_max_age = float(rospy.get_param(
+            "~target_guard_scan_max_age", 0.50))
         self.straight_segment_angle_tolerance = math.radians(float(
             rospy.get_param(
                 "~straight_segment_angle_tolerance_deg", 1.0)))
@@ -261,6 +276,20 @@ class ProductionTask2026(object):
             raise TaskDefinitionError(
                 "post_turn_recenter_trigger must be positive and smaller "
                 "than arrival_tolerance")
+        target_guard_values = (
+            self.target_guard_match_radius,
+            self.target_guard_precheck_timeout,
+            self.target_guard_scan_max_age,
+        )
+        if (
+                not all(is_finite(value) for value in target_guard_values) or
+                not self.target_guard_scan_topic or
+                self.target_guard_match_radius <= 0.0 or
+                self.target_guard_confirmation_scans <= 0 or
+                self.target_guard_precheck_timeout <= 0.0 or
+                self.target_guard_scan_max_age <= 0.0):
+            raise TaskDefinitionError(
+                "target guard scan parameters must be finite and positive")
 
         all_required_numbers = (
             [self.staging_point_number] +
@@ -273,6 +302,8 @@ class ProductionTask2026(object):
         ] + list(zip(
             self.production_route_numbers[:-1],
             self.production_route_numbers[1:]))
+        self.target_guard_points = load_middle_target_guard_points(
+            self.grid_path, self.production_route_numbers)
         self.wall_reference_points = load_wall_reference_points(
             self.grid_path)
 
@@ -300,6 +331,9 @@ class ProductionTask2026(object):
         self.consecutive_finite_odom = 0
         self.latest_scan = None
         self.latest_scan_receipt = None
+        self.latest_target_guard_scan = None
+        self.latest_target_guard_scan_receipt = None
+        self.target_guard_scan_sequence = 0
         self.latest_camera_image = None
         self.latest_camera_receipt = None
         self.camera_sequence = 0
@@ -315,6 +349,7 @@ class ProductionTask2026(object):
         self.ocr_log_handle = None
         self.observations = []
         self.target_scan_events = []
+        self.target_guard_events = []
         self.run_directory = None
         self.capture_sequence = 0
 
@@ -322,6 +357,9 @@ class ProductionTask2026(object):
             "/odom_raw", Odometry, self.odom_cb, queue_size=20)
         rospy.Subscriber(
             "/scan", LaserScan, self.scan_cb, queue_size=5)
+        rospy.Subscriber(
+            self.target_guard_scan_topic, LaserScan,
+            self.target_guard_scan_cb, queue_size=5)
         rospy.Subscriber(
             self.camera_image_topic, Image, self.camera_image_cb,
             queue_size=1)
@@ -387,6 +425,13 @@ class ProductionTask2026(object):
         with self.lock:
             self.latest_scan = message
             self.latest_scan_receipt = rospy.Time.now()
+
+    def target_guard_scan_cb(self, message):
+        """Keep dynamic-only guard evidence; cancellation stays in main loop."""
+        with self.lock:
+            self.latest_target_guard_scan = message
+            self.latest_target_guard_scan_receipt = rospy.Time.now()
+            self.target_guard_scan_sequence += 1
 
     def camera_image_cb(self, message):
         with self.lock:
@@ -954,7 +999,16 @@ class ProductionTask2026(object):
         task["thread"].join()
         if task["error"] is not None:
             raise task["error"]
-        return task["response"]
+        response = task["response"]
+        if isinstance(response, dict):
+            # The Python 3 helper owns recognition fields, while the Python 2
+            # task owns the map pose at exposure time.  Both are required to
+            # restore the candidate yaw safely after asynchronous inference.
+            response = dict(response)
+            response["capture_requested_at"] = task["capture_requested_at"]
+            response["capture_requested_pose_map"] = list(
+                task["capture_requested_pose_map"])
+        return response
 
     def cleanup_async_motion_ocr(self, task):
         if task is None:
@@ -1107,7 +1161,7 @@ class ProductionTask2026(object):
 
     def navigate_target_and_scan(
             self, leg_index, start_number, end_number, target_yaw):
-        """Reach one target before performing its bounded OCR turn scan."""
+        """Guard one target leg, then scan only if that target was reached."""
         target = self.points[end_number]
         label = "PRODUCTION_TARGET_%03d" % end_number
         self.publish_state(label)
@@ -1116,9 +1170,217 @@ class ProductionTask2026(object):
             "target=(%.3f, %.3f) yaw=%.3f",
             leg_index, len(self.production_navigation_legs),
             start_number, end_number, target[0], target[1], target_yaw)
-        self.navigate_coordinates(
-            target[0], target[1], target_yaw, label, require_plan=True)
+        monitor = self.new_target_guard_monitor(end_number)
+        guard_number = self.wait_for_target_guard_precheck(monitor)
+        if guard_number is not None:
+            self.stop_motion()
+            self.wait_for_chassis_stop(label + " target guard before goal")
+            self.record_target_guard_skip(
+                leg_index, start_number, end_number, guard_number,
+                "before_goal", monitor)
+            return "target_guard_skipped"
+
+        navigation_guard = {"number": None, "scan_unavailable": False}
+
+        def guard_callback():
+            detected_number = self.poll_target_guard(monitor)
+            if detected_number is not None:
+                navigation_guard["number"] = detected_number
+                return True
+            if self.target_guard_scan_expired(monitor):
+                navigation_guard["scan_unavailable"] = True
+                return True
+            return False
+
+        reached = self.navigate_coordinates(
+            target[0], target[1], target_yaw, label, require_plan=True,
+            guard_callback=guard_callback)
+        if navigation_guard["number"] is not None:
+            self.record_target_guard_skip(
+                leg_index, start_number, end_number,
+                navigation_guard["number"], "during_navigation", monitor)
+            return "target_guard_skipped"
+        if navigation_guard["scan_unavailable"]:
+            raise MissionAbort(
+                "%s target guard scan became unavailable during navigation" %
+                label)
+        if not reached:
+            raise MissionAbort("%s did not reach target" % label)
         self.scan_production_point(leg_index, start_number, end_number, label)
+
+    def new_target_guard_monitor(self, target_number):
+        """Start a new guard epoch; old scans may not affect a new target."""
+        target_number = int(target_number)
+        if target_number not in self.target_guard_points:
+            raise MissionAbort("target %d has no guard point mapping" %
+                               target_number)
+        with self.lock:
+            sequence = self.target_guard_scan_sequence
+        return {
+            "target_number": target_number,
+            "last_sequence": sequence,
+            "usable_scan_seen": False,
+            "clean_scan_seen": False,
+            "hit_counts": {},
+            "last_errors": {},
+            "last_scan_stamp": None,
+            "last_source_stamp": None,
+            "last_usable_receipt": None,
+        }
+
+    @staticmethod
+    def clear_target_guard_hits(monitor):
+        """Break a consecutive-hit chain after invalid or clear evidence."""
+        monitor["hit_counts"] = {}
+        monitor["last_errors"] = {}
+
+    def poll_target_guard(self, monitor):
+        """Return a confirmed guard number from one distinct dynamic scan."""
+        with self.lock:
+            scan = self.latest_target_guard_scan
+            receipt = self.latest_target_guard_scan_receipt
+            sequence = self.target_guard_scan_sequence
+        if scan is None or receipt is None or sequence <= monitor["last_sequence"]:
+            return None
+        monitor["last_sequence"] = sequence
+        now = rospy.Time.now()
+        receipt_age = (now - receipt).to_sec()
+        source_stamp = scan.header.stamp
+        source_age = (now - source_stamp).to_sec()
+        previous_source_stamp = monitor["last_source_stamp"]
+        source_gap = (
+            (source_stamp - previous_source_stamp).to_sec()
+            if previous_source_stamp is not None else None)
+        if (
+                source_stamp.is_zero() or
+                previous_source_stamp is not None and
+                source_stamp <= previous_source_stamp or
+                receipt_age > self.target_guard_scan_max_age or
+                source_age > self.target_guard_scan_max_age or
+                source_age < -self.target_guard_scan_max_age):
+            self.clear_target_guard_hits(monitor)
+            monitor["clean_scan_seen"] = False
+            rospy.logwarn_throttle(
+                2.0,
+                "PRODUCTION_TARGET_GUARD_INVALID_SCAN target=%d "
+                "receipt_age=%.3f source_age=%.3f duplicate=%s zero=%s",
+                monitor["target_number"], receipt_age, source_age,
+                str(previous_source_stamp is not None and
+                    source_stamp <= previous_source_stamp),
+                str(source_stamp.is_zero()))
+            return None
+        if source_gap is not None and source_gap > self.target_guard_scan_max_age:
+            self.clear_target_guard_hits(monitor)
+            monitor["clean_scan_seen"] = False
+            rospy.logwarn_throttle(
+                2.0, "PRODUCTION_TARGET_GUARD_GAP_RESET target=%d gap=%.3f",
+                monitor["target_number"], source_gap)
+        monitor["last_source_stamp"] = source_stamp
+        try:
+            laser_pose = self.laser_map_pose(scan)
+        except MissionAbort as exc:
+            self.clear_target_guard_hits(monitor)
+            monitor["clean_scan_seen"] = False
+            rospy.logwarn_throttle(
+                2.0, "PRODUCTION_TARGET_GUARD_TF_SKIP target=%d error=%s",
+                monitor["target_number"], exc)
+            return None
+        monitor["usable_scan_seen"] = True
+        monitor["last_usable_receipt"] = receipt
+        matches = target_guard_scan_matches(
+            scan, laser_pose,
+            self.target_guard_points[monitor["target_number"]],
+            self.target_guard_match_radius)
+        hit_counts = monitor["hit_counts"]
+        for number in list(hit_counts):
+            if number not in matches:
+                del hit_counts[number]
+        for number, error in matches.items():
+            hit_counts[number] = hit_counts.get(number, 0) + 1
+            monitor["last_errors"][number] = float(error)
+        monitor["clean_scan_seen"] = not bool(matches)
+        monitor["last_scan_stamp"] = scan.header.stamp
+        confirmed = [
+            number for number, count in hit_counts.items()
+            if count >= self.target_guard_confirmation_scans]
+        if not confirmed:
+            return None
+        return min(
+            confirmed,
+            key=lambda number: (monitor["last_errors"].get(number, float("inf")),
+                                int(number)))
+
+    def target_guard_scan_expired(self, monitor):
+        """True if navigation lost the last TF-projected guard scan."""
+        last_usable_receipt = monitor.get("last_usable_receipt")
+        if last_usable_receipt is None:
+            return True
+        return (
+            (rospy.Time.now() - last_usable_receipt).to_sec() >
+            self.target_guard_scan_max_age)
+
+    def wait_for_target_guard_precheck(self, monitor):
+        """Use fresh pre-goal evidence without delaying a clean target leg."""
+        deadline = (
+            rospy.Time.now() +
+            rospy.Duration(self.target_guard_precheck_timeout))
+        while not rospy.is_shutdown() and rospy.Time.now() < deadline:
+            self.require_safe()
+            guard_number = self.poll_target_guard(monitor)
+            if guard_number is not None:
+                return guard_number
+            # A TF-projected clean frame is sufficient to start the goal;
+            # a one-frame hit stays in this loop for confirmation.  A raw
+            # scan without a valid map projection must never mean "clear".
+            if monitor["clean_scan_seen"]:
+                return None
+            rospy.sleep(0.02)
+        if not monitor["usable_scan_seen"]:
+            raise MissionAbort(
+                "target guard scan unavailable for target %d within %.2f s" %
+                (monitor["target_number"], self.target_guard_precheck_timeout))
+        if monitor["hit_counts"]:
+            rospy.logwarn(
+                "PRODUCTION_TARGET_GUARD_UNCONFIRMED target=%d hits=%s",
+                monitor["target_number"], monitor["hit_counts"])
+        return None
+
+    def record_target_guard_skip(
+            self, leg_index, start_number, end_number, guard_number, phase,
+            monitor):
+        """Audit a guard decision before the outer route advances one leg."""
+        next_target = (
+            self.production_navigation_legs[leg_index][1]
+            if leg_index < len(self.production_navigation_legs) else None)
+        stamp = monitor.get("last_scan_stamp")
+        event = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "target_point_number": int(end_number),
+            "guard_point_number": int(guard_number),
+            "guard_point_numbers": sorted(self.target_guard_points[end_number]),
+            "segment_index": int(leg_index),
+            "segment_start_point_number": int(start_number),
+            "phase": str(phase),
+            "scan_match_error_m": float(
+                monitor["last_errors"].get(guard_number, float("inf"))),
+        }
+        if stamp is not None and not stamp.is_zero():
+            event["scan_stamp"] = float(stamp.to_sec())
+        self.target_guard_events.append(event)
+        self.target_scan_events.append({
+            "target_point_number": int(end_number),
+            "outcome": "target_guard_skipped",
+            "guard_point_number": int(guard_number),
+            "phase": str(phase),
+        })
+        self.publish_state(
+            "TARGET_GUARD_SKIP_%03d_%03d" % (end_number, guard_number))
+        rospy.logwarn(
+            "PRODUCTION_TARGET_GUARD_SKIP target=%d guard_point=%d "
+            "phase=%s next_target=%s",
+            end_number, guard_number, phase,
+            str(next_target) if next_target is not None else "none")
+        self.save_observation_summary()
 
     def scan_production_point(
             self, leg_index, start_number, point_number, target_label):
@@ -1652,6 +1914,10 @@ class ProductionTask2026(object):
         payload = {
             "route": self.production_route_numbers,
             "target_legs": self.production_navigation_legs,
+            "target_guard_points": dict(
+                (str(number), sorted(points))
+                for number, points in self.target_guard_points.items()),
+            "target_guard_events": self.target_guard_events,
             "target_scan_events": self.target_scan_events,
             "observations": self.observations,
             "recognized_points": select_three_observations(
@@ -1852,7 +2118,7 @@ class ProductionTask2026(object):
     def navigate_coordinates(
             self, x_value, y_value, yaw, label, require_plan,
             abort_on_navigation_failure=True,
-            require_action_success=False):
+            require_action_success=False, guard_callback=None):
         self.require_safe()
         if require_plan:
             plan_available = self.wait_for_plan(
@@ -1870,6 +2136,13 @@ class ProductionTask2026(object):
         deadline = rospy.Time.now() + rospy.Duration(self.goal_timeout)
         while not rospy.is_shutdown() and rospy.Time.now() < deadline:
             self.require_safe()
+            if guard_callback is not None and guard_callback():
+                # Do not act from a subscriber callback: cancel, zero speed,
+                # action acknowledgement and stopped-odom confirmation must
+                # remain serialised in the navigation supervisor.
+                self.cancel_navigation_for_observation(
+                    label + " target guard")
+                return False
             if self.move_base.wait_for_result(rospy.Duration(0.1)):
                 break
         else:

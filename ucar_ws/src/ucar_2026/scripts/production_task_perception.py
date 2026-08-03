@@ -74,6 +74,55 @@ def front_scan_distance(scan, half_angle_radians):
     return (distances[middle - 1] + distances[middle]) / 2.0
 
 
+def target_guard_scan_matches(scan, laser_pose, guard_points, max_error):
+    """Match finite filtered lidar hits to one target's guard vertices.
+
+    ``scan`` must be the global obstacle scan, where returns already explained
+    by the static map are removed.  The function is ROS-free so the geometric
+    contract can be checked on the development computer.
+    """
+    if (
+            scan is None or not scan.ranges or
+            scan.angle_increment == 0.0 or not guard_points):
+        return {}
+    try:
+        laser_x, laser_y, laser_yaw = [float(value) for value in laser_pose]
+        threshold = float(max_error)
+    except (TypeError, ValueError):
+        return {}
+    if (
+            not all(is_finite(value)
+                    for value in (laser_x, laser_y, laser_yaw, threshold)) or
+            threshold <= 0.0):
+        return {}
+
+    matches = {}
+    for index, raw_distance in enumerate(scan.ranges):
+        try:
+            distance = float(raw_distance)
+        except (TypeError, ValueError):
+            continue
+        if (
+                not is_finite(distance) or
+                distance < float(scan.range_min) or
+                distance > float(scan.range_max)):
+            continue
+        angle = float(scan.angle_min) + index * float(scan.angle_increment)
+        hit = (
+            laser_x + distance * math.cos(laser_yaw + angle),
+            laser_y + distance * math.sin(laser_yaw + angle),
+        )
+        nearest = nearest_numbered_point(hit, guard_points)
+        if nearest is None:
+            continue
+        number, _coordinate, error = nearest
+        if error <= threshold:
+            previous = matches.get(number)
+            if previous is None or error < previous:
+                matches[number] = error
+    return matches
+
+
 def projected_wall_hit(pose, front_distance, lidar_forward_offset=0.0):
     """Project the front lidar return into map coordinates."""
     x_value, y_value, yaw = pose

@@ -172,6 +172,72 @@ def load_wall_reference_points(path):
     return require_points(points, raw_numbers)
 
 
+def load_middle_target_guard_points(path, target_numbers):
+    """Return the four numbered middle-grid vertices around each target.
+
+    A production target is a 0.5 m middle-zone square centre.  Its guard is
+    the four line endpoints one half cell away in X and Y.  Deriving this
+    from the immutable grid file keeps the task route and guard labels in one
+    coordinate contract instead of maintaining a second hand-written map.
+    """
+    try:
+        with open(path, "r") as handle:
+            document = json.load(handle)
+    except (IOError, ValueError) as exc:
+        raise TaskDefinitionError("cannot load grid file %s: %s" % (path, exc))
+
+    try:
+        side_length = float(document["square_side_m"])
+        endpoint_range = document["numbering_scheme"][
+            "middle_line_endpoints"]
+        first_endpoint = int(endpoint_range[0])
+        last_endpoint = int(endpoint_range[1])
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise TaskDefinitionError(
+            "grid file has invalid middle guard metadata: %s" % exc)
+    if not is_finite(side_length) or side_length <= 0.0:
+        raise TaskDefinitionError("square_side_m must be finite and positive")
+    if last_endpoint < first_endpoint:
+        raise TaskDefinitionError("middle line endpoint range is reversed")
+
+    points = load_numbered_points(path)
+    endpoints = require_points(
+        points, range(first_endpoint, last_endpoint + 1))
+    half_side = side_length / 2.0
+    tolerance = 1e-8
+    result = {}
+    for raw_target in target_numbers:
+        target_number = int(raw_target)
+        if target_number not in points:
+            raise TaskDefinitionError("grid point %d is missing" % target_number)
+        target_x, target_y = points[target_number]
+        expected = (
+            (target_x - half_side, target_y + half_side),
+            (target_x + half_side, target_y + half_side),
+            (target_x - half_side, target_y - half_side),
+            (target_x + half_side, target_y - half_side),
+        )
+        guard_points = {}
+        for expected_point in expected:
+            matches = [
+                number for number, coordinate in endpoints.items()
+                if position_error(coordinate, expected_point) <= tolerance]
+            if len(matches) != 1:
+                raise TaskDefinitionError(
+                    "target %d requires one middle endpoint at (%.3f, %.3f), "
+                    "found %d" % (
+                        target_number, expected_point[0], expected_point[1],
+                        len(matches)))
+            number = matches[0]
+            guard_points[number] = endpoints[number]
+        if len(guard_points) != 4:
+            raise TaskDefinitionError(
+                "target %d did not resolve four distinct guard points" %
+                target_number)
+        result[target_number] = guard_points
+    return result
+
+
 def require_points(points, numbers):
     """Return the requested points, rejecting a mission with missing labels."""
     resolved = {}

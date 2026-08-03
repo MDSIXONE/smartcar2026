@@ -24,6 +24,7 @@ from production_task_geometry import (  # noqa: E402
     TaskDefinitionError,
     bearing,
     build_straight_segments,
+    load_middle_target_guard_points,
     load_numbered_points,
     load_wall_reference_points,
     needs_recenter,
@@ -32,6 +33,7 @@ from production_task_geometry import (  # noqa: E402
     positive_turn_increment,
     require_points,
 )
+from production_task_perception import target_guard_scan_matches  # noqa: E402
 
 try:
     import production_task_2026 as task_module  # noqa: E402
@@ -119,6 +121,31 @@ class ProductionTaskGeometryTest(unittest.TestCase):
                 DEFAULT_PRODUCTION_ROUTE, self.points,
                 math.radians(1.0)),
             [(12, 23), (23, 14), (14, 25), (25, 16)])
+
+    def test_middle_target_guard_mapping_and_filtered_scan_match(self):
+        guards = load_middle_target_guard_points(
+            self.grid_path, DEFAULT_PRODUCTION_ROUTE)
+        self.assertEqual(
+            dict((number, sorted(points))
+                 for number, points in guards.items()),
+            {
+                12: [419, 420, 428, 429],
+                23: [429, 430, 438, 439],
+                14: [421, 422, 430, 431],
+                25: [431, 432, 440, 441],
+                16: [423, 424, 432, 433],
+            })
+
+        class Scan(object):
+            angle_min = 0.0
+            angle_increment = math.pi / 2.0
+            range_min = 0.05
+            range_max = 5.0
+            ranges = [0.20, float("inf")]
+
+        matches = target_guard_scan_matches(
+            Scan(), (-2.20, 1.00, 0.0), guards[12], 0.08)
+        self.assertEqual(matches, {419: 0.0})
 
     def test_straight_segments_break_on_reverse_leg_and_turn(self):
         reverse_points = {
@@ -213,6 +240,261 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
     def test_strict_position_check_still_aborts(self):
         with self.assertRaises(task_module.MissionAbort):
             self.task.verify_position(16, "normal point 16")
+
+    def test_async_ocr_response_keeps_capture_pose_metadata(self):
+        completed = threading.Event()
+        completed.set()
+
+        class CompletedThread(object):
+            def join(self):
+                pass
+
+        self.task.ocr_capture_timeout = 0.1
+        response = {"ok": True, "detection": {"text": "test"}}
+        result = self.task.finish_async_motion_ocr({
+            "done": completed,
+            "thread": CompletedThread(),
+            "response": response,
+            "error": None,
+            "capture_requested_at": "2026-08-03T00:00:00+0800",
+            "capture_requested_pose_map": [-1.75, 0.75, 0.5],
+        })
+
+        self.assertEqual(
+            result["capture_requested_pose_map"], [-1.75, 0.75, 0.5])
+        self.assertEqual(
+            result["capture_requested_at"], "2026-08-03T00:00:00+0800")
+
+    def test_target_guard_requires_two_fresh_matching_scans(self):
+        def scan_at(stamp):
+            class Header(object):
+                pass
+
+            class Scan(object):
+                angle_min = 0.0
+                angle_increment = math.pi / 2.0
+                range_min = 0.05
+                range_max = 5.0
+                ranges = [0.20, float("inf")]
+
+            Scan.header = Header()
+            Scan.header.stamp = stamp
+            return Scan()
+
+        self.task.lock = threading.RLock()
+        self.task.target_guard_points = {
+            12: {419: (-2.0, 1.0), 420: (-1.5, 1.0),
+                 428: (-2.0, 0.5), 429: (-1.5, 0.5)}}
+        self.task.target_guard_scan_sequence = 0
+        self.task.target_guard_match_radius = 0.08
+        self.task.target_guard_confirmation_scans = 2
+        self.task.target_guard_scan_max_age = 1.0
+        self.task.laser_map_pose = lambda _scan: (-2.20, 1.00, 0.0)
+
+        monitor = self.task.new_target_guard_monitor(12)
+        first_stamp = task_module.rospy.Time.now()
+        self.task.latest_target_guard_scan = scan_at(first_stamp)
+        self.task.latest_target_guard_scan_receipt = task_module.rospy.Time.now()
+        self.task.target_guard_scan_sequence = 1
+        self.assertIsNone(self.task.poll_target_guard(monitor))
+
+        self.task.latest_target_guard_scan = scan_at(
+            first_stamp + task_module.rospy.Duration(0.01))
+        self.task.latest_target_guard_scan_receipt = task_module.rospy.Time.now()
+        self.task.target_guard_scan_sequence = 2
+        self.assertEqual(self.task.poll_target_guard(monitor), 419)
+
+    def test_target_guard_drops_an_unconfirmed_hit_after_a_clean_scan(self):
+        def scan_at(stamp, ranges):
+            class Header(object):
+                pass
+
+            class Scan(object):
+                angle_min = 0.0
+                angle_increment = math.pi / 2.0
+                range_min = 0.05
+                range_max = 5.0
+
+            Scan.header = Header()
+            Scan.header.stamp = stamp
+            Scan.ranges = ranges
+            return Scan()
+
+        self.task.lock = threading.RLock()
+        self.task.target_guard_points = {
+            12: {419: (-2.0, 1.0), 420: (-1.5, 1.0),
+                 428: (-2.0, 0.5), 429: (-1.5, 0.5)}}
+        self.task.target_guard_scan_sequence = 0
+        self.task.target_guard_match_radius = 0.08
+        self.task.target_guard_confirmation_scans = 2
+        self.task.target_guard_scan_max_age = 1.0
+        self.task.laser_map_pose = lambda _scan: (-2.20, 1.00, 0.0)
+
+        monitor = self.task.new_target_guard_monitor(12)
+        first_stamp = task_module.rospy.Time.now()
+        self.task.latest_target_guard_scan = scan_at(
+            first_stamp, [0.20, float("inf")])
+        self.task.latest_target_guard_scan_receipt = task_module.rospy.Time.now()
+        self.task.target_guard_scan_sequence = 1
+        self.assertIsNone(self.task.poll_target_guard(monitor))
+
+        self.task.latest_target_guard_scan = scan_at(
+            first_stamp + task_module.rospy.Duration(0.01), [float("inf")])
+        self.task.latest_target_guard_scan_receipt = task_module.rospy.Time.now()
+        self.task.target_guard_scan_sequence = 2
+        self.assertIsNone(self.task.poll_target_guard(monitor))
+        self.assertEqual(monitor["hit_counts"], {})
+
+    def test_target_guard_rejects_a_republished_scan_stamp(self):
+        class Header(object):
+            pass
+
+        class Scan(object):
+            angle_min = 0.0
+            angle_increment = math.pi / 2.0
+            range_min = 0.05
+            range_max = 5.0
+            ranges = [0.20, float("inf")]
+
+        stamp = task_module.rospy.Time.now()
+        Scan.header = Header()
+        Scan.header.stamp = stamp
+        self.task.lock = threading.RLock()
+        self.task.target_guard_points = {
+            12: {419: (-2.0, 1.0), 420: (-1.5, 1.0),
+                 428: (-2.0, 0.5), 429: (-1.5, 0.5)}}
+        self.task.target_guard_scan_sequence = 0
+        self.task.target_guard_match_radius = 0.08
+        self.task.target_guard_confirmation_scans = 2
+        self.task.target_guard_scan_max_age = 1.0
+        self.task.laser_map_pose = lambda _scan: (-2.20, 1.00, 0.0)
+
+        monitor = self.task.new_target_guard_monitor(12)
+        self.task.latest_target_guard_scan = Scan()
+        self.task.latest_target_guard_scan_receipt = task_module.rospy.Time.now()
+        self.task.target_guard_scan_sequence = 1
+        self.assertIsNone(self.task.poll_target_guard(monitor))
+
+        self.task.latest_target_guard_scan = Scan()
+        self.task.latest_target_guard_scan_receipt = task_module.rospy.Time.now()
+        self.task.target_guard_scan_sequence = 2
+        self.assertIsNone(self.task.poll_target_guard(monitor))
+        self.assertEqual(monitor["hit_counts"], {})
+
+    def test_target_guard_resets_hits_after_a_long_source_gap(self):
+        class Header(object):
+            pass
+
+        class Scan(object):
+            angle_min = 0.0
+            angle_increment = math.pi / 2.0
+            range_min = 0.05
+            range_max = 5.0
+            ranges = [0.20, float("inf")]
+
+        self.task.lock = threading.RLock()
+        self.task.target_guard_points = {
+            12: {419: (-2.0, 1.0), 420: (-1.5, 1.0),
+                 428: (-2.0, 0.5), 429: (-1.5, 0.5)}}
+        self.task.target_guard_scan_sequence = 0
+        self.task.target_guard_match_radius = 0.08
+        self.task.target_guard_confirmation_scans = 2
+        self.task.target_guard_scan_max_age = 0.10
+        self.task.laser_map_pose = lambda _scan: (-2.20, 1.00, 0.0)
+
+        monitor = self.task.new_target_guard_monitor(12)
+        Scan.header = Header()
+        Scan.header.stamp = task_module.rospy.Time.now()
+        self.task.latest_target_guard_scan = Scan()
+        self.task.latest_target_guard_scan_receipt = task_module.rospy.Time.now()
+        self.task.target_guard_scan_sequence = 1
+        self.assertIsNone(self.task.poll_target_guard(monitor))
+
+        time.sleep(0.12)
+        Scan.header = Header()
+        Scan.header.stamp = task_module.rospy.Time.now()
+        self.task.latest_target_guard_scan = Scan()
+        self.task.latest_target_guard_scan_receipt = task_module.rospy.Time.now()
+        self.task.target_guard_scan_sequence = 2
+        self.assertIsNone(self.task.poll_target_guard(monitor))
+        self.assertEqual(monitor["hit_counts"], {419: 1})
+
+    def test_target_guard_scan_expiry_cancels_then_aborts_a_target_leg(self):
+        events = []
+        self.task.points = {12: (-1.75, 0.75)}
+        self.task.production_navigation_legs = [(52, 12), (12, 23)]
+        self.task.publish_state = lambda _state: None
+        self.task.new_target_guard_monitor = lambda _target: {"test": True}
+        self.task.wait_for_target_guard_precheck = lambda _monitor: None
+        self.task.poll_target_guard = lambda _monitor: None
+        self.task.target_guard_scan_expired = lambda _monitor: True
+        self.task.scan_production_point = lambda *_args: self.fail(
+            "the OCR scan must not start after guard scan loss")
+
+        def navigate_with_guard(*_args, **kwargs):
+            self.assertTrue(kwargs["guard_callback"]())
+            events.append("cancelled_by_navigation_supervisor")
+            return False
+
+        self.task.navigate_coordinates = navigate_with_guard
+        with self.assertRaises(task_module.MissionAbort):
+            self.task.navigate_target_and_scan(1, 52, 12, 0.0)
+        self.assertEqual(events, ["cancelled_by_navigation_supervisor"])
+
+    def test_target_guard_precheck_aborts_without_a_usable_scan(self):
+        self.task.target_guard_precheck_timeout = 0.001
+        self.task.require_safe = lambda: None
+        self.task.poll_target_guard = lambda _monitor: None
+        monitor = {
+            "target_number": 12,
+            "usable_scan_seen": False,
+            "clean_scan_seen": False,
+            "hit_counts": {},
+        }
+
+        with self.assertRaises(task_module.MissionAbort):
+            self.task.wait_for_target_guard_precheck(monitor)
+
+    def test_target_guard_before_goal_skips_without_sending_move_base_goal(self):
+        events = []
+        self.task.points = {12: (-1.75, 0.75)}
+        self.task.production_navigation_legs = [(52, 12), (12, 23)]
+        self.task.publish_state = lambda state: events.append(("state", state))
+        self.task.new_target_guard_monitor = lambda _target: {"test": True}
+        self.task.wait_for_target_guard_precheck = lambda _monitor: 419
+        self.task.stop_motion = lambda: events.append(("stop",))
+        self.task.wait_for_chassis_stop = lambda label: events.append(
+            ("stopped", label))
+        self.task.record_target_guard_skip = (
+            lambda *_args: events.append(("guard_skip", _args[3], _args[4])))
+        self.task.navigate_coordinates = lambda *_args, **_kwargs: self.fail(
+            "a pre-goal guard must not send a move_base target")
+
+        outcome = self.task.navigate_target_and_scan(1, 52, 12, 0.0)
+
+        self.assertEqual(outcome, "target_guard_skipped")
+        self.assertIn(("guard_skip", 419, "before_goal"), events)
+
+    def test_navigation_guard_cancels_goal_from_supervisor_loop(self):
+        events = []
+
+        class MoveBase(object):
+            def send_goal(self, _goal):
+                events.append("send_goal")
+
+        self.task.move_base = MoveBase()
+        self.task.goal_timeout = 1.0
+        self.task.require_safe = lambda: None
+        self.task.cancel_navigation_for_observation = lambda label: events.append(
+            ("cancel_and_stop", label))
+
+        result = self.task.navigate_coordinates(
+            -1.75, 0.75, 0.0, "guarded target", require_plan=False,
+            guard_callback=lambda: True)
+
+        self.assertFalse(result)
+        self.assertEqual(events, [
+            "send_goal", ("cancel_and_stop", "guarded target target guard")])
 
     def test_point_mode_is_published_without_body_projection(self):
         messages = []
