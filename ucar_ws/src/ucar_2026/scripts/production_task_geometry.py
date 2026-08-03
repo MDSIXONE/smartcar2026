@@ -13,12 +13,10 @@ import math
 
 
 DEFAULT_PRODUCTION_ROUTE = [
-    3, 2, 1, 11, 21, 31, 32, 33, 34, 35, 4, 5, 6, 7, 8, 9, 10, 20,
-    30, 40, 39, 38, 37,
+    12, 23, 14, 25, 16,
 ]
 DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG = [
-    180, 180, -90, -90, -90, 0, 0, 0, 0, 108.434949, 0, 0, 0, 0,
-    0, 0, -90, -90, -90, 180, 180, 180, 180,
+    -45, 45, -45, 45, 45,
 ]
 
 
@@ -172,6 +170,73 @@ def load_wall_reference_points(path):
             "grid file has no wall_reference_point_numbers list")
     points = load_numbered_points(path)
     return require_points(points, raw_numbers)
+
+
+def load_middle_target_guard_points(path, target_numbers):
+    """Return each middle target's four adjacent line-endpoint vertices.
+
+    A target guard is deliberately derived from the numbered-grid geometry,
+    rather than hard-coded in the mission.  This makes the rule explicit and
+    prevents a future grid edit from silently associating a centre with a
+    neighbouring square's wall endpoints.
+    """
+    try:
+        with open(path, "r") as handle:
+            document = json.load(handle)
+    except (IOError, ValueError) as exc:
+        raise TaskDefinitionError("cannot load grid file %s: %s" % (path, exc))
+
+    raw_points = document.get("points")
+    if not isinstance(raw_points, list):
+        raise TaskDefinitionError("grid file has no points list")
+    try:
+        half_side = float(document["square_side_m"]) / 2.0
+    except (KeyError, TypeError, ValueError) as exc:
+        raise TaskDefinitionError("invalid square_side_m: %s" % exc)
+    if not is_finite(half_side) or half_side <= 0.0:
+        raise TaskDefinitionError("square_side_m must be finite and positive")
+
+    points = load_numbered_points(path)
+    records = {}
+    for raw_point in raw_points:
+        try:
+            number = int(raw_point["number"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TaskDefinitionError("invalid grid point: %s" % exc)
+        if number in records:
+            raise TaskDefinitionError("duplicate grid point number %d" % number)
+        records[number] = raw_point
+
+    guards = {}
+    for raw_target in target_numbers:
+        target = int(raw_target)
+        centre = records.get(target)
+        if centre is None:
+            raise TaskDefinitionError("grid point %d is missing" % target)
+        if centre.get("type") != "center" or centre.get("region") != "middle":
+            raise TaskDefinitionError(
+                "target guard point %d must be a middle centre" % target)
+        centre_coordinate = points[target]
+        guard = {}
+        for candidate_number, candidate in records.items():
+            if (
+                    candidate.get("type") != "vertex" or
+                    candidate.get("region") != "middle" or
+                    candidate.get("role") != "line_endpoint"):
+                continue
+            candidate_coordinate = points[candidate_number]
+            if (
+                    abs(abs(candidate_coordinate[0] - centre_coordinate[0]) -
+                        half_side) <= 1e-6 and
+                    abs(abs(candidate_coordinate[1] - centre_coordinate[1]) -
+                        half_side) <= 1e-6):
+                guard[candidate_number] = candidate_coordinate
+        if len(guard) != 4:
+            raise TaskDefinitionError(
+                "middle target %d has %d guard endpoints, expected 4" %
+                (target, len(guard)))
+        guards[target] = guard
+    return guards
 
 
 def require_points(points, numbers):

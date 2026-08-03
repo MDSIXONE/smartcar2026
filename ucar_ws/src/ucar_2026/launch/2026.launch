@@ -109,11 +109,11 @@
             <param name="start_delay" value="$(arg task_start_delay)"/>
             <param name="staging_point_number" value="52"/>
             <rosparam param="qr_observation_numbers">[262, 232, 295]</rosparam>
-            <rosparam param="production_route_numbers">[3, 2, 1, 11, 21, 31, 32, 33, 34, 35, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 39, 38, 37]</rosparam>
-            <!-- The full numbered route remains the audit contract. Consecutive
-                 collinear points are passed continuously rather than used as
-                 stop points. Headings remain available for compatibility. -->
-            <rosparam param="production_observation_headings_deg">[180, 180, -90, -90, -90, 0, 0, 0, 0, 108.434949, 0, 0, 0, 0, 0, 0, -90, -90, -90, 180, 180, 180, 180]</rosparam>
+            <!-- Every target is a separately guarded leg.  The task derives
+                 its four adjacent middle-wall endpoints from grid metadata;
+                 a confirmed hit skips this target and advances to the next. -->
+            <rosparam param="production_route_numbers">[12, 23, 14, 25, 16]</rosparam>
+            <rosparam param="production_observation_headings_deg">[-45, 45, -45, 45, 45]</rosparam>
             <!-- Timeout only: a fresh QR event advances immediately. -->
             <param name="qr_search_timeout" value="4.0"/>
             <param name="qr_rotation_speed" value="0.18"/>

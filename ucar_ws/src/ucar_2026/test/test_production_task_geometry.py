@@ -25,6 +25,7 @@ from production_task_geometry import (  # noqa: E402
     bearing,
     build_straight_segments,
     load_numbered_points,
+    load_middle_target_guard_points,
     load_wall_reference_points,
     needs_recenter,
     normalize_angle,
@@ -98,13 +99,10 @@ class ProductionTaskGeometryTest(unittest.TestCase):
     def test_production_route_and_observation_headings_are_exact(self):
         self.assertEqual(
             DEFAULT_PRODUCTION_ROUTE,
-            [3, 2, 1, 11, 21, 31, 32, 33, 34, 35, 4, 5, 6, 7, 8,
-             9, 10, 20, 30, 40, 39, 38, 37])
+            [12, 23, 14, 25, 16])
         self.assertEqual(
             DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG,
-            [180, 180, -90, -90, -90, 0, 0, 0, 0, 108.434949,
-             0, 0, 0, 0, 0, 0, -90, -90, -90, 180, 180, 180,
-             180])
+            [-45, 45, -45, 45, 45])
         for index in range(len(DEFAULT_PRODUCTION_ROUTE) - 1):
             source = self.points[DEFAULT_PRODUCTION_ROUTE[index]]
             target = self.points[DEFAULT_PRODUCTION_ROUTE[index + 1]]
@@ -121,8 +119,21 @@ class ProductionTaskGeometryTest(unittest.TestCase):
             build_straight_segments(
                 DEFAULT_PRODUCTION_ROUTE, self.points,
                 math.radians(1.0)),
-            [(3, 1), (1, 31), (31, 35), (35, 4), (4, 10),
-             (10, 40), (40, 37)])
+            [(12, 23), (23, 14), (14, 25), (25, 16)])
+
+    def test_middle_target_guards_are_derived_from_adjacent_endpoints(self):
+        guards = load_middle_target_guard_points(
+            self.grid_path, DEFAULT_PRODUCTION_ROUTE)
+        self.assertEqual(
+            dict((number, sorted(points))
+                 for number, points in guards.items()),
+            {
+                12: [419, 420, 428, 429],
+                23: [429, 430, 438, 439],
+                14: [421, 422, 430, 431],
+                25: [431, 432, 440, 441],
+                16: [423, 424, 432, 433],
+            })
 
     def test_straight_segments_break_on_reverse_leg_and_turn(self):
         reverse_points = {
@@ -429,6 +440,40 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.require_safe = lambda: None
         with self.assertRaises(task_module.MissionAbort):
             self.task.cancel_navigation_for_observation("test")
+
+    def test_target_guard_matches_only_the_current_target_endpoints(self):
+        self.task.target_guard_points = {
+            12: {419: (-2.0, 1.0), 420: (-1.5, 1.0),
+                 428: (-2.0, 0.5), 429: (-1.5, 0.5)},
+            23: {429: (-1.5, 0.5), 430: (-1.0, 0.5),
+                 438: (-1.5, 0.0), 439: (-1.0, 0.0)},
+        }
+        self.assertTrue(self.task.target_guard_triggered(
+            12, {"wall_point_number": 419}))
+        self.assertFalse(self.task.target_guard_triggered(
+            12, {"wall_point_number": 430}))
+        self.assertFalse(self.task.target_guard_triggered(
+            12, {}))
+        self.assertTrue(self.task.target_guard_triggered(
+            23, {"wall_point_number": 430}))
+
+    def test_target_guard_candidates_keep_normal_wall_references(self):
+        self.task.wall_reference_points = {297: (-0.75, 1.5)}
+        self.task.target_guard_points = {12: {419: (-2.0, 1.0)}}
+        self.assertEqual(
+            self.task.wall_candidates_for_target(12),
+            {297: (-0.75, 1.5), 419: (-2.0, 1.0)})
+
+    def test_target_guard_ocr_stays_armed_after_three_observations(self):
+        self.task.observations = [
+            {"wall_point_number": 294, "text": "a", "confidence": 90.0},
+            {"wall_point_number": 295, "text": "b", "confidence": 90.0},
+            {"wall_point_number": 296, "text": "c", "confidence": 90.0},
+        ]
+        self.task.last_observation_pose = None
+        self.assertFalse(self.task.continuous_ocr_is_armed())
+        self.assertTrue(self.task.continuous_ocr_is_armed(
+            continue_for_target_guard=True))
 
     def test_cancel_race_returns_succeeded_to_caller(self):
         class FakeMoveBase(object):

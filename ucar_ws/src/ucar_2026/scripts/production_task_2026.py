@@ -10,13 +10,13 @@ Flow:
   3. Disable QR decoding and start the Python 3 OCR helper.  In the default
      configuration the helper consumes frames saved from the ROS usb_cam topic.
   4. Switch CymPlanner collision checking to body_projection.
-  5. Collapse consecutive collinear route points into long navigation
-     segments.  OCR runs continuously while move_base follows each segment.
-     A candidate first cancels navigation and passes a fresh-odometry stop
-     gate; only then may the task align the box, read the front lidar distance,
-     save the result, and resume the same segment endpoint.
-  6. Save every attempt plus the three strongest distinct wall observations
-     and finish at route point 37.
+  5. Navigate the configured production targets in order.  OCR runs
+     continuously while move_base follows every target leg.  A candidate first
+     cancels navigation and passes a fresh-odometry stop gate; only then may
+     the task align the box and read the front lidar distance.  When that
+     projected hit is one of the target's four adjacent middle-wall endpoints,
+     the task records the guard event and advances directly to the next target.
+  6. Save every attempt plus the three strongest distinct wall observations.
 
 The node never drives to the QR edge points: they lie on the field boundary.
 They are gaze targets while the chassis remains at centre 52.
@@ -55,6 +55,7 @@ from production_task_geometry import (
     build_straight_segments,
     is_finite,
     load_numbered_points,
+    load_middle_target_guard_points,
     load_wall_reference_points,
     needs_recenter,
     normalize_angle,
@@ -274,6 +275,13 @@ class ProductionTask2026(object):
         self.production_segments = build_straight_segments(
             self.production_route_numbers, self.points,
             self.straight_segment_angle_tolerance)
+        self.target_guard_points = load_middle_target_guard_points(
+            self.grid_path, self.production_route_numbers)
+        self.production_navigation_legs = [
+            (self.staging_point_number, self.production_route_numbers[0])
+        ] + list(zip(
+            self.production_route_numbers[:-1],
+            self.production_route_numbers[1:]))
         self.wall_reference_points = load_wall_reference_points(
             self.grid_path)
 
@@ -315,6 +323,7 @@ class ProductionTask2026(object):
         self.ocr_process = None
         self.ocr_log_handle = None
         self.observations = []
+        self.target_guard_events = []
         self.run_directory = None
         self.capture_sequence = 0
         self.last_observation_pose = None
@@ -511,20 +520,17 @@ class ProductionTask2026(object):
             self.start_ros_camera_and_wait("continuous production OCR")
         self.switch_to_body_projection()
 
-        first_segment_start, first_segment_end = self.production_segments[0]
-        first_yaw = bearing(
-            self.points[first_segment_start],
-            self.points[first_segment_end])
-        self.navigate_to(
-            first_segment_start, first_yaw,
-            "PRODUCTION_ENTRY_%d" % first_segment_start)
         rospy.loginfo(
-            "PRODUCTION_CONTINUOUS_SEGMENTS %s",
-            self.production_segments)
+            "PRODUCTION_TARGET_LEGS %s guards=%s",
+            self.production_navigation_legs,
+            dict((number, sorted(points))
+                 for number, points in self.target_guard_points.items()))
         for segment_index, (start_number, end_number) in enumerate(
-                self.production_segments, 1):
+                self.production_navigation_legs, 1):
             self.navigate_segment_with_continuous_ocr(
-                segment_index, start_number, end_number)
+                segment_index, start_number, end_number,
+                target_yaw=self.production_observation_headings[
+                    segment_index - 1])
 
         self.stop_native_ocr()
         self.ensure_ros_camera_released()
@@ -537,7 +543,9 @@ class ProductionTask2026(object):
         self.stop_motion()
         self.publish_state("SUCCEEDED")
         self.publish_result(
-            True, "saved three OCR wall points; route finished at point 37")
+            True,
+            "saved three OCR wall points; route completed through point %d" %
+            self.production_route_numbers[-1])
 
     def scan_observation_point(self, observation_number):
         staging = self.points[self.staging_point_number]
@@ -1012,8 +1020,10 @@ class ProductionTask2026(object):
             require_action_success=True)
         self.wait_for_chassis_stop(context + " protected alignment")
 
-    def continuous_ocr_is_armed(self):
-        if len(select_three_observations(self.observations)) >= 3:
+    def continuous_ocr_is_armed(self, continue_for_target_guard=False):
+        if (
+                not continue_for_target_guard and
+                len(select_three_observations(self.observations)) >= 3):
             return False
         if self.last_observation_pose is None:
             return True
@@ -1121,11 +1131,13 @@ class ProductionTask2026(object):
             label, end_number, error, status)
 
     def navigate_segment_with_continuous_ocr(
-            self, segment_index, start_number, end_number):
-        """Navigate one long segment, stopping only for valid OCR candidates."""
+            self, segment_index, start_number, end_number,
+            target_yaw=None):
+        """Navigate one guarded target leg, stopping only for OCR candidates."""
         start_coordinate = self.points[start_number]
         end_coordinate = self.points[end_number]
-        target_yaw = bearing(start_coordinate, end_coordinate)
+        if target_yaw is None:
+            target_yaw = bearing(start_coordinate, end_coordinate)
         label = "PRODUCTION_SEGMENT_%03d_%03d" % (
             start_number, end_number)
         observations_this_segment = 0
@@ -1246,7 +1258,9 @@ class ProductionTask2026(object):
                             (label, observations_this_segment + 1))
                         self.publish_state(observation_label)
                         observation = self.observe_wall(
-                            end_number, observation_label)
+                            end_number, observation_label,
+                            candidate_wall_points=
+                            self.wall_candidates_for_target(end_number))
                         observation.update({
                             "segment_index": int(segment_index),
                             "segment_start_point_number": int(start_number),
@@ -1260,11 +1274,41 @@ class ProductionTask2026(object):
                                 list(trigger_pose),
                             "stopped_pose_map": list(stopped_pose),
                         })
+                        if self.target_guard_triggered(
+                                end_number, observation):
+                            guard_number = observation["wall_point_number"]
+                            event = {
+                                "timestamp": time.strftime(
+                                    "%Y-%m-%dT%H:%M:%S%z"),
+                                "target_point_number": int(end_number),
+                                "guard_point_number": int(guard_number),
+                                "guard_point_numbers": sorted(
+                                    self.target_guard_points[end_number]),
+                                "segment_index": int(segment_index),
+                                "segment_start_point_number": int(
+                                    start_number),
+                            }
+                            observation["target_guard_triggered"] = True
+                            self.target_guard_events.append(event)
+                            self.observations.append(observation)
+                            self.last_observation_pose = self.current_map_pose(
+                                label + " target guard complete")
+                            self.save_observation_summary()
+                            rospy.logwarn(
+                                "PRODUCTION_TARGET_GUARD_SKIP target=%d "
+                                "guard_point=%d next_target=%s",
+                                end_number, guard_number,
+                                (str(self.production_navigation_legs[
+                                    segment_index][1])
+                                 if segment_index < len(
+                                     self.production_navigation_legs)
+                                 else "none"))
+                            return "target_guard_skipped"
                         self.observations.append(observation)
-                        self.save_observation_summary()
                         self.last_observation_pose = self.current_map_pose(
                             label + " observation complete")
                         observations_this_segment += 1
+                        self.save_observation_summary()
                         rospy.loginfo(
                             "PRODUCTION_SEGMENT_RESUME start=%d end=%d "
                             "observations=%d",
@@ -1273,10 +1317,14 @@ class ProductionTask2026(object):
                         break
 
                     can_scan = (
-                        observations_this_segment <
-                        self.navigation_ocr_max_observations_per_segment and
+                        (
+                            observations_this_segment <
+                            self.navigation_ocr_max_observations_per_segment or
+                            bool(self.target_guard_points.get(end_number))) and
                         rospy.Time.now() >= next_capture and
-                        self.continuous_ocr_is_armed())
+                        self.continuous_ocr_is_armed(
+                            continue_for_target_guard=bool(
+                                self.target_guard_points.get(end_number))))
                     if can_scan:
                         scan_index += 1
                         capture_label = "%s_motion_%04d" % (
@@ -1290,7 +1338,21 @@ class ProductionTask2026(object):
                     self.stop_motion()
                     self.cleanup_async_motion_ocr(capture_task)
 
-    def observe_wall(self, route_point_number, observation_label=None):
+    def target_guard_triggered(self, target_number, observation):
+        """Return whether an accepted lidar match protects this target."""
+        guard_points = self.target_guard_points.get(int(target_number), {})
+        wall_number = observation.get("wall_point_number")
+        return wall_number is not None and int(wall_number) in guard_points
+
+    def wall_candidates_for_target(self, target_number):
+        """Allow a target guard without discarding normal wall references."""
+        candidates = dict(self.wall_reference_points)
+        candidates.update(self.target_guard_points.get(int(target_number), {}))
+        return candidates
+
+    def observe_wall(
+            self, route_point_number, observation_label=None,
+            candidate_wall_points=None):
         """Capture, OCR-align, range, and match after a proven full stop."""
         if observation_label is None:
             observation_label = "point_%03d" % route_point_number
@@ -1362,7 +1424,9 @@ class ProductionTask2026(object):
         laser_pose = self.laser_map_pose(scan)
         hit = projected_wall_hit(
             laser_pose, distance, self.lidar_forward_offset)
-        match = nearest_numbered_point(hit, self.wall_reference_points)
+        if candidate_wall_points is None:
+            candidate_wall_points = self.wall_reference_points
+        match = nearest_numbered_point(hit, candidate_wall_points)
         if match is None:
             raise MissionAbort("grid has no wall reference candidates")
         wall_number, wall_coordinate, match_error = match
@@ -1427,7 +1491,11 @@ class ProductionTask2026(object):
             return
         payload = {
             "route": self.production_route_numbers,
-            "continuous_segments": self.production_segments,
+            "target_legs": self.production_navigation_legs,
+            "target_guard_points": dict(
+                (str(number), sorted(points))
+                for number, points in self.target_guard_points.items()),
+            "target_guard_events": self.target_guard_events,
             "observations": self.observations,
             "recognized_points": select_three_observations(
                 self.observations),

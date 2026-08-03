@@ -1859,3 +1859,69 @@ rosservice call /usb_cam/stop_capture
 确认 global planner 仍能生成路径。暂停 `/scan_filtered` 的断流验证必须确认
 CymPlanner 报 local costmap not current 并保持零速。任何 NaN、TF_NAN、地图墙
 缺失、相机无新帧或重复控制周期超 50 ms 都应立即停止，不得进入完整任务。
+
+## 2026 中间区目标守卫路线
+
+二维码阶段结束后的生产目标固定为 `12 → 23 → 14 → 25 → 16`。每一条目标腿都在
+移动中连续 OCR；出现候选后，任务先取消当前 move_base 目标、连续发布零速度并等待
+新鲜低速里程计，再做 OCR 居中和新鲜前向雷达投影。只有投影命中误差不超过
+`wall_match_max_error_m` 的守卫端点，才会跳过当前目标并立即将下一目标作为新的
+move_base 目标。因此不会仅凭一次移动中的 OCR 文本直接改变路径。
+
+四个守卫端点由 `production_full_grid_all_numbered.json` 的 middle centre / line endpoint
+几何实时派生，不在 launch 或脚本中硬编码。当前映射如下：
+
+| 目标 | 守卫端点 |
+| --- | --- |
+| 12 | 419, 420, 428, 429 |
+| 23 | 429, 430, 438, 439 |
+| 14 | 421, 422, 430, 431 |
+| 25 | 431, 432, 440, 441 |
+| 16 | 423, 424, 432, 433 |
+
+守卫触发会写入运行目录的 `observations.json`：`target_guard_events` 记录被跳过的目标、
+端点和来源腿；对应 OCR/雷达记录仍保留在 `observations` 中，可参与三个不同识别点的结果
+选择。末点 16 没有“下一点”时，任务会维持已确认停止状态、记录该守卫事件并结束生产路线，
+不会尝试跨越守卫点继续移动。
+
+部署、构建和测试不启动 ROS、不发布速度。小车地址和 WSL Master 必须按
+`rosmaster/NETWORK_CONFIGURATION.md` 在当次网络中发现，示例中的变量不是固定 IP：
+
+```powershell
+$VEHICLE_HOST = 'ucar@<当前小车IP或主机名>'
+git ls-files --eol `
+  ucar_ws/src/ucar_2026/scripts/production_task_geometry.py `
+  ucar_ws/src/ucar_2026/scripts/production_task_2026.py
+
+scp ucar_ws/src/ucar_2026/scripts/production_task_geometry.py `
+  ucar_ws/src/ucar_2026/scripts/production_task_2026.py `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/scripts/"
+scp ucar_ws/src/ucar_2026/launch/2026.launch `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/launch/"
+scp ucar_ws/src/ucar_2026/test/test_production_task_geometry.py `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/test/"
+ssh $VEHICLE_HOST 'chmod 755 ~/ucar_ws/src/ucar_2026/scripts/production_task_2026.py; head -n 1 ~/ucar_ws/src/ucar_2026/scripts/production_task_2026.py | od -An -tx1'
+```
+
+然后登入小车，以本次 WSL Master 地址替换 `<MASTER_IP>`。每次 `source` 后均重新设置
+`ROS_MASTER_URI`，但下面命令只构建和运行单测：
+
+```bash
+cd ~/ucar_ws
+source /opt/ros/melodic/setup.bash
+unset ROS_HOSTNAME
+export ROS_MASTER_URI="http://<MASTER_IP>:11311"
+export ROS_IP="$(ip -4 route get <MASTER_IP> | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+catkin_make --pkg ucar_2026 -DCATKIN_ENABLE_TESTING=ON
+source devel/setup.bash
+export ROS_MASTER_URI="http://<MASTER_IP>:11311"
+export ROS_IP="$(ip -4 route get <MASTER_IP> | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+catkin_make run_tests_ucar_2026
+catkin_test_results --verbose build/test_results/ucar_2026
+```
+
+实车运行仍需用户明确确认车辆已放回固定起点。启动前按安全门检查 `/odom_raw`、
+`odom → base_link`、`map → base_link` 和雷达均为有限且新鲜；任何 NaN 或
+`TF_NAN_INPUT` 都必须先发布零速度并重启导航/里程计链路。完成后使用
+`bash ~/ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh` 停止所有任务终端，不能在后台
+遗留 launch。
