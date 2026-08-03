@@ -41,3 +41,19 @@
   status `4`，不证明门洞对真实车体连续安全。
 - 当前 `mode1_point` 上限仍为 `0.50 m/s`、`1.00 rad/s`；用户要求本轮不微调参数。实车测试
   仍须用户确认起点位置、有人看护和急停，且失败后不得自动重跑。
+
+## 2026-08-03 实车试跑结果
+
+- 小车通过本次 WSL Master `192.168.8.198` 连接；安全门后锁存的
+  `/ucar/navigation_mode` 为 `point`，`/odom_raw` 与 `map → base_link` 均为有限值。
+- 任务到达 52 后即时读取 QR `a → d → i`，随后 `52 → 12` 成功到达，位置误差 `0.035 m`。
+  说明前视点模式可完成本轮到达 12 前的路线验证；启动早期的一次 `NO PATH!` 未复发。
+- 在点 12 的原地 OCR 旋转中，识别到“食品加工车间”（置信度 `73.4`，转角 `3.850 rad`），
+  但任务安全中止，尚未继续至 23。
+- 中止原因是异步 OCR 的返回值没有带回任务侧已保存的
+  `capture_requested_pose_map`：`start_async_motion_ocr()` 将位姿放入 task 元数据，
+  而 `finish_async_motion_ocr()` 只返回 helper response。随后的回到抓拍朝向步骤拒绝缺失位姿，
+  以 `OCR candidate has no capture pose` 结束。这是实现缺陷，不是代价地图或前视点碰撞检查
+  的失败。
+- 任务按异常路径发布零速、关闭相机与 OCR；随后显式执行 `stop_2026_task.sh` 并停止本次 WSL
+  Master。没有自动重跑；车辆停在点 12 附近。
