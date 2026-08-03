@@ -1964,3 +1964,17 @@ export ROS_IP="$(ip -4 route get <MASTER_IP> | awk '{ for (i = 1; i <= NF; i++) 
 安全门通过后、前往 52 前锁存 `point`；`rostopic echo -n 1 /ucar/navigation_mode` 只能用于
 观察该已执行的锁定，不能替代或延后任务内部的安全门。结束时仍只用
 `~/ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh` 停车/停 launch，并停止 WSL Master。
+
+停止脚本已经先发布零速度并停止车端进程；在网络不稳定时，Master 可能暂时保留已死亡节点的
+注册。**只有**先用 `ps` 确认这些进程确实已退出后，才可在仍连接同一 WSL Master 的小车终端
+清理该注册，随后关闭 Master：
+
+```bash
+ps -eo pid=,args= | grep -E \
+  '[r]oslaunch.*2026.launch|[p]roduction_task_2026|[m]ove_base|[b]ase_driver'
+# 上一条无输出后才执行：
+printf 'y\n' | rosnode cleanup
+```
+
+`rosnode cleanup` 会删除无法联系节点的 Master 注册，因此绝不能在正常运行或网络不稳定、却尚未
+确认进程退出时使用。
