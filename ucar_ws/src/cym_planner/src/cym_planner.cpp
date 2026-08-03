@@ -277,6 +277,7 @@ CymPlanner::CymPlanner()
       elastic_max_vel_x_(0.07),
       elastic_max_vel_theta_(0.30),
       elastic_search_timeout_(0.40),
+      elastic_activation_cost_(220),
       target_index_(0),
       pose_adjusting_(false),
       goal_reached_(false),
@@ -399,6 +400,8 @@ void CymPlanner::initialize(std::string name, tf2_ros::Buffer* /* tf */,
                      "elastic_max_vel_theta", elastic_max_vel_theta_, 0.30);
     readPlannerParam(planner_nh, canonical_nh, legacy_nh,
                      "elastic_search_timeout", elastic_search_timeout_, 0.40);
+    readPlannerParam(planner_nh, canonical_nh, legacy_nh,
+                     "elastic_activation_cost", elastic_activation_cost_, 220);
 
     escape_blocked_timeout_ =
         clampValue(escape_blocked_timeout_, 0.10, 2.0);
@@ -426,6 +429,8 @@ void CymPlanner::initialize(std::string name, tf2_ros::Buffer* /* tf */,
     elastic_max_vel_theta_ = clampValue(elastic_max_vel_theta_, 0.05, 0.30);
     elastic_search_timeout_ =
         clampValue(elastic_search_timeout_, 0.10, 1.00);
+    elastic_activation_cost_ = std::max(
+        1, std::min(253, elastic_activation_cost_));
 
     ros::NodeHandle public_nh;
     carry_mode_sub_ = public_nh.subscribe(
@@ -887,6 +892,10 @@ CymPlanner::FootprintBlockage CymPlanner::inspectFootprint(
             const unsigned char cost = local_costmap.getCost(
                 static_cast<unsigned int>(x),
                 static_cast<unsigned int>(y));
+            result.maximum_cost = std::max(
+                result.maximum_cost, static_cast<unsigned int>(cost));
+            result.total_cost += static_cast<std::uint64_t>(cost);
+            ++result.sampled_cells;
             if(localCellBlocksProjectedFootprint(cost))
             {
                 double blocked_world_x = 0.0;
@@ -933,21 +942,30 @@ CymPlanner::FootprintBlockage CymPlanner::inspectFootprint(
     return result;
 }
 
-bool CymPlanner::elasticCandidateIsSafe(
+bool CymPlanner::elasticCandidateClearance(
     const std::vector<geometry_msgs::PoseStamped>& candidate,
     int start_index,
     int end_index,
     const costmap_2d::Costmap2D& local_costmap,
-    cv::Mat& map_image)
+    cv::Mat& map_image,
+    ElasticClearanceScore& score)
 {
+    const double absolute_offset = score.absolute_offset;
+    score = ElasticClearanceScore();
+    score.absolute_offset = absolute_offset;
     if(start_index < 0 || end_index <= start_index ||
        end_index >= static_cast<int>(candidate.size()))
     {
         return false;
     }
     geometry_msgs::PoseStamped previous = candidate[start_index];
-    if(inspectFootprint(previous, local_costmap, map_image, false).blocked)
+    FootprintBlockage footprint =
+        inspectFootprint(previous, local_costmap, map_image, false);
+    if(footprint.blocked)
         return false;
+    // The immutable current pose must be collision-free, but it must not
+    // dominate the ranking of all candidates.  A band is useful precisely
+    // when it moves a still-safe footprint away from high inflation ahead.
     for(int index = start_index + 1; index <= end_index; ++index)
     {
         const geometry_msgs::PoseStamped& next = candidate[index];
@@ -977,12 +995,18 @@ bool CymPlanner::elasticCandidateIsSafe(
                 (next.pose.position.y - previous.pose.position.y) * ratio;
             probe.pose.orientation = tf::createQuaternionMsgFromYaw(
                 normalizeAngle(previous_yaw + yaw_delta * ratio));
-            if(inspectFootprint(probe, local_costmap, map_image, false).blocked)
+            footprint = inspectFootprint(probe, local_costmap, map_image, false);
+            if(footprint.blocked)
                 return false;
+            score.maximum_cost = std::max(
+                score.maximum_cost, footprint.maximum_cost);
+            score.total_cost += footprint.total_cost;
+            score.sampled_cells += footprint.sampled_cells;
         }
         previous = next;
     }
-    return true;
+    score.valid = score.sampled_cells > 0;
+    return score.valid;
 }
 
 bool CymPlanner::tryActivateElasticPlan(
@@ -990,7 +1014,8 @@ bool CymPlanner::tryActivateElasticPlan(
     int start_index,
     const geometry_msgs::PoseStamped& current_pose,
     const costmap_2d::Costmap2D& local_costmap,
-    cv::Mat& map_image)
+    cv::Mat& map_image,
+    unsigned int maximum_accepted_cost)
 {
     if(!body_projection_enabled_ || !elastic_enabled_ || elastic_active_ ||
        costmap_plan.size() != global_plan_.size() ||
@@ -1018,6 +1043,9 @@ bool CymPlanner::tryActivateElasticPlan(
 
     const int preferred_side = elastic_last_side_ == 0 ? 1 : elastic_last_side_;
     const int sides[2] = {preferred_side, -preferred_side};
+    ElasticClearanceScore best_score;
+    std::vector<geometry_msgs::PoseStamped> best_candidate;
+    int best_side = 0;
     for(double magnitude = elastic_lateral_step_;
         magnitude <= elastic_max_lateral_offset_ + 1e-9;
         magnitude += elastic_lateral_step_)
@@ -1072,23 +1100,36 @@ bool CymPlanner::tryActivateElasticPlan(
                     tf::createQuaternionMsgFromYaw(
                         std::atan2(tangent_y, tangent_x));
             }
-            if(!candidate.empty() && elasticCandidateIsSafe(
-                   candidate, start_index, end_index, local_costmap, map_image))
+            ElasticClearanceScore score;
+            score.absolute_offset = magnitude;
+            if(!candidate.empty() && elasticCandidateClearance(
+                   candidate, start_index, end_index, local_costmap, map_image,
+                   score) && elasticCandidateHasMoreClearance(score, best_score))
             {
-                elastic_plan_ = candidate;
-                elastic_active_ = true;
-                elastic_end_plan_index_ = end_index;
-                elastic_last_side_ = sides[side_index];
-                resetControllerState();
-                ROS_WARN(
-                    "cym_planner: activated local elastic path side=%d "
-                    "offset=%.3f m horizon=%.3f m",
-                    elastic_last_side_, magnitude, travelled);
-                return true;
+                best_score = score;
+                best_candidate = candidate;
+                best_side = sides[side_index];
             }
         }
     }
-    return false;
+    if(!best_score.valid ||
+       best_score.maximum_cost > maximum_accepted_cost)
+    {
+        return false;
+    }
+    elastic_plan_ = best_candidate;
+    elastic_active_ = true;
+    elastic_end_plan_index_ = end_index;
+    elastic_last_side_ = best_side;
+    resetControllerState();
+    ROS_WARN(
+        "cym_planner: activated max-clearance elastic path side=%d "
+        "offset=%.3f m horizon=%.3f m max_cost=%u mean_cost=%.1f",
+        elastic_last_side_, best_score.absolute_offset, travelled,
+        best_score.maximum_cost,
+        static_cast<double>(best_score.total_cost) /
+            static_cast<double>(best_score.sampled_cells));
+    return true;
 }
 
 CymPlanner::FootprintBlockage CymPlanner::checkPathBlocked(
@@ -1193,18 +1234,39 @@ CymPlanner::FootprintBlockage CymPlanner::checkPathBlocked(
             path_blockage.blocked = local_costmap.getCost(map_x, map_y) >=
                 tuning.obstacle_cost_threshold;
         }
-        if(path_blockage.blocked)
+        const bool clearance_limited = body_projection_enabled_ &&
+            !path_blockage.blocked &&
+            path_blockage.maximum_cost >=
+                static_cast<unsigned int>(elastic_activation_cost_);
+        if(path_blockage.blocked || clearance_limited)
         {
+            const unsigned int maximum_accepted_cost =
+                clearance_limited ?
+                    static_cast<unsigned int>(elastic_activation_cost_ - 1) :
+                    253u;
             if(body_projection_enabled_ && !elastic_active_ &&
                tryActivateElasticPlan(
                    costmap_plan, start_index, current_pose,
-                   local_costmap, map_image))
+                   local_costmap, map_image, maximum_accepted_cost))
             {
                 resetElasticSearch();
                 return FootprintBlockage();
             }
             if(elastic_active_)
                 clearElasticPlan();
+            if(clearance_limited)
+            {
+                path_blockage.blocked = true;
+                path_blockage.clearance_limited = true;
+                resetElasticSearch();
+                ROS_WARN_THROTTLE(
+                    1.0,
+                    "cym_planner: local forward footprint max cost %u "
+                    "has no lower-clearance elastic band; requesting "
+                    "global replan",
+                    path_blockage.maximum_cost);
+                return path_blockage;
+            }
             if(body_projection_enabled_ && elastic_enabled_ &&
                !path_blockage.current_footprint_blocked)
             {

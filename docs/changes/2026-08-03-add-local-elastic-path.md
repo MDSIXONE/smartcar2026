@@ -33,8 +33,11 @@
 
 - 新增纯函数测试，覆盖带状路径在起点/终点回接原路径、非有限输入失败关闭、旋转造成
   的额外 footprint 采样，以及等价/变化 global plan 的带状态判据。
-- 本机仅运行了可用的 Python 测试；C++/ROS Melodic 构建与 gtest 必须在小车 Ubuntu 18.04
-  部署后完成，当前未启动 ROS 或车辆。
+- 车端首次构建补齐 gtest 独立可执行入口；测试文件必须定义 `main()`，与同包现有
+  gtest 的构建方式一致。
+- 本机标准库 Python 回归通过 25 项（14 项 ROS 依赖项按设计跳过）；小车 Ubuntu 18.04 /
+  Melodic 的 `run_tests_cym_planner` 现已通过：`68 tests, 0 errors, 0 failures, 0 skipped`。
+  本轮构建/测试均未启动 ROS 或车辆。
 
 ## 已知限制
 

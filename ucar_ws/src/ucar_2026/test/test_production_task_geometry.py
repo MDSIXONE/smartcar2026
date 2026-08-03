@@ -312,6 +312,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.qr_sequence = 0
         self.task.latest_qr_text = ""
         self.task.used_qr_codes = set()
+        self.task.qr_observation_numbers = [262]
         self.task.require_distinct_qr_codes = True
         self.task.qr_event = threading.Event()
         self.task.publish_state = lambda _state: None

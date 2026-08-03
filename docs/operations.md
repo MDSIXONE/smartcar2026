@@ -1698,17 +1698,21 @@ roslaunch yolo2025 2026.launch full_task_enabled:=true
 全接触格统计和本地动态障碍检查；当前源码也会拒绝任何 `true` 请求。
 模式切换只能在车辆已停止、两个导航目标之间执行，不允许运动中切换。
 
-`elastic_enabled=true` 是模式 2 的预防性局部带状路径，不是脱困横移：仅当前真实
-footprint 完全安全而前视全局路径被 local 254/255 阻挡时，才在 `0.25 m` 带内尝试 `±0.02..±0.10 m`
-的平滑偏移；每个候选以 `0.015 m` 以下间距投影完整 footprint 并保留现有 Twist
-0.40 秒扫掠。位置与变形后切线朝向同时插值，旋转采样间隔不超过 `0.05 rad`；候选阶段
-速度固定受 `elastic_max_vel_x`（默认 `0.07 m/s`）和 `elastic_max_vel_theta`
-（默认 `0.30 rad/s`）约束。规划器对 global plan 按弧长取 7 点，全部位置偏差不超过
-`0.04 m`、切线角偏差不超过 `0.20 rad` 才视为等价；等价 plan 不会清除已验证的带或
-0.4 秒搜索计时，中段绕行等实质几何变化才重置。
-两侧候选均失败才请求全局重规划；当前 footprint 已接触、未知区、TF 或 local costmap
-不新鲜时始终零速失败关闭。不要以提高 `elastic_max_lateral_offset`、放宽 254/255 或
-关闭 sweep 来解决无解路径。
+`elastic_enabled=true` 是模式 2 的预防性局部带状路径，不是脱困横移：当前真实
+footprint 必须完全安全。前视 footprint 一旦触及 local `254/255`，或其 raw 代价达到
+`elastic_activation_cost`（默认 `220`），就在 `0.25 m` 带内枚举 `±0.02..±0.12 m`
+平滑偏移。候选首先以完整轨迹的**最高 footprint raw 代价**排序，再以平均代价排序，
+因此选择 local costmap 中净空最大的安全带；只有代价完全相同时才优先较小偏移。每个候选
+以 `0.015 m` 以下间距投影完整 footprint 并保留现有 Twist 0.40 秒扫掠。位置与变形后
+切线朝向同时插值，旋转采样间隔不超过 `0.05 rad`；候选阶段速度固定受
+`elastic_max_vel_x`（默认 `0.07 m/s`）和 `elastic_max_vel_theta`（默认 `0.30 rad/s`）约束。
+规划器对 global plan 按弧长取 7 点，全部位置偏差不超过 `0.04 m`、切线角偏差不超过
+`0.20 rad` 才视为等价；等价 plan 不会清除已验证的带或 0.4 秒搜索计时，中段绕行等实质
+几何变化才重置。
+前视高代价而无更低代价带时，CymPlanner 立即返回失败，让 move_base 基于持续 `marking` /
+`clearing` 的 global ObstacleLayer 重规划；不会先停等 0.4 秒。当前 footprint 已接触、未知区、
+TF 或 local costmap 不新鲜时始终零速失败关闭。不要以提高 `elastic_max_lateral_offset`、放宽
+254/255 或关闭 sweep 来解决无解路径。
 
 同步修改时不得在小车端创建备份目录。以下命令只部署、构建和测试，不启动 ROS、
 不发布速度：
@@ -1752,9 +1756,11 @@ catkin_test_results --verbose build/test_results/cym_planner
 rosparam get /move_base/cym_planner/CymPlanner/mode1_point
 rosparam get /move_base/cym_planner/CymPlanner/mode2_body_projection
 rosparam get /move_base/cym_planner/CymPlanner/escape_enabled
+rosparam get /move_base/cym_planner/CymPlanner/elastic_activation_cost
 ```
 
-第三条必须为 `false`。若不是，立即停止任务，不得进入实车运动。
+第三条必须为 `false`；第四条必须在 `1..253`，默认 `220`。若不符合，立即停止任务，
+不得进入实车运动。
 
 ## 2026 相机按需采集与 local footprint 性能优化
 

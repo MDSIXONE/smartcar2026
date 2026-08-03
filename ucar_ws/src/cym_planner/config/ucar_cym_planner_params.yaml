@@ -58,14 +58,18 @@ cym_planner/CymPlanner:
   escape_max_total_distance: 0.08
   escape_heading_tolerance: 0.05
 
-  # 局部 footprint 只在前视路径受阻、但当前车体仍完全安全时尝试。
+  # 局部 footprint 在前视路径进入高代价区前就开始选带；候选按完整轨迹的
+  # 最差 footprint 代价、平均代价排序，选择净空最大的安全带。
   # 每一条带状候选都以 local 合并 costmap 的 254/255 和完整 footprint 验证；
   # 当前 footprint 接触、未知区、TF 或 costmap 异常仍直接失败关闭并请求全局重规划。
   elastic_enabled: true
   elastic_lookahead_distance: 0.25
   elastic_lateral_step: 0.02
-  elastic_max_lateral_offset: 0.10
+  elastic_max_lateral_offset: 0.12
   elastic_validation_step: 0.015
   elastic_validation_yaw_step: 0.05
   elastic_max_vel_x: 0.07
   elastic_max_vel_theta: 0.30
+  # >= 此 raw local cost 的前视 footprint 先尝试最大净空带；没有更低代价
+  # 的带时立即让 move_base 用持续更新的 global costmap 重规划。
+  elastic_activation_cost: 220

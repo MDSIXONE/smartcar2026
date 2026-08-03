@@ -35,16 +35,18 @@ cym_planner/CymPlanner:
 当前 footprint、最近路径点前视和候选 Twist 扫掠共用同一份局部快照。车体尺寸仍
 直接读取 local costmap 配置。
 
-当且仅当当前 footprint 完全安全、只是前视的原全局路径命中 254/255 时，模式 2 会先
-在 `0.25 m` 前方生成左右带状局部候选：`±0.02` 至 `±0.10 m`，以不超过 `0.015 m`
-的间隔把每个中间完整 footprint 投影到同一份 local 快照。候选从原路径平滑偏出并回接，
-任何 lethal、unknown、越界或非有限值都会淘汰该候选；启用候选时线速度额外限为
-`elastic_max_vel_x`（默认 `0.07 m/s`）、角速度额外限为 `elastic_max_vel_theta`
+当且仅当当前 footprint 完全安全、但前视原全局路径命中 254/255 或达到
+`elastic_activation_cost`（默认 raw `220`）时，模式 2 会先在 `0.25 m` 前方生成左右
+带状局部候选：`±0.02` 至 `±0.12 m`。它以不超过 `0.015 m` 的间隔把每个中间完整
+footprint 投影到同一份 local 快照。候选从原路径平滑偏出并回接；任何 lethal、unknown、
+越界或非有限值都会淘汰。所有安全候选先按**最高 footprint raw 代价**、再按平均代价排名，
+所以激活的是局部代价地图中净空最大的带；完全相同才偏好较小横移量。启用候选时线速度额外
+限为 `elastic_max_vel_x`（默认 `0.07 m/s`）、角速度额外限为 `elastic_max_vel_theta`
 （默认 `0.30 rad/s`）。候选使用变形后路径的切线，段内以平移 `0.015 m` 和旋转
 `0.05 rad` 的更严格采样数同时插值位置/朝向；实际 Twist 仍必须通过既有 0.40 秒扫掠。
-若两侧均不可行，才返回 `false` 请求全局重规划。当前 footprint 已接触、TF/代价图异常
-时不会尝试弹性路径，仍保持零速失败关闭。合并 master costmap 不保留 StaticLayer 与
-ObstacleLayer 来源，因此第一版不按来源放宽任一规则。
+如果前视高代价却没有低于阈值的安全带，规划器立即返回 `false` 请求全局重规划；它不等待
+局部搜索计时。当前 footprint 已接触、TF/代价图异常时不会尝试弹性路径，仍保持零速失败关闭。
+合并 master costmap 不保留 StaticLayer 与 ObstacleLayer 来源，因此不按来源放宽任一规则。
 
 move_base 周期性送来 global plan 时，规划器会对整段路线按弧长取 7 个样本，逐个比较
 位置（最多 `0.04 m`）和切线角（最多 `0.20 rad`）；全段等价才保留已验证的局部带与

@@ -23,7 +23,10 @@
 
 - 新增回归用例：回调在等待期间到达时，`wait_for_fresh_qr()` 返回识别内容且不等到搜索上限；
   以及朝向导航期间收到二维码时不进入搜索等待。
-- 本机仅做 Python 语法和无 ROS 测试发现；按仓库约束，完整 Python 2 ROS 测试与构建须在小车 Ubuntu 18.04 上完成。
+- 车端首轮测试补齐该朝向期间用例所需的 `qr_observation_numbers` 最小状态，避免 mock
+  在成功日志阶段缺少生产属性。
+- 本机标准库回归通过 25 项（14 项 ROS 依赖项按设计跳过）；车端 Ubuntu 18.04 / Melodic
+  的 `run_tests_ucar_2026` 已通过：`32 tests, 0 errors, 0 failures, 0 skipped`。本验证未启动 ROS 或车辆。
 
 ## 已知限制
 

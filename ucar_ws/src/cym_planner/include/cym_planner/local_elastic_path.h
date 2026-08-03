@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 
 namespace cym_planner
 {
@@ -52,6 +53,57 @@ inline bool elasticSearchTimerSurvivesEquivalentPlan(bool search_active,
                                                      bool plan_equivalent)
 {
     return search_active && plan_equivalent;
+}
+
+// Candidate ranking is deliberately based on the worst footprint cell first:
+// lower raw inflation cost means more clearance from every local obstacle.
+// The mean cost then breaks ties, while the smallest offset is only a final
+// tie-breaker so a harmless path is not needlessly deformed.
+struct ElasticClearanceScore
+{
+    ElasticClearanceScore()
+        : valid(false),
+          maximum_cost(0),
+          total_cost(0),
+          sampled_cells(0),
+          absolute_offset(0.0)
+    {
+    }
+
+    bool valid;
+    unsigned int maximum_cost;
+    std::uint64_t total_cost;
+    std::uint64_t sampled_cells;
+    double absolute_offset;
+};
+
+inline bool elasticCandidateHasMoreClearance(
+    const ElasticClearanceScore& candidate,
+    const ElasticClearanceScore& reference)
+{
+    if(!candidate.valid || candidate.sampled_cells == 0 ||
+       !std::isfinite(candidate.absolute_offset))
+    {
+        return false;
+    }
+    if(!reference.valid || reference.sampled_cells == 0 ||
+       !std::isfinite(reference.absolute_offset))
+    {
+        return true;
+    }
+    if(candidate.maximum_cost != reference.maximum_cost)
+        return candidate.maximum_cost < reference.maximum_cost;
+
+    // Cross multiplication avoids a floating-point average and remains far
+    // below uint64_t overflow for the 1 x 1 m local costmap.
+    const std::uint64_t candidate_total =
+        candidate.total_cost * reference.sampled_cells;
+    const std::uint64_t reference_total =
+        reference.total_cost * candidate.sampled_cells;
+    if(candidate_total != reference_total)
+        return candidate_total < reference_total;
+
+    return candidate.absolute_offset < reference.absolute_offset;
 }
 
 }  // namespace cym_planner

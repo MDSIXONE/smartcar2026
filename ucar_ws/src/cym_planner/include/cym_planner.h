@@ -13,6 +13,7 @@
 #include <tf2_ros/buffer.h>
 
 #include "cym_planner/escape_recovery.h"
+#include "cym_planner/local_elastic_path.h"
 #include "cym_planner/planner_tuning.h"
 
 #include <string>
@@ -45,20 +46,28 @@ private:
             : blocked(false),
               recoverable(false),
               current_footprint_blocked(false),
+              clearance_limited(false),
               hold(false),
               contact_count(0),
               contact_world_x(0.0),
-              contact_world_y(0.0)
+              contact_world_y(0.0),
+              maximum_cost(0),
+              total_cost(0),
+              sampled_cells(0)
         {
         }
 
         bool blocked;
         bool recoverable;
         bool current_footprint_blocked;
+        bool clearance_limited;
         bool hold;
         unsigned int contact_count;
         double contact_world_x;
         double contact_world_y;
+        unsigned int maximum_cost;
+        std::uint64_t total_cost;
+        std::uint64_t sampled_cells;
     };
 
     void carryModeCallback(const std_msgs::Bool::ConstPtr& message);
@@ -82,13 +91,15 @@ private:
         int start_index,
         const geometry_msgs::PoseStamped& current_pose,
         const costmap_2d::Costmap2D& local_costmap,
-        cv::Mat& map_image);
-    bool elasticCandidateIsSafe(
+        cv::Mat& map_image,
+        unsigned int maximum_accepted_cost);
+    bool elasticCandidateClearance(
         const std::vector<geometry_msgs::PoseStamped>& candidate,
         int start_index,
         int end_index,
         const costmap_2d::Costmap2D& local_costmap,
-        cv::Mat& map_image);
+        cv::Mat& map_image,
+        ElasticClearanceScore& score);
     FootprintBlockage checkPathBlocked(
         const costmap_2d::Costmap2D& local_costmap,
         cv::Mat& map_image);
@@ -148,6 +159,7 @@ private:
     double elastic_max_vel_x_;
     double elastic_max_vel_theta_;
     double elastic_search_timeout_;
+    int elastic_activation_cost_;
 
     std::vector<geometry_msgs::PoseStamped> global_plan_;
     int target_index_;
