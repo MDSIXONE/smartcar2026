@@ -1924,6 +1924,11 @@ catkin_test_results --verbose build/test_results/ucar_2026
 `map ← laser` 前向射线到中间墙边界的距离相差不超过 `ray_range_agreement_m`（默认 `0.30 m`），
 否则该类别不记入完成数。
 
+OCR 水平居中不再通过 `move_base` 的同位置 yaw 目标实现，而是由任务在停车后按 OCR 框中心误差
+（P）与相邻抓拍误差变化（D）直接发布受限角速度，并用 `odom → base_link` 的实际有向 yaw 变化确认完成；未在
+`ocr_alignment_turn_timeout` 内达到目标变化会零速中止。使用镜像 OCR 帧时，任务会自动反转像素误差
+到车体角速度的符号，不能手工再反向设置 `ocr_alignment_kp`。
+
 部署时需额外同步本次纯函数回归文件，随后仅在小车 Ubuntu 18.04 上构建和测试：
 
 ```powershell

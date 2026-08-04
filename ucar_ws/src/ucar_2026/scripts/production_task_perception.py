@@ -28,6 +28,30 @@ def horizontal_pixel_error(detection, image_width):
     return (left + width / 2.0) - float(image_width) / 2.0
 
 
+def alignment_angular_speed(
+        error_pixels, kp, kd, maximum_speed, image_is_mirrored,
+        previous_error_pixels=None, sample_seconds=None):
+    """Return a bounded PD yaw rate that moves an OCR box to centre.
+
+    The ROS camera's native image convention is used by the historical
+    controller.  When the helper mirrors the image before OCR, the horizontal
+    error is reversed and the yaw command must reverse with it.
+    """
+    error = float(error_pixels)
+    if image_is_mirrored:
+        error = -error
+    maximum = abs(float(maximum_speed))
+    derivative = 0.0
+    if previous_error_pixels is not None and sample_seconds is not None:
+        previous = float(previous_error_pixels)
+        if image_is_mirrored:
+            previous = -previous
+        elapsed = max(0.05, float(sample_seconds))
+        derivative = (error - previous) / elapsed
+    command = -float(kp) * error - float(kd) * derivative
+    return max(-maximum, min(maximum, command))
+
+
 def is_navigation_ocr_candidate(response, minimum_confidence):
     """Return whether a moving OCR response is strong enough to stop for."""
     if not isinstance(response, dict) or not response.get("ok"):

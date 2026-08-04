@@ -16,6 +16,7 @@ if SCRIPT_ROOT not in sys.path:
     sys.path.insert(0, SCRIPT_ROOT)
 
 from production_task_perception import (  # noqa: E402
+    alignment_angular_speed,
     front_scan_distance,
     forward_ray_wall_intersection,
     horizontal_pixel_error,
@@ -73,6 +74,26 @@ class ProductionTaskPerceptionTest(unittest.TestCase):
     def test_horizontal_error_uses_box_and_image_centres(self):
         detection = {"bbox": (350, 20, 40, 30)}
         self.assertEqual(horizontal_pixel_error(detection, 640), 50.0)
+
+    def test_mirrored_ocr_error_reverses_alignment_yaw_direction(self):
+        self.assertAlmostEqual(
+            alignment_angular_speed(-40.0, 0.0025, 0.00035, 0.22, False),
+            0.10)
+        self.assertAlmostEqual(
+            alignment_angular_speed(-40.0, 0.0025, 0.00035, 0.22, True),
+            -0.10)
+        self.assertAlmostEqual(
+            alignment_angular_speed(999.0, 0.0025, 0.00035, 0.22, True),
+            0.22)
+
+    def test_derivative_term_brakes_a_fast_error_reversal(self):
+        # Mirrored frame: -176 px means positive control error.  A new
+        # +45 px observation after 0.7 s has crossed centre, so D counters
+        # the proportional term instead of preserving maximum turn speed.
+        speed = alignment_angular_speed(
+            45.0, 0.0025, 0.00035, 0.22, True,
+            previous_error_pixels=-176.0, sample_seconds=0.7)
+        self.assertGreater(speed, 0.0)
 
     def test_front_scan_uses_median_of_finite_forward_beams(self):
         self.assertAlmostEqual(

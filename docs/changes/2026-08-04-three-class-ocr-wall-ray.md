@@ -39,3 +39,16 @@ OCR 框居中并取得新鲜前向雷达后，将 `map ← laser` 的前向射�
   验证三类记录流程。
 - 任务异常路径关闭相机/OCR；随后已执行零速、停止车端 launch 并停止 WSL Master。原始结果在
   `/home/ucar/.ros/ucar_2026_observations/run_20260804_190725/`。
+
+## 2026-08-04 居中控制修正
+
+- 根因是前视点模式的 `move_base` 可将“当前位置、仅改变 yaw”的目标按位置到达成功处理，而任务
+  原先没有验证实际 yaw；镜像后的 OCR 像素误差也没有反向。
+- `rotate_for_pixel_error()` 现在是离散图像反馈的 PD 控制：P 项按框中心误差给角速度，D 项按相邻
+  抓拍误差变化抑制过冲；转动仍直接发布受限角速度，并用 `odom → base_link` 的实际有向 yaw 增量
+  完成校验。到达 `ocr_alignment_turn_timeout` 前未取得目标增量会安全中止并零速。
+- `camera_mirror=true` 时像素误差方向已反转。`ocr_alignment_kp`、`ocr_alignment_kd`、
+  `ocr_alignment_step_seconds`、
+  `ocr_alignment_yaw_tolerance_rad` 与 `ocr_alignment_turn_timeout` 都可在 launch 中调整。
+- 本机完整回归 55 项通过（30 项无 ROS 跳过）；小车 Ubuntu 18.04 感知回归 12/12、任务回归
+  42/42 通过。未自动发起第二次实车任务。

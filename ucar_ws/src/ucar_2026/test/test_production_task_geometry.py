@@ -864,19 +864,20 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         events = []
         self.task.use_ros_camera_for_ocr = True
         self.task.target_scan_events = []
+        self.task.observations = []
         self.task.start_ros_camera_and_wait = (
             lambda label: events.append(("camera_start", label)))
         self.task.stop_ros_camera_streaming = (
             lambda required=True: events.append(("camera_stop", required)))
         self.task.rotate_full_revolution_for_ocr = (
-            lambda _label: (None, 2.0 * math.pi))
+            lambda _label, candidate_handler=None: (None, 2.0 * math.pi))
         self.task.save_observation_summary = lambda: events.append("save")
         self.task.publish_state = lambda state: events.append(("state", state))
 
         self.assertIsNone(self.task.scan_production_point(1, 52, 12, "target"))
         self.assertEqual(
             self.task.target_scan_events[0]["outcome"],
-            "no_ocr_after_full_turn")
+            "ocr_full_turn_complete")
         self.assertEqual(events[1][0], "camera_start")
         self.assertEqual(events[-1], ("camera_stop", True))
 
@@ -886,29 +887,48 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
             "image_path": "turn.png",
             "capture_requested_at": "now",
             "capture_requested_pose_map": [1.0, 2.0, 0.3],
-            "detection": {"text": "label", "confidence": 91.0},
+            "detection": {"text": u"日用品加工车间", "confidence": 91.0},
         }
         self.task.use_ros_camera_for_ocr = False
         self.task.target_scan_events = []
         self.task.observations = []
         self.task.publish_state = lambda _state: None
-        self.task.rotate_full_revolution_for_ocr = (
-            lambda _label: (response, 1.2))
+        def turn_one_circle(_label, candidate_handler=None):
+            self.assertIsNotNone(candidate_handler)
+            self.assertTrue(candidate_handler(response, 1.2))
+            return None, 2.0 * math.pi
+
+        self.task.rotate_full_revolution_for_ocr = turn_one_circle
         self.task.restore_ocr_capture_yaw = (
             lambda _response, _label: calls.append("restore"))
+        self.task.stop_motion = lambda: None
+        self.task.wait_for_chassis_stop = lambda _context: None
 
         def observe(point_number, _label):
             calls.append(("observe", point_number))
-            return {"aligned": True, "wall_point_number": 297}
+            return {
+                "aligned": True,
+                "wall_point_number": 297,
+                "wall_point_coordinate": [-0.75, 1.5],
+                "text": u"日用品加工车间",
+            }
 
         self.task.observe_wall = observe
         self.task.save_observation_summary = lambda: calls.append("save")
-        observation = self.task.scan_production_point(1, 52, 12, "target")
+        self.assertIsNone(
+            self.task.scan_production_point(1, 52, 12, "target"))
 
         self.assertEqual(calls[0], "restore")
         self.assertEqual(calls[1], ("observe", 12))
-        self.assertEqual(observation["turn_detection_pose_map"], [1.0, 2.0, 0.3])
+        self.assertEqual(calls[2], "save")
+        self.assertEqual(calls[3], "restore")
+        self.assertEqual(
+            self.task.observations[0]["turn_detection_pose_map"],
+            [1.0, 2.0, 0.3])
         self.assertEqual(self.task.target_scan_events[0]["wall_point_number"], 297)
+        self.assertEqual(
+            self.task.target_scan_events[0]["outcome"],
+            "processing_category_recorded")
 
     def test_restore_capture_yaw_precedes_alignment_recapture(self):
         calls = []
@@ -967,28 +987,21 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.assertEqual(
             task["capture_requested_pose_map"], [1.0, 2.0, 0.5])
 
-    def test_alignment_uses_move_base_then_stop_gate(self):
+    def test_alignment_uses_measured_yaw_and_reverses_mirrored_image(self):
         calls = []
         self.task.ocr_alignment_max_speed = 0.22
         self.task.ocr_alignment_kp = 0.0025
+        self.task.ocr_alignment_kd = 0.00035
         self.task.ocr_alignment_step_seconds = 0.30
-        self.task.current_map_pose = lambda _context: (1.0, 2.0, 0.5)
-        def capture_navigation(
-                x, y, yaw, label, require_plan,
-                require_action_success=False):
-            calls.append((
-                "navigate", x, y, yaw, label, require_plan,
-                require_action_success))
-
-        self.task.navigate_coordinates = capture_navigation
-        self.task.wait_for_chassis_stop = (
-            lambda context: calls.append(("stop_gate", context)))
-        self.task.rotate_for_pixel_error(40.0, "test")
-        self.assertEqual(calls[0][0], "navigate")
-        self.assertEqual(calls[0][1:3], (1.0, 2.0))
-        self.assertFalse(calls[0][5])
-        self.assertTrue(calls[0][6])
-        self.assertEqual(calls[1], ("stop_gate", "test protected alignment"))
+        self.task.camera_mirror = True
+        self.task.rotate_in_place_for_yaw = (
+            lambda speed, delta, context: calls.append(
+                (speed, delta, context)))
+        self.task.rotate_for_pixel_error(-40.0, "test")
+        self.assertEqual(len(calls), 1)
+        self.assertAlmostEqual(calls[0][0], -0.10)
+        self.assertAlmostEqual(calls[0][1], 0.03)
+        self.assertEqual(calls[0][2], "test protected alignment")
 
 
 if __name__ == "__main__":

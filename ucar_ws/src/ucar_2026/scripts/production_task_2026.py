@@ -62,6 +62,7 @@ from production_task_geometry import (
     require_points,
 )
 from production_task_perception import (
+    alignment_angular_speed,
     front_scan_distance,
     forward_ray_wall_intersection,
     horizontal_pixel_error,
@@ -201,12 +202,18 @@ class ProductionTask2026(object):
             rospy.get_param("~ocr_alignment_tolerance_px", 18.0))
         self.ocr_alignment_kp = float(
             rospy.get_param("~ocr_alignment_kp", 0.0025))
+        self.ocr_alignment_kd = float(
+            rospy.get_param("~ocr_alignment_kd", 0.00035))
         self.ocr_alignment_max_speed = abs(float(
             rospy.get_param("~ocr_alignment_max_speed", 0.22)))
         self.ocr_alignment_attempts = max(
             1, int(rospy.get_param("~ocr_alignment_attempts", 6)))
         self.ocr_alignment_step_seconds = float(
             rospy.get_param("~ocr_alignment_step_seconds", 0.30))
+        self.ocr_alignment_yaw_tolerance = float(
+            rospy.get_param("~ocr_alignment_yaw_tolerance_rad", 0.01))
+        self.ocr_alignment_turn_timeout = float(
+            rospy.get_param("~ocr_alignment_turn_timeout", 2.5))
         self.front_scan_half_angle = math.radians(float(
             rospy.get_param("~front_scan_half_angle_deg", 3.0)))
         self.front_scan_timeout = float(
@@ -254,6 +261,21 @@ class ProductionTask2026(object):
         if self.ocr_alignment_max_speed <= 0.0:
             raise TaskDefinitionError(
                 "ocr_alignment_max_speed must be positive")
+        if (not is_finite(self.ocr_alignment_kp) or
+                self.ocr_alignment_kp <= 0.0):
+            raise TaskDefinitionError("ocr_alignment_kp must be positive")
+        if (not is_finite(self.ocr_alignment_kd) or
+                self.ocr_alignment_kd < 0.0):
+            raise TaskDefinitionError("ocr_alignment_kd must be non-negative")
+        if self.ocr_alignment_step_seconds <= 0.0:
+            raise TaskDefinitionError(
+                "ocr_alignment_step_seconds must be positive")
+        if self.ocr_alignment_yaw_tolerance <= 0.0:
+            raise TaskDefinitionError(
+                "ocr_alignment_yaw_tolerance must be positive")
+        if self.ocr_alignment_turn_timeout <= 0.0:
+            raise TaskDefinitionError(
+                "ocr_alignment_turn_timeout must be positive")
         ocr_scan_values = (
             self.ocr_scan_rotation_speed,
             self.ocr_scan_poll_period,
@@ -1048,21 +1070,62 @@ class ProductionTask2026(object):
             self.ocr_log_handle = None
         rospy.loginfo("PRODUCTION_NATIVE_OCR_CLOSED")
 
-    def rotate_for_pixel_error(self, error_pixels, context):
-        speed = max(
-            -self.ocr_alignment_max_speed,
-            min(
-                self.ocr_alignment_max_speed,
-                -self.ocr_alignment_kp * float(error_pixels)))
-        pose = self.current_map_pose(context + " alignment start")
-        target_yaw = normalize_angle(
-            pose[2] + speed * self.ocr_alignment_step_seconds)
-        self.navigate_coordinates(
-            pose[0], pose[1], target_yaw,
-            context + " protected alignment",
-            require_plan=False,
-            require_action_success=True)
-        self.wait_for_chassis_stop(context + " protected alignment")
+    def rotate_for_pixel_error(
+            self, error_pixels, context, previous_error_pixels=None,
+            sample_seconds=None):
+        speed = alignment_angular_speed(
+            error_pixels, self.ocr_alignment_kp, self.ocr_alignment_kd,
+            self.ocr_alignment_max_speed, self.camera_mirror,
+            previous_error_pixels, sample_seconds)
+        target_delta = abs(speed) * self.ocr_alignment_step_seconds
+        self.rotate_in_place_for_yaw(
+            speed, target_delta, context + " protected alignment")
+
+    def rotate_in_place_for_yaw(self, signed_speed, target_delta, context):
+        """Apply a measured small yaw correction without a move_base goal.
+
+        Point-mode move_base can accept a same-position goal without reaching
+        its requested orientation.  OCR alignment therefore owns this short
+        rotation and only succeeds after odometry proves the signed yaw change.
+        """
+        speed = float(signed_speed)
+        target = abs(float(target_delta))
+        if target <= self.ocr_alignment_yaw_tolerance:
+            return
+        direction = 1.0 if speed > 0.0 else -1.0
+        self.move_base.cancel_all_goals()
+        self.stop_motion()
+        self.wait_for_chassis_stop(context + " start")
+        previous_yaw = self.current_odom_yaw(context + " start")
+        progress = 0.0
+        deadline = (
+            rospy.Time.now() +
+            rospy.Duration(self.ocr_alignment_turn_timeout))
+        rate = rospy.Rate(self.rotation_control_rate)
+        command = Twist()
+        command.angular.z = speed
+        try:
+            while not rospy.is_shutdown() and rospy.Time.now() < deadline:
+                self.require_safe()
+                current_yaw = self.current_odom_yaw(context)
+                progress += positive_turn_increment(
+                    previous_yaw, current_yaw, direction)
+                previous_yaw = current_yaw
+                if progress >= target - self.ocr_alignment_yaw_tolerance:
+                    self.stop_motion()
+                    self.wait_for_chassis_stop(context + " complete")
+                    rospy.loginfo(
+                        "PRODUCTION_OCR_ALIGNMENT_TURN context=%s "
+                        "command_speed=%.3f requested=%.3f actual=%.3f",
+                        context, speed, target, progress)
+                    return
+                self.cmd_vel_pub.publish(command)
+                rate.sleep()
+        finally:
+            self.stop_motion()
+        raise MissionAbort(
+            "%s did not reach %.3f rad of measured yaw within %.1f s" %
+            (context, target, self.ocr_alignment_turn_timeout))
 
     def wait_for_chassis_stop(self, context):
         """Require fresh low-velocity odometry before any alignment rotation."""
@@ -1841,6 +1904,8 @@ class ProductionTask2026(object):
             observation_label = "point_%03d" % route_point_number
         self.stop_motion()
         previous_error = None
+        previous_capture_monotonic = None
+        divergence_count = 0
         best_detection = None
         best_path = ""
         aligned = False
@@ -1850,6 +1915,7 @@ class ProductionTask2026(object):
         for attempt in range(1, self.ocr_alignment_attempts + 1):
             self.require_safe()
             response = self.capture_ocr(observation_label, attempt)
+            capture_monotonic = time.monotonic()
             image_path = response["image_path"]
             attempt_image_paths.append(image_path)
             image_width = int(response["width"])
@@ -1872,14 +1938,23 @@ class ProductionTask2026(object):
             if abs(error) <= self.ocr_alignment_tolerance_px:
                 aligned = True
                 break
-            if (
-                    previous_error is not None and
+            if (previous_error is not None and
                     abs(error) > abs(previous_error) * 1.35):
+                divergence_count += 1
+            else:
+                divergence_count = 0
+            if divergence_count >= 2:
                 raise MissionAbort(
-                    "OCR alignment moved away from target at point %d; "
-                    "check camera yaw sign" % route_point_number)
+                    "OCR PD alignment diverged twice at point %d; "
+                    "check camera yaw sign and frame freshness" %
+                    route_point_number)
+            elapsed = (
+                capture_monotonic - previous_capture_monotonic
+                if previous_capture_monotonic is not None else None)
+            self.rotate_for_pixel_error(
+                error, observation_label, previous_error, elapsed)
             previous_error = error
-            self.rotate_for_pixel_error(error, observation_label)
+            previous_capture_monotonic = capture_monotonic
 
         observation = {
             "route_point_number": int(route_point_number),
