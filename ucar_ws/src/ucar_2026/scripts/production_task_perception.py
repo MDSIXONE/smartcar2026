@@ -43,6 +43,28 @@ def is_navigation_ocr_candidate(response, minimum_confidence):
     return bool(text) and confidence >= float(minimum_confidence)
 
 
+def normalize_production_category(text):
+    """Return the one allowed production category named by OCR, if any.
+
+    The OCR classifier may return either the short name or the full workshop
+    label.  Keep this deliberately narrow: unrelated text must not stop a
+    rotating vehicle or become a mission result.
+    """
+    if text is None:
+        return None
+    try:
+        value = text.strip()
+    except AttributeError:
+        return None
+    for keyword, category in ((u"日用品", u"日用品"),
+                              (u"食品", u"食品"),
+                              (u"电子产品", u"电子产品"),
+                              (u"电子", u"电子产品")):
+        if keyword in value:
+            return category
+    return None
+
+
 def odom_velocity_is_stopped(velocity, epsilon):
     """Return whether planar odometry velocity is inside the stop gate."""
     if velocity is None or len(velocity) != 3:
@@ -133,6 +155,46 @@ def projected_wall_hit(pose, front_distance, lidar_forward_offset=0.0):
     )
 
 
+def forward_ray_wall_intersection(pose, wall_points):
+    """Intersect a forward lidar ray with the rectangular middle boundary.
+
+    The immutable grid supplies boundary reference points on all four sides.
+    This avoids treating the noisy front range endpoint as an arbitrary map
+    point.  The caller still checks that the measured range agrees with the
+    predicted wall distance before accepting a result.
+    """
+    if not wall_points:
+        return None
+    try:
+        x_value, y_value, yaw = [float(value) for value in pose]
+        xs = [float(point[0]) for point in wall_points.values()]
+        ys = [float(point[1]) for point in wall_points.values()]
+    except (TypeError, ValueError, IndexError):
+        return None
+    if not all(is_finite(value) for value in (x_value, y_value, yaw)):
+        return None
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    dx, dy = math.cos(yaw), math.sin(yaw)
+    candidates = []
+    epsilon = 1e-9
+    if abs(dx) > epsilon:
+        for boundary_x in (min_x, max_x):
+            distance = (boundary_x - x_value) / dx
+            hit_y = y_value + distance * dy
+            if distance > epsilon and min_y - epsilon <= hit_y <= max_y + epsilon:
+                candidates.append((distance, (boundary_x, hit_y)))
+    if abs(dy) > epsilon:
+        for boundary_y in (min_y, max_y):
+            distance = (boundary_y - y_value) / dy
+            hit_x = x_value + distance * dx
+            if distance > epsilon and min_x - epsilon <= hit_x <= max_x + epsilon:
+                candidates.append((distance, (hit_x, boundary_y)))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: item[0])
+
+
 def nearest_numbered_point(hit, numbered_points):
     """Return ``(number, coordinate, error)`` for the nearest candidate."""
     if not numbered_points:
@@ -163,3 +225,21 @@ def select_three_observations(observations):
             float(item.get("confidence", -1.0)),
             -float(item.get("wall_match_error_m", float("inf")))),
         reverse=True)[:3]
+
+
+def select_three_processing_observations(observations):
+    """Choose one accepted result per requested workshop category."""
+    strongest = {}
+    for observation in observations:
+        category = normalize_production_category(
+            observation.get("processing_category"))
+        if category is None or observation.get("wall_point_number") is None:
+            continue
+        previous = strongest.get(category)
+        if (previous is None or
+                float(observation.get("confidence", -1.0)) >
+                float(previous.get("confidence", -1.0))):
+            strongest[category] = observation
+    return sorted(strongest.values(),
+                  key=lambda item: (item.get("processing_category", u""),
+                                    -float(item.get("confidence", -1.0))))

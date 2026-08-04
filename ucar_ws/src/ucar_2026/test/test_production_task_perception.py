@@ -17,13 +17,16 @@ if SCRIPT_ROOT not in sys.path:
 
 from production_task_perception import (  # noqa: E402
     front_scan_distance,
+    forward_ray_wall_intersection,
     horizontal_pixel_error,
     is_navigation_ocr_candidate,
     nearest_numbered_point,
+    normalize_production_category,
     odom_velocity_is_stopped,
     projected_wall_hit,
     select_alignment_detection,
     select_three_observations,
+    select_three_processing_observations,
 )
 
 
@@ -81,6 +84,38 @@ class ProductionTaskPerceptionTest(unittest.TestCase):
             hit, {297: (0.0, 1.5), 313: (2.25, -0.5)})
         self.assertEqual(match[0], 297)
         self.assertAlmostEqual(match[2], 0.01, places=6)
+
+    def test_production_categories_are_a_strict_three_class_whitelist(self):
+        self.assertEqual(normalize_production_category(u"食品加工车间"), u"食品")
+        self.assertEqual(normalize_production_category(u"日用品"), u"日用品")
+        self.assertEqual(normalize_production_category(u"电子产品加工车间"),
+                         u"电子产品")
+        self.assertIsNone(normalize_production_category(u"机械加工车间"))
+
+    def test_forward_ray_hits_known_boundary_not_noisy_range_endpoint(self):
+        walls = {154: (-2.5, 1.5), 164: (2.5, 1.5),
+                 165: (-2.5, -0.5), 175: (2.5, -0.5)}
+        distance, hit = forward_ray_wall_intersection(
+            (0.0, 0.0, math.pi / 2.0), walls)
+        self.assertAlmostEqual(distance, 1.5, places=6)
+        self.assertAlmostEqual(hit[0], 0.0, places=6)
+        self.assertAlmostEqual(hit[1], 1.5, places=6)
+
+    def test_processing_results_deduplicate_categories(self):
+        observations = [
+            {"processing_category": u"日用品", "wall_point_number": 297,
+             "confidence": 60},
+            {"processing_category": u"日用品", "wall_point_number": 298,
+             "confidence": 90},
+            {"processing_category": u"食品", "wall_point_number": 313,
+             "confidence": 80},
+            {"processing_category": u"电子产品", "wall_point_number": 452,
+             "confidence": 70},
+        ]
+        selected = select_three_processing_observations(observations)
+        self.assertEqual([item["processing_category"] for item in selected],
+                         [u"日用品", u"电子产品", u"食品"])
+        self.assertEqual(selected[0]["wall_point_number"], 298)
 
     def test_three_results_deduplicate_wall_points_by_confidence(self):
         observations = [

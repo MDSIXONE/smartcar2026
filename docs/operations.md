@@ -1915,6 +1915,32 @@ catkin_test_results --verbose build/test_results/ucar_2026
 
 ## 2026 全程前视点回退
 
+### 2026-08-04：三类 OCR 墙边界定位覆盖说明
+
+生产目标仍为 `12 → 23 → 14 → 25 → 16`。每个到达点会完成一整圈静止 OCR 扫描；只有
+`日用品`、`食品`、`电子产品` 会触发停车、居中和前向雷达测量，已保存类别或其它文字不停车。
+每个新类别会立即在任务终端打印 `PRODUCTION_CATEGORY_RECORDED`，其中含路线点、墙参考编号和
+地图坐标；`observations.json` 与结果话题字段为 `recognized_categories`。前向测距必须与
+`map ← laser` 前向射线到中间墙边界的距离相差不超过 `ray_range_agreement_m`（默认 `0.30 m`），
+否则该类别不记入完成数。
+
+部署时需额外同步本次纯函数回归文件，随后仅在小车 Ubuntu 18.04 上构建和测试：
+
+```powershell
+scp ucar_ws/src/ucar_2026/scripts/production_task_2026.py `
+  ucar_ws/src/ucar_2026/scripts/production_task_perception.py `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/scripts/"
+scp ucar_ws/src/ucar_2026/test/test_production_task_perception.py `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/test/"
+scp ucar_ws/src/ucar_2026/launch/2026.launch `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/launch/"
+```
+
+不要把多个源文件上传到包根目录。随后使用本文件既有的动态 `<MASTER_IP>` 环境设置运行
+`catkin_make --pkg ucar_2026` 和
+`run_melodic_python2.sh ~/ucar_ws/src/ucar_2026/test/test_production_task_perception.py -v`。部署、构建
+和测试不启动 ROS、不发布速度；实车试跑仍需用户重新确认起点和安全门。
+
 当前自动任务在安全门通过、任一 `move_base` 目标前，等待 CymPlanner 连接
 `/ucar/navigation_mode` 并锁存连续发布三次 `point`。因此起点到 52、二维码朝向、
 `12 → 23 → 14 → 25 → 16` 和 OCR 居中复拍的导航目标都使用前视点模式；二维码/OCR 的

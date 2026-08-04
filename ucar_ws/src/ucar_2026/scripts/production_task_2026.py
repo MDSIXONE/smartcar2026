@@ -63,12 +63,13 @@ from production_task_geometry import (
 )
 from production_task_perception import (
     front_scan_distance,
+    forward_ray_wall_intersection,
     horizontal_pixel_error,
     is_navigation_ocr_candidate,
     nearest_numbered_point,
+    normalize_production_category,
     odom_velocity_is_stopped,
-    projected_wall_hit,
-    select_three_observations,
+    select_three_processing_observations,
     target_guard_scan_matches,
 )
 
@@ -214,6 +215,8 @@ class ProductionTask2026(object):
             rospy.get_param("~lidar_forward_offset_m", 0.0))
         self.wall_match_max_error = float(
             rospy.get_param("~wall_match_max_error_m", 0.30))
+        self.ray_range_agreement = float(
+            rospy.get_param("~ray_range_agreement_m", 0.30))
         # This is the same dynamically filtered source consumed by the
         # global obstacle layer.  It deliberately excludes static-map walls,
         # so a fixed field vertex cannot falsely skip a production target.
@@ -382,7 +385,7 @@ class ProductionTask2026(object):
             "success": bool(success),
             "reason": str(reason),
             "qr_codes": sorted(self.used_qr_codes),
-            "recognized_points": select_three_observations(
+            "recognized_categories": select_three_processing_observations(
                 self.observations),
             "result_file": (
                 os.path.join(self.run_directory, "observations.json")
@@ -565,17 +568,17 @@ class ProductionTask2026(object):
 
         self.stop_native_ocr()
         self.ensure_ros_camera_released()
-        selected = select_three_observations(self.observations)
+        selected = select_three_processing_observations(self.observations)
         self.save_observation_summary()
         if len(selected) < 3:
             raise MissionAbort(
-                "only %d/3 distinct OCR wall points were recognized" %
+                "only %d/3 distinct processing categories were recognized" %
                 len(selected))
         self.stop_motion()
         self.publish_state("SUCCEEDED")
         self.publish_result(
             True,
-            "saved three OCR wall points; route completed through point %d" %
+            "saved three processing categories; route completed through point %d" %
             self.production_route_numbers[-1])
 
     def scan_observation_point(self, observation_number):
@@ -1384,14 +1387,83 @@ class ProductionTask2026(object):
 
     def scan_production_point(
             self, leg_index, start_number, point_number, target_label):
-        """Search one arrived target for at most 360 degrees of OCR."""
+        """Complete one stationary 360-degree scan and record new classes."""
         scan_label = "PRODUCTION_OCR_TURN_%03d" % point_number
         self.publish_state(scan_label)
         if self.use_ros_camera_for_ocr:
             self.start_ros_camera_and_wait(scan_label)
         try:
-            response, turn_progress = self.rotate_full_revolution_for_ocr(
-                scan_label)
+            recorded_categories = set(
+                item["processing_category"]
+                for item in select_three_processing_observations(
+                    self.observations))
+
+            def handle_candidate(response, turn_progress):
+                detection = response["detection"]
+                category = normalize_production_category(detection.get("text"))
+                if category is None or category in recorded_categories:
+                    return False
+                self.stop_motion()
+                self.wait_for_chassis_stop(scan_label + " candidate")
+                self.restore_ocr_capture_yaw(response, scan_label)
+                observation_label = "%s_%s" % (
+                    scan_label, category.encode("utf-8"))
+                self.publish_state(observation_label)
+                observation = self.observe_wall(point_number, observation_label)
+                observation.update({
+                    "processing_category": category,
+                    "segment_index": int(leg_index),
+                    "segment_start_point_number": int(start_number),
+                    "segment_end_point_number": int(point_number),
+                    "turn_progress_radians": float(turn_progress),
+                    "turn_detection_image_path": response["image_path"],
+                    "turn_detection": detection,
+                    "turn_detection_capture_requested_at":
+                        response["capture_requested_at"],
+                    "turn_detection_pose_map":
+                        list(response["capture_requested_pose_map"]),
+                })
+                event = {
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "target_point_number": int(point_number),
+                    "segment_index": int(leg_index),
+                    "segment_start_point_number": int(start_number),
+                    "turn_progress_radians": float(turn_progress),
+                    "processing_category": category,
+                    "text": detection["text"],
+                    "confidence": float(detection["confidence"]),
+                    "observation_aligned": bool(observation["aligned"]),
+                    "wall_point_number": observation.get("wall_point_number"),
+                }
+                if observation["aligned"] and observation.get("wall_point_number") is not None:
+                    recorded_categories.add(category)
+                    self.observations.append(observation)
+                    event["outcome"] = "processing_category_recorded"
+                    rospy.loginfo(
+                        "PRODUCTION_CATEGORY_RECORDED category=%s route_point=%d "
+                        "wall_point=%d coordinate=(%.3f,%.3f) text=%s",
+                        category.encode("utf-8"), point_number,
+                        observation["wall_point_number"],
+                        observation["wall_point_coordinate"][0],
+                        observation["wall_point_coordinate"][1],
+                        json.dumps(observation["text"], ensure_ascii=True))
+                else:
+                    event["outcome"] = "processing_category_rejected"
+                    rospy.logwarn(
+                        "PRODUCTION_CATEGORY_REJECTED category=%s route_point=%d "
+                        "aligned=%s range_residual=%s",
+                        category.encode("utf-8"), point_number,
+                        observation["aligned"],
+                        str(observation.get("range_residual_m")))
+                self.target_scan_events.append(event)
+                self.save_observation_summary()
+                # Alignment changes yaw.  Return to the actual exposure yaw
+                # before resuming so the remaining scan covers one real circle.
+                self.restore_ocr_capture_yaw(response, scan_label + " resume")
+                return True
+
+            _response, turn_progress = self.rotate_full_revolution_for_ocr(
+                scan_label, candidate_handler=handle_candidate)
             event = {
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 "target_point_number": int(point_number),
@@ -1399,48 +1471,14 @@ class ProductionTask2026(object):
                 "segment_start_point_number": int(start_number),
                 "turn_progress_radians": float(turn_progress),
             }
-            if response is None:
-                event["outcome"] = "no_ocr_after_full_turn"
-                self.target_scan_events.append(event)
-                self.save_observation_summary()
-                rospy.loginfo(
-                    "PRODUCTION_OCR_TURN_EMPTY target=%d progress=%.3f; "
-                    "continuing to next target",
-                    point_number, turn_progress)
-                return None
-
-            detection = response["detection"]
-            self.restore_ocr_capture_yaw(response, scan_label)
-            observation_label = "%s_MATCH" % scan_label
-            self.publish_state(observation_label)
-            observation = self.observe_wall(point_number, observation_label)
-            observation.update({
-                "segment_index": int(leg_index),
-                "segment_start_point_number": int(start_number),
-                "segment_end_point_number": int(point_number),
-                "turn_progress_radians": float(turn_progress),
-                "turn_detection_image_path": response["image_path"],
-                "turn_detection": detection,
-                "turn_detection_capture_requested_at":
-                    response["capture_requested_at"],
-                "turn_detection_pose_map":
-                    list(response["capture_requested_pose_map"]),
-            })
-            event.update({
-                "outcome": "ocr_candidate",
-                "text": detection["text"],
-                "confidence": float(detection["confidence"]),
-                "observation_aligned": bool(observation["aligned"]),
-                "wall_point_number": observation.get("wall_point_number"),
-            })
-            self.observations.append(observation)
+            event["outcome"] = "ocr_full_turn_complete"
             self.target_scan_events.append(event)
             self.save_observation_summary()
             rospy.loginfo(
-                "PRODUCTION_OCR_TURN_MATCH target=%d text=%s progress=%.3f",
-                point_number, json.dumps(detection["text"], ensure_ascii=True),
-                turn_progress)
-            return observation
+                "PRODUCTION_OCR_TURN_COMPLETE target=%d progress=%.3f "
+                "categories=%d",
+                point_number, turn_progress, len(recorded_categories))
+            return None
         finally:
             if self.use_ros_camera_for_ocr:
                 self.stop_ros_camera_streaming(required=not rospy.is_shutdown())
@@ -1461,8 +1499,14 @@ class ProductionTask2026(object):
             require_plan=False, require_action_success=True)
         self.wait_for_chassis_stop(context + " restore capture yaw")
 
-    def rotate_full_revolution_for_ocr(self, label):
-        """Turn with nonblocking OCR and return its first valid candidate."""
+    def rotate_full_revolution_for_ocr(self, label, candidate_handler=None):
+        """Turn one circle; a handler may stop/process multiple candidates.
+
+        Without a handler this preserves the legacy first-candidate contract.
+        With one, only commanded turning contributes to progress: any stopped
+        OCR alignment/range pause extends the deadline and resets the yaw
+        baseline before the remaining arc resumes.
+        """
         self.move_base.cancel_all_goals()
         self.stop_motion()
         self.wait_for_chassis_stop(label + " start")
@@ -1484,14 +1528,17 @@ class ProductionTask2026(object):
         try:
             while not rospy.is_shutdown() and rospy.Time.now() < deadline:
                 self.require_safe()
+                current_yaw = self.current_odom_yaw(label)
+                progress += positive_turn_increment(
+                    previous_yaw, current_yaw, direction)
+                previous_yaw = current_yaw
+
                 if capture_task is not None and capture_task["done"].is_set():
                     completed_task = capture_task
                     capture_task = None
                     response = self.finish_async_motion_ocr(completed_task)
                     if is_navigation_ocr_candidate(
                             response, self.ocr_scan_candidate_confidence):
-                        self.stop_motion()
-                        self.wait_for_chassis_stop(label + " candidate")
                         rospy.loginfo(
                             "PRODUCTION_OCR_TURN_CANDIDATE label=%s "
                             "progress=%.3f text=%s confidence=%.1f",
@@ -1499,16 +1546,23 @@ class ProductionTask2026(object):
                             json.dumps(response["detection"]["text"],
                                        ensure_ascii=True),
                             response["detection"]["confidence"])
-                        return response, progress
-                    self.discard_unmatched_motion_frame(response)
+                        if candidate_handler is None:
+                            self.stop_motion()
+                            self.wait_for_chassis_stop(label + " candidate")
+                            return response, progress
+                        paused_at = rospy.Time.now()
+                        handled = candidate_handler(response, progress)
+                        deadline += rospy.Time.now() - paused_at
+                        previous_yaw = self.current_odom_yaw(
+                            label + " candidate resume")
+                        if not handled:
+                            self.discard_unmatched_motion_frame(response)
+                    else:
+                        self.discard_unmatched_motion_frame(response)
                     next_capture = (
                         rospy.Time.now() +
                         rospy.Duration(self.ocr_scan_poll_period))
 
-                current_yaw = self.current_odom_yaw(label)
-                progress += positive_turn_increment(
-                    previous_yaw, current_yaw, direction)
-                previous_yaw = current_yaw
                 if progress >= (
                         target_progress - self.rotation_completion_tolerance):
                     self.stop_motion()
@@ -1524,8 +1578,15 @@ class ProductionTask2026(object):
                             rospy.loginfo(
                                 "PRODUCTION_OCR_TURN_FINAL_CANDIDATE "
                                 "label=%s progress=%.3f", label, progress)
-                            return response, progress
-                        self.discard_unmatched_motion_frame(response)
+                            if candidate_handler is None:
+                                return response, progress
+                            paused_at = rospy.Time.now()
+                            handled = candidate_handler(response, progress)
+                            deadline += rospy.Time.now() - paused_at
+                            if not handled:
+                                self.discard_unmatched_motion_frame(response)
+                        else:
+                            self.discard_unmatched_motion_frame(response)
                     rospy.loginfo(
                         "PRODUCTION_OCR_TURN_COMPLETE label=%s progress=%.3f",
                         label, progress)
@@ -1844,10 +1905,15 @@ class ProductionTask2026(object):
             observation_label + " before lidar")
         scan, distance = self.wait_for_fresh_front_distance()
         laser_pose = self.laser_map_pose(scan)
-        hit = projected_wall_hit(
-            laser_pose, distance, self.lidar_forward_offset)
         if candidate_wall_points is None:
             candidate_wall_points = self.wall_reference_points
+        ray_intersection = forward_ray_wall_intersection(
+            laser_pose, candidate_wall_points)
+        if ray_intersection is None:
+            raise MissionAbort("forward lidar ray does not meet a wall boundary")
+        ray_distance, hit = ray_intersection
+        measured_distance = float(distance) + self.lidar_forward_offset
+        range_residual = abs(measured_distance - ray_distance)
         match = nearest_numbered_point(hit, candidate_wall_points)
         if match is None:
             raise MissionAbort("grid has no wall reference candidates")
@@ -1855,25 +1921,27 @@ class ProductionTask2026(object):
         observation.update({
             "front_distance_m": float(distance),
             "laser_pose_map": list(laser_pose),
-            "projected_wall_hit_map": list(hit),
+            "forward_ray_wall_intersection_map": list(hit),
+            "forward_ray_wall_distance_m": float(ray_distance),
+            "range_residual_m": float(range_residual),
             "wall_point_number": int(wall_number),
             "wall_point_coordinate": list(wall_coordinate),
             "wall_match_error_m": float(match_error),
         })
-        if match_error > self.wall_match_max_error:
+        if range_residual > self.ray_range_agreement:
             rospy.logwarn(
-                "PRODUCTION_WALL_MATCH_REJECTED route_point=%d candidate=%d "
-                "error=%.3f limit=%.3f",
-                route_point_number, wall_number, match_error,
-                self.wall_match_max_error)
+                "PRODUCTION_WALL_RAY_REJECTED route_point=%d candidate=%d "
+                "range_residual=%.3f limit=%.3f",
+                route_point_number, wall_number, range_residual,
+                self.ray_range_agreement)
             observation.pop("wall_point_number", None)
         else:
             rospy.loginfo(
-                "PRODUCTION_WALL_MATCH route_point=%d wall_point=%d "
-                "text=%s distance=%.3f error=%.3f",
+                "PRODUCTION_WALL_RAY route_point=%d wall_point=%d "
+                "text=%s distance=%.3f ray_distance=%.3f residual=%.3f",
                 route_point_number, wall_number,
                 json.dumps(observation["text"], ensure_ascii=True),
-                distance, match_error)
+                distance, ray_distance, range_residual)
         return observation
 
     def wait_for_fresh_front_distance(self):
@@ -1920,7 +1988,7 @@ class ProductionTask2026(object):
             "target_guard_events": self.target_guard_events,
             "target_scan_events": self.target_scan_events,
             "observations": self.observations,
-            "recognized_points": select_three_observations(
+            "recognized_categories": select_three_processing_observations(
                 self.observations),
         }
         target = os.path.join(self.run_directory, "observations.json")

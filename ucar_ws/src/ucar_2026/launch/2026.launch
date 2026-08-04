@@ -153,6 +153,8 @@
             <param name="ocr_alignment_max_speed" value="0.22"/>
             <param name="front_scan_half_angle_deg" value="3.0"/>
             <param name="lidar_forward_offset_m" value="0.0"/>
+            <!-- Front range must agree with the geometric wall-ray distance. -->
+            <param name="ray_range_agreement_m" value="0.30"/>
             <param name="wall_match_max_error_m" value="0.18"/>
             <!-- Dynamic-only pre-arrival guard.  The scan is the same source
                  used by the global obstacle layer, with static walls masked. -->
