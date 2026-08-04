@@ -33,19 +33,16 @@ def alignment_angular_speed(
         previous_error_pixels=None, sample_seconds=None):
     """Return a bounded PD yaw rate that moves an OCR box to centre.
 
-    The ROS camera's native image convention is used by the historical
-    controller.  When the helper mirrors the image before OCR, the horizontal
-    error is reversed and the yaw command must reverse with it.
+    OCR reports its bbox in the same post-processing image coordinates that
+    the controller observes.  The vehicle trial proves this convention stays
+    valid when the helper mirrors a ROS image: applying a second sign reversal
+    moves the box farther from centre.
     """
     error = float(error_pixels)
-    if image_is_mirrored:
-        error = -error
     maximum = abs(float(maximum_speed))
     derivative = 0.0
     if previous_error_pixels is not None and sample_seconds is not None:
         previous = float(previous_error_pixels)
-        if image_is_mirrored:
-            previous = -previous
         elapsed = max(0.05, float(sample_seconds))
         derivative = (error - previous) / elapsed
     command = -float(kp) * error - float(kd) * derivative

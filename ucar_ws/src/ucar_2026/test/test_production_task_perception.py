@@ -75,25 +75,24 @@ class ProductionTaskPerceptionTest(unittest.TestCase):
         detection = {"bbox": (350, 20, 40, 30)}
         self.assertEqual(horizontal_pixel_error(detection, 640), 50.0)
 
-    def test_mirrored_ocr_error_reverses_alignment_yaw_direction(self):
+    def test_mirrored_ocr_error_uses_the_same_post_processed_sign(self):
         self.assertAlmostEqual(
             alignment_angular_speed(-40.0, 0.0025, 0.00035, 0.22, False),
             0.10)
         self.assertAlmostEqual(
             alignment_angular_speed(-40.0, 0.0025, 0.00035, 0.22, True),
-            -0.10)
+            0.10)
         self.assertAlmostEqual(
             alignment_angular_speed(999.0, 0.0025, 0.00035, 0.22, True),
-            0.22)
+            -0.22)
 
     def test_derivative_term_brakes_a_fast_error_reversal(self):
-        # Mirrored frame: -176 px means positive control error.  A new
-        # +45 px observation after 0.7 s has crossed centre, so D counters
-        # the proportional term instead of preserving maximum turn speed.
+        # The post-processed image is mirrored but its bbox error is already
+        # in the control convention.  Crossing centre must reverse yaw fast.
         speed = alignment_angular_speed(
             45.0, 0.0025, 0.00035, 0.22, True,
             previous_error_pixels=-176.0, sample_seconds=0.7)
-        self.assertGreater(speed, 0.0)
+        self.assertLess(speed, 0.0)
 
     def test_front_scan_uses_median_of_finite_forward_beams(self):
         self.assertAlmostEqual(

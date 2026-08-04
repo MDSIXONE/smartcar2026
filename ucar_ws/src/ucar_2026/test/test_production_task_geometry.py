@@ -987,7 +987,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.assertEqual(
             task["capture_requested_pose_map"], [1.0, 2.0, 0.5])
 
-    def test_alignment_uses_measured_yaw_and_reverses_mirrored_image(self):
+    def test_alignment_uses_measured_yaw_with_mirrored_ocr_bbox(self):
         calls = []
         self.task.ocr_alignment_max_speed = 0.22
         self.task.ocr_alignment_kp = 0.0025
@@ -999,7 +999,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
                 (speed, delta, context)))
         self.task.rotate_for_pixel_error(-40.0, "test")
         self.assertEqual(len(calls), 1)
-        self.assertAlmostEqual(calls[0][0], -0.10)
+        self.assertAlmostEqual(calls[0][0], 0.10)
         self.assertAlmostEqual(calls[0][1], 0.03)
         self.assertEqual(calls[0][2], "test protected alignment")
 
