@@ -52,3 +52,14 @@ OCR 框居中并取得新鲜前向雷达后，将 `map ← laser` 的前向射�
   `ocr_alignment_yaw_tolerance_rad` 与 `ocr_alignment_turn_timeout` 都可在 launch 中调整。
 - 本机完整回归 55 项通过（30 项无 ROS 跳过）；小车 Ubuntu 18.04 感知回归 12/12、任务回归
   42/42 通过。未自动发起第二次实车任务。
+
+## 2026-08-04 第二次实车中止
+
+- 第二次任务再次通过安全门、完成 QR 和到达 25，但刚开始 PD 居中即报告
+  `unexpected task error: 'module' object has no attribute 'monotonic'`。
+- 原因是车端 Python 2.7 不提供 `time.monotonic()`；PD 的相邻抓拍时间差改用 Python 2 兼容的
+  `time.time()`，不影响停车状态下的差分计算。
+- 本次没有执行 PD 转动，异常路径已经零速、停止车端 launch 和 WSL Master。结果目录为
+  `/home/ucar/.ros/ucar_2026_observations/run_20260804_192819/`；再次实机前需要重新放回起点。
+- 修正后本机完整回归仍为 55 项通过；小车 Ubuntu 18.04 的 Python 2 感知回归 12/12、任务回归
+  42/42 重新通过，且未启动 ROS 或车辆。

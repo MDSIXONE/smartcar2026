@@ -1904,7 +1904,7 @@ class ProductionTask2026(object):
             observation_label = "point_%03d" % route_point_number
         self.stop_motion()
         previous_error = None
-        previous_capture_monotonic = None
+        previous_capture_time = None
         divergence_count = 0
         best_detection = None
         best_path = ""
@@ -1915,7 +1915,10 @@ class ProductionTask2026(object):
         for attempt in range(1, self.ocr_alignment_attempts + 1):
             self.require_safe()
             response = self.capture_ocr(observation_label, attempt)
-            capture_monotonic = time.monotonic()
+            # Python 2.7 on the vehicle has no time.monotonic().  The PD
+            # derivative only needs elapsed time between adjacent parked
+            # captures; ROS wall time is sufficient and Python 2-compatible.
+            capture_time = time.time()
             image_path = response["image_path"]
             attempt_image_paths.append(image_path)
             image_width = int(response["width"])
@@ -1949,12 +1952,12 @@ class ProductionTask2026(object):
                     "check camera yaw sign and frame freshness" %
                     route_point_number)
             elapsed = (
-                capture_monotonic - previous_capture_monotonic
-                if previous_capture_monotonic is not None else None)
+                capture_time - previous_capture_time
+                if previous_capture_time is not None else None)
             self.rotate_for_pixel_error(
                 error, observation_label, previous_error, elapsed)
             previous_error = error
-            previous_capture_monotonic = capture_monotonic
+            previous_capture_time = capture_time
 
         observation = {
             "route_point_number": int(route_point_number),
