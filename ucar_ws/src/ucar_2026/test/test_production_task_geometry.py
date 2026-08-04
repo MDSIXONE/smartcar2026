@@ -1003,6 +1003,94 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.assertAlmostEqual(calls[0][1], 0.03)
         self.assertEqual(calls[0][2], "test protected alignment")
 
+    def test_alignment_timeout_settle_accepts_final_positive_odom_sample(self):
+        self._assert_alignment_timeout_settle(1.0, 0.030)
+
+    def test_alignment_timeout_settle_accepts_final_negative_odom_sample(self):
+        self._assert_alignment_timeout_settle(-1.0, -0.030)
+
+    def test_alignment_timeout_settle_rejects_insufficient_final_odom_sample(self):
+        calls = self._configure_timeout_settle_rotation(1.0, 0.028)
+        with self.assertRaises(task_module.MissionAbort) as raised:
+            self.task.rotate_in_place_for_yaw(0.13, 0.039, "test")
+        self.assertIn("actual=0.028", str(raised.exception))
+        self.assertIn("required=0.029", str(raised.exception))
+        self.assertEqual(calls["wait"], [
+            "test start", "test timeout settle"])
+        self.assertGreaterEqual(calls["stops"], 2)
+
+    def _assert_alignment_timeout_settle(self, direction, final_yaw):
+        calls = self._configure_timeout_settle_rotation(direction, final_yaw)
+        self.task.rotate_in_place_for_yaw(
+            0.13 * direction, 0.039, "test")
+        self.assertEqual(calls["wait"], [
+            "test start", "test timeout settle"])
+        self.assertGreaterEqual(calls["stops"], 2)
+        self.assertEqual(len(calls["commands"]), 1)
+
+    def _configure_timeout_settle_rotation(self, direction, final_yaw):
+        class FakeTime(object):
+            now_value = 0.0
+
+            def __init__(self, value):
+                self.value = value
+
+            @classmethod
+            def now(cls):
+                return cls(cls.now_value)
+
+            def __add__(self, duration):
+                return FakeTime(self.value + duration)
+
+            def __lt__(self, other):
+                return self.value < other.value
+
+        class FakeRate(object):
+            def __init__(self, _hz):
+                pass
+
+            def sleep(self):
+                FakeTime.now_value += 0.3
+
+        class FakeMoveBase(object):
+            def cancel_all_goals(self):
+                pass
+
+        class FakePublisher(object):
+            def __init__(self, commands):
+                self.commands = commands
+
+            def publish(self, message):
+                self.commands.append(message.angular.z)
+
+        original_time = task_module.rospy.Time
+        original_duration = task_module.rospy.Duration
+        original_rate = task_module.rospy.Rate
+        original_is_shutdown = task_module.rospy.is_shutdown
+        yaws = [0.0, 0.028 * direction, final_yaw]
+        calls = {"wait": [], "commands": [], "stops": 0}
+        self.task.move_base = FakeMoveBase()
+        self.task.ocr_alignment_yaw_tolerance = 0.01
+        self.task.ocr_alignment_turn_timeout = 0.2
+        self.task.rotation_control_rate = 20.0
+        self.task.stop_motion = lambda: calls.__setitem__(
+            "stops", calls["stops"] + 1)
+        self.task.wait_for_chassis_stop = lambda context: calls["wait"].append(
+            context)
+        self.task.current_odom_yaw = lambda _context: yaws.pop(0)
+        self.task.require_safe = lambda: None
+        self.task.cmd_vel_pub = FakePublisher(calls["commands"])
+        task_module.rospy.Time = FakeTime
+        task_module.rospy.Duration = lambda seconds: seconds
+        task_module.rospy.Rate = FakeRate
+        task_module.rospy.is_shutdown = lambda: False
+        self.addCleanup(setattr, task_module.rospy, "Time", original_time)
+        self.addCleanup(setattr, task_module.rospy, "Duration", original_duration)
+        self.addCleanup(setattr, task_module.rospy, "Rate", original_rate)
+        self.addCleanup(
+            setattr, task_module.rospy, "is_shutdown", original_is_shutdown)
+        return calls
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1098,6 +1098,8 @@ class ProductionTask2026(object):
         self.wait_for_chassis_stop(context + " start")
         previous_yaw = self.current_odom_yaw(context + " start")
         progress = 0.0
+        required_progress = max(
+            0.0, target - self.ocr_alignment_yaw_tolerance)
         deadline = (
             rospy.Time.now() +
             rospy.Duration(self.ocr_alignment_turn_timeout))
@@ -1111,7 +1113,7 @@ class ProductionTask2026(object):
                 progress += positive_turn_increment(
                     previous_yaw, current_yaw, direction)
                 previous_yaw = current_yaw
-                if progress >= target - self.ocr_alignment_yaw_tolerance:
+                if progress >= required_progress:
                     self.stop_motion()
                     self.wait_for_chassis_stop(context + " complete")
                     rospy.loginfo(
@@ -1123,9 +1125,26 @@ class ProductionTask2026(object):
                 rate.sleep()
         finally:
             self.stop_motion()
+        # The final command can cross the measured-yaw threshold between the
+        # last control sample and deadline.  Do not keep rotating after the
+        # deadline: prove the chassis has stopped, then account for that last
+        # finite odom sample before declaring the correction unsuccessful.
+        self.wait_for_chassis_stop(context + " timeout settle")
+        final_yaw = self.current_odom_yaw(context + " timeout settle")
+        progress += positive_turn_increment(
+            previous_yaw, final_yaw, direction)
+        if progress >= required_progress:
+            rospy.loginfo(
+                "PRODUCTION_OCR_ALIGNMENT_TURN context=%s "
+                "command_speed=%.3f requested=%.3f actual=%.3f "
+                "settled=true",
+                context, speed, target, progress)
+            return
         raise MissionAbort(
-            "%s did not reach %.3f rad of measured yaw within %.1f s" %
-            (context, target, self.ocr_alignment_turn_timeout))
+            "%s did not reach %.3f rad of measured yaw within %.1f s "
+            "(actual=%.3f required=%.3f)" %
+            (context, target, self.ocr_alignment_turn_timeout,
+             progress, required_progress))
 
     def wait_for_chassis_stop(self, context):
         """Require fresh low-velocity odometry before any alignment rotation."""
