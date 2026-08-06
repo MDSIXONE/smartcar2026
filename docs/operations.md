@@ -2031,7 +2031,9 @@ OCR 水平居中不再通过 `move_base` 的同位置 yaw 目标实现，而是�
 （P）与相邻抓拍误差变化（D）直接发布受限角速度，并用 `odom → base_link` 的实际有向 yaw 变化确认完成；未在
 `ocr_alignment_turn_timeout` 内达到控制循环门限时，会先零速、确认底盘停止并补采最后一帧 odom yaw；
 补采后仍未达原阈值才中止。使用镜像 OCR 帧时，bbox 已处在后处理坐标系，控制器直接使用其误差符号，
-不能手工再反向设置 `ocr_alignment_kp`。
+不能手工再反向设置 `ocr_alignment_kp`。若 PD 输出的角速度低于底盘 MCU 旋转死区（实车曾见
+0.073 rad/s 转不动而 0.18 rad/s 正常），对齐会超时中止；`rotate_in_place_for_yaw` 发布前会把速度
+钳制到 `ocr_alignment_min_speed`（默认 `0.12`）以上，可在 launch 中调整。
 
 部署时需额外同步本次纯函数回归文件，随后仅在小车 Ubuntu 18.04 上构建和测试：
 

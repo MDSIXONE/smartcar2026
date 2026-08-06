@@ -214,6 +214,8 @@ class ProductionTask2026(object):
             rospy.get_param("~ocr_alignment_yaw_tolerance_rad", 0.01))
         self.ocr_alignment_turn_timeout = float(
             rospy.get_param("~ocr_alignment_turn_timeout", 2.5))
+        self.ocr_alignment_min_speed = abs(float(
+            rospy.get_param("~ocr_alignment_min_speed", 0.12)))
         self.front_scan_half_angle = math.radians(float(
             rospy.get_param("~front_scan_half_angle_deg", 3.0)))
         self.front_scan_timeout = float(
@@ -1354,6 +1356,13 @@ class ProductionTask2026(object):
         if target <= self.ocr_alignment_yaw_tolerance:
             return
         direction = 1.0 if speed > 0.0 else -1.0
+        # The chassis MCU has a rotation dead zone; a PD-computed speed below
+        # it stalls the yaw entirely (measured 0.004 rad in 2.5 s at 0.073
+        # rad/s).  Lift the command above the dead zone while keeping the
+        # requested direction; progress accumulation and stop confirmation
+        # bound any overshoot.
+        if abs(speed) < self.ocr_alignment_min_speed:
+            speed = self.ocr_alignment_min_speed * direction
         self.move_base.cancel_all_goals()
         self.stop_motion()
         self.wait_for_chassis_stop(context + " start")
