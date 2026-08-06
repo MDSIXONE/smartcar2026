@@ -32,6 +32,9 @@ linear_speed_max:  3.0
 angular_speed_max: 3.14
 # 里程计累计里程文件名；不影响速度控制。
 Mileage_file_name:  car_Mileage_info.txt
+# false 时不再同步写里程文件（避免 odom/imu 发布线程被文件写卡顿断流）。
+# 比赛/任务场景下里程话题已足够，关闭写入更稳。
+Mileage_enable:  false
 # true 时输出大量串口调试信息；通常保持 false，避免日志影响实时性。
 debug_log:  false
 

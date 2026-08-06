@@ -203,6 +203,7 @@ private:
 
   string Mileage_file_name_;
   string Mileage_backup_file_name_;
+  bool Mileage_enable_;
   
   //frame name
   string base_frame_, odom_frame_;

@@ -61,6 +61,7 @@ baseBringup::baseBringup() :x_(0), y_(0), th_(0), serial_gap_warn_(0.35)
   pravite_nh.param("Mileage_file_name", Mileage_file_name_, std::string("car_Mileage_info.txt"));//
   Mileage_file_name_        = ros::package::getPath("ucar_controller") + std::string("/log_info/") + Mileage_file_name_;
   Mileage_backup_file_name_ = Mileage_file_name_ + ".bp";
+  pravite_nh.param("Mileage_enable", Mileage_enable_, true);
   pravite_nh.param("debug_log", debug_log_, true);//  true rosinfo 等等  打印log数据
 
   pravite_nh.param("imu_topic", imu_topic_, std::string("/imu"));
@@ -1306,18 +1307,21 @@ bool baseBringup::updateMileage(double vx, double vy, double dt){
   {
     return true;
   }
-  FILE* fout = std::fopen(Mileage_file_name_.c_str(), "w");
-  if (fout)
-	{
-		std::fprintf(fout,"%lf\n",Mileage_sum_);
-		std::fclose(fout);
-	}
-  FILE* fout_b = std::fopen(Mileage_backup_file_name_.c_str(), "w");
-  if (fout_b)
-	{
-		std::fprintf(fout_b,"%lf\n",Mileage_sum_);
-		std::fclose(fout_b);
-	}
+  if (Mileage_enable_)
+  {
+    FILE* fout = std::fopen(Mileage_file_name_.c_str(), "w");
+    if (fout)
+      {
+        std::fprintf(fout,"%lf\n",Mileage_sum_);
+        std::fclose(fout);
+      }
+    FILE* fout_b = std::fopen(Mileage_backup_file_name_.c_str(), "w");
+    if (fout_b)
+      {
+        std::fprintf(fout_b,"%lf\n",Mileage_sum_);
+        std::fclose(fout_b);
+      }
+  }
   ros::NodeHandle pravite_nh("~");
   pravite_nh.setParam("Mileage_sum",Mileage_sum_);
   Mileage_last_ = Mileage_sum_;

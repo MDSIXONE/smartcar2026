@@ -16,7 +16,12 @@
         <param name="output_frame" value="odom"/>
         <param name="base_footprint_frame" value="base_link"/>
         <param name="freq" value="30.0"/>
-        <param name="sensor_timeout" value="1.0"/>
+        <!-- The chassis odom/imu briefly goes silent for ~1.0-1.04 s on every run
+             (MCU/serial characteristic). 1.0 s made robot_pose_ekf declare the
+             sensor dead and print "Odom sensor not active any more", which the
+             task treats as fatal; 3.0 s tolerates the normal gap while still
+             detecting a real sensor loss. -->
+        <param name="sensor_timeout" value="3.0"/>
         <param name="odom_used" value="true"/>
         <param name="imu_used"  value="true"/>
         <param name="vo_used"   value="false"/>
