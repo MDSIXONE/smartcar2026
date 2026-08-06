@@ -75,3 +75,10 @@ target_link_libraries(base_driver crc_table_fd ${catkin_LIBRARIES} ${Boost_LIBRA
 
 ## crc_table_fd
 add_library(crc_table_fd src/crc_table.cpp)
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(test_serial_read_exact test/test_serial_read_exact.cpp)
+  if(TARGET test_serial_read_exact)
+    target_link_libraries(test_serial_read_exact ${catkin_LIBRARIES})
+  endif()
+endif()

@@ -1,5 +1,8 @@
 #include <ucar_controller/base_driver.h>
+#include <ucar_controller/serial_read_exact.h>
 #include <Eigen/Eigen>
+
+#include <cmath>
 
 int imu_flag=0;
 sensor_msgs::Imu imu_data1;
@@ -7,7 +10,7 @@ sensor_msgs::Imu imu_data;
 
 namespace ucarController
 {
-baseBringup::baseBringup() :x_(0), y_(0), th_(0)
+baseBringup::baseBringup() :x_(0), y_(0), th_(0), serial_gap_warn_(0.35)
 {
   ros::NodeHandle pravite_nh("~");
   pravite_nh.param("provide_odom_tf", provide_odom_tf_,true);
@@ -20,9 +23,23 @@ baseBringup::baseBringup() :x_(0), y_(0), th_(0)
   pravite_nh.param("port", port_, std::string("/dev/base_serial_port"));
   pravite_nh.param("baud", baud_, 115200);                
   pravite_nh.param("serial_timeout", serial_timeout_, 50);//ms
+  pravite_nh.param("serial_gap_warn", serial_gap_warn_, 0.35);
   pravite_nh.param("rate", rate_, 20);                    //hz
   pravite_nh.param("duration", duration_, 0.01);
   pravite_nh.param("cmd_timeout", cmd_dt_threshold_, 0.2);
+
+  if (serial_timeout_ <= 0)
+  {
+    ROS_WARN_STREAM("Invalid serial_timeout=" << serial_timeout_
+                    << "; restoring 50 ms.");
+    serial_timeout_ = 50;
+  }
+  if (!std::isfinite(serial_gap_warn_) || serial_gap_warn_ <= 0.0)
+  {
+    ROS_WARN_STREAM("Invalid serial_gap_warn=" << serial_gap_warn_
+                    << "; restoring 0.35 s.");
+    serial_gap_warn_ = 0.35;
+  }
   
   pravite_nh.param("base_frame", base_frame_, std::string("base_footprint"));
   pravite_nh.param("odom_frame", odom_frame_, std::string("odom"));
@@ -460,6 +477,63 @@ bool baseBringup::stopMoveCB(std_srvs::Trigger::Request &req, std_srvs::Trigger:
   }
 }
 
+bool baseBringup::readExact(uint8_t* destination, size_t requested,
+                            const char* stage)
+{
+  const ros::SteadyTime read_started = ros::SteadyTime::now();
+  const ros::SteadyTime deadline =
+      read_started + ros::WallDuration(static_cast<double>(serial_timeout_) / 1000.0);
+  const SerialReadResult result = serialReadExactly(
+      destination, requested,
+      [this](uint8_t* target, size_t remaining) {
+        return serial_.read(target, remaining);
+      },
+      [deadline]() {
+        return ros::SteadyTime::now() < deadline;
+      });
+  const double elapsed = (ros::SteadyTime::now() - read_started).toSec();
+
+  if (!result.complete())
+  {
+    ROS_WARN_STREAM_THROTTLE(
+        1.0,
+        "BASE_SERIAL_RESYNC_SHORT_READ stage=" << stage
+            << " requested=" << result.requested
+            << " received=" << result.received
+            << " attempts=" << result.read_calls
+            << " field_budget_s=" << static_cast<double>(serial_timeout_) / 1000.0
+            << " elapsed_s=" << elapsed);
+    return false;
+  }
+
+  if (elapsed > serial_gap_warn_)
+  {
+    ROS_WARN_STREAM_THROTTLE(
+        1.0,
+        "BASE_SERIAL_SLOW_READ stage=" << stage
+            << " requested=" << result.requested
+            << " attempts=" << result.read_calls
+            << " elapsed_s=" << elapsed);
+  }
+  return true;
+}
+
+void baseBringup::warnPublishGap(const char* stream_name,
+                                 ros::WallTime& previous_time)
+{
+  const ros::WallTime now = ros::WallTime::now();
+  if (!previous_time.isZero())
+  {
+    const double gap = (now - previous_time).toSec();
+    if (gap > serial_gap_warn_)
+    {
+      ROS_WARN_STREAM("BASE_" << stream_name << "_PUBLISH_GAP seconds=" << gap
+                      << " warn_threshold=" << serial_gap_warn_);
+    }
+  }
+  previous_time = now;
+}
+
 void baseBringup::processLoop()
 {
   ROS_INFO("baseBringup::processLoop: start");
@@ -475,7 +549,11 @@ void baseBringup::processLoop()
       int head_type = 0;
       while(ros::ok()) 
       {                        
-        size_t head_s = serial_.read(check_head_current,1);
+        if (!readExact(check_head_current, 1, "seek_header"))
+        {
+          check_head_last[0] = 0xFF;
+          continue;
+        }
         if (check_head_last[0] == 0x63 && check_head_current[0] == 0x76)
         {
           boost::unique_lock<boost::recursive_mutex> lock(Control_mutex_); 
@@ -486,7 +564,7 @@ void baseBringup::processLoop()
           head_type = 1; // base
           break;
         }
-        else if (check_head_last[0] == 0xfc && (check_head_current[0] == 0x40 || check_head_current[0] == 0x41 || head_type == TYPE_INSGPS || 
+        else if (check_head_last[0] == 0xfc && (check_head_current[0] == 0x40 || check_head_current[0] == 0x41 || check_head_current[0] == TYPE_INSGPS ||
                                                 check_head_current[0] == TYPE_GROUND || check_head_current[0] == 0x50))
         {
           boost::unique_lock<boost::recursive_mutex> lock(Control_mutex_);
@@ -509,6 +587,10 @@ void baseBringup::processLoop()
           {
             head_type = 0x50;
           }
+          else if (check_head_current[0] == TYPE_INSGPS)
+          {
+            head_type = TYPE_INSGPS;
+          }
           check_head_last[0] = 0xFF;
           lock.unlock();
           if(debug_log_){
@@ -520,7 +602,12 @@ void baseBringup::processLoop()
       }
       if (head_type == 1)
       {
-        size_t res = serial_.read(pack_read_.read_msg.read_msg,READ_DATA_LONGTH);
+        if (!readExact(pack_read_.read_msg.read_msg, READ_DATA_LONGTH,
+                       "base_payload"))
+        {
+          check_head_last[0] = 0xFF;
+          continue;
+        }
         if(debug_log_){
           cout << "serial_read: " <<endl;
           for (size_t i = 0; i < READ_MSG_LONGTH; i++)
@@ -574,7 +661,10 @@ void baseBringup::processLoop()
 void baseBringup::processIMU(uint8_t head_type)
 {
   uint8_t check_len[1] = {0xff};
-  size_t len_s = serial_.read(check_len, 1);
+  if (!readExact(check_len, 1, "imu_length"))
+  {
+    return;
+  }
   if (debug_log_){
     std::cout << "check_len: "<< std::dec << (int)check_len[0]  << std::endl;
   }
@@ -594,7 +684,10 @@ void baseBringup::processIMU(uint8_t head_type)
   else if (head_type == TYPE_GROUND || head_type == 0x50) // 无效数据，防止记录失败
   {
     uint8_t ground_sn[1];
-    size_t ground_sn_s = serial_.read(ground_sn, 1);
+    if (!readExact(ground_sn, 1, "ground_sequence"))
+    {
+      return;
+    }
     if (++read_sn_ != ground_sn[0])
     {
       if ( ground_sn[0] < read_sn_)
@@ -615,18 +708,37 @@ void baseBringup::processIMU(uint8_t head_type)
       }
     }
     uint8_t ground_ignore[500];
-    size_t ground_ignore_s = serial_.read(ground_ignore, (check_len[0]+4));
+    const size_t ground_bytes = static_cast<size_t>(check_len[0]) + 4;
+    if (ground_bytes > sizeof(ground_ignore))
+    {
+      ROS_WARN_STREAM("BASE_SERIAL_RESYNC stage=ground_payload requested="
+                      << ground_bytes << " exceeds_buffer=" << sizeof(ground_ignore));
+      return;
+    }
+    if (!readExact(ground_ignore, ground_bytes, "ground_payload"))
+    {
+      return;
+    }
     return;
   }
   //read head sn 
   uint8_t check_sn[1] = {0xff};
-  size_t sn_s = serial_.read(check_sn, 1);
+  if (!readExact(check_sn, 1, "imu_sequence"))
+  {
+    return;
+  }
   uint8_t head_crc8[1] = {0xff};
-  size_t crc8_s = serial_.read(head_crc8, 1);
+  if (!readExact(head_crc8, 1, "imu_crc8"))
+  {
+    return;
+  }
   uint8_t head_crc16_H[1] = {0xff};
   uint8_t head_crc16_L[1] = {0xff};
-  size_t crc16_H_s = serial_.read(head_crc16_H, 1);
-  size_t crc16_L_s = serial_.read(head_crc16_L, 1);
+  if (!readExact(head_crc16_H, 1, "imu_crc16_high") ||
+      !readExact(head_crc16_L, 1, "imu_crc16_low"))
+  {
+    return;
+  }
   if (debug_log_){
     std::cout << "check_sn: "     << std::hex << (int)check_sn[0]     << std::dec << std::endl;
     std::cout << "head_crc8: "    << std::hex << (int)head_crc8[0]    << std::dec << std::endl;
@@ -701,7 +813,10 @@ void baseBringup::processIMU(uint8_t head_type)
     uint16_t head_crc16_l = imu_frame_.frame.header.header_crc16_l;
     uint16_t head_crc16_h = imu_frame_.frame.header.header_crc16_h;
     uint16_t head_crc16 = head_crc16_l + (head_crc16_h << 8);
-    size_t data_s = serial_.read(imu_frame_.read_buf.read_msg, (IMU_LEN + 1)); //48+1
+    if (!readExact(imu_frame_.read_buf.read_msg, IMU_LEN + 1, "imu_payload"))
+    {
+      return;
+    }
     uint16_t CRC16 = CRC16_Table(imu_frame_.frame.data.data_buff, IMU_LEN);
     if (debug_log_){          
       std::cout << "CRC16:        " << std::hex << (int)CRC16 << std::dec << std::endl;
@@ -729,7 +844,10 @@ void baseBringup::processIMU(uint8_t head_type)
     uint16_t head_crc16_l = ahrs_frame_.frame.header.header_crc16_l;
     uint16_t head_crc16_h = ahrs_frame_.frame.header.header_crc16_h;
     uint16_t head_crc16 = head_crc16_l + (head_crc16_h << 8);
-    size_t data_s = serial_.read(ahrs_frame_.read_buf.read_msg, (AHRS_LEN + 1)); //48+1
+    if (!readExact(ahrs_frame_.read_buf.read_msg, AHRS_LEN + 1, "ahrs_payload"))
+    {
+      return;
+    }
     uint16_t CRC16 = CRC16_Table(ahrs_frame_.frame.data.data_buff, AHRS_LEN);
     if (debug_log_){          
       std::cout << "CRC16:        " << std::hex << (int)CRC16 << std::dec << std::endl;
@@ -754,7 +872,10 @@ void baseBringup::processIMU(uint8_t head_type)
   else if (head_type == TYPE_INSGPS)
   {
     uint16_t head_crc16 = insgps_frame_.frame.header.header_crc16_l + ((uint16_t)insgps_frame_.frame.header.header_crc16_h << 8);
-    size_t data_s = serial_.read(insgps_frame_.read_buf.read_msg, (INSGPS_LEN + 1)); //48+1
+    if (!readExact(insgps_frame_.read_buf.read_msg, INSGPS_LEN + 1, "insgps_payload"))
+    {
+      return;
+    }
     uint16_t CRC16 = CRC16_Table(insgps_frame_.frame.data.data_buff, INSGPS_LEN);
     if (head_crc16 != CRC16)
     {
@@ -813,6 +934,7 @@ void baseBringup::processIMU(uint8_t head_type)
     // imu_data.angular_velocity_covariance[4] = 0.0017;
     // imu_data.angular_velocity_covariance[8] = 0.0017;
 
+    warnPublishGap("imu", last_imu_publish_wall_time_);
     imu_pub_.publish(imu_data);
     if(imu_flag==0){
         imu_data1=imu_data;
@@ -1099,6 +1221,7 @@ void baseBringup::processOdometry(){
   }else{
     odom_tmp.twist.covariance = ODOM_TWIST_COVARIANCE2;
   }
+  warnPublishGap("odom", last_odom_publish_wall_time_);
   odom_pub_.publish(odom_tmp);
   
   lock.lock();

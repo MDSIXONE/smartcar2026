@@ -111,6 +111,8 @@ public:
 
 private:
   bool write_msg(double linear_x, double linear_y, double angular_z);
+  bool readExact(uint8_t* destination, size_t requested, const char* stage);
+  void warnPublishGap(const char* stream_name, ros::WallTime& previous_time);
 
   boost::thread* pJoyThread_;
   boost::thread* processThread_;
@@ -162,6 +164,9 @@ private:
   int serial_timeout_;
   int rate_;
   double duration_;
+  double serial_gap_warn_;
+  ros::WallTime last_odom_publish_wall_time_;
+  ros::WallTime last_imu_publish_wall_time_;
 
   //pose
   double x_,y_,th_;

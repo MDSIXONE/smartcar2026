@@ -23,6 +23,8 @@ vel_topic: /cmd_vel
 cmd_timeout: 0.2
 # 串口读写超时（ms）；不是速度参数。
 serial_timeout: 50
+# 仅用于记录底盘串口/里程计发布断帧的告警阈值（s）；不改变任务的 odom 安全门。
+serial_gap_warn: 0.35
 # Restore the original chassis command limits for comparison with the high CymPlanner command limit.
 # 平移速度命令裁剪上限，单位 m/s；超过该值的 linear.x / linear.y 会被底盘驱动裁剪。
 linear_speed_max:  3.0
