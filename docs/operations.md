@@ -831,9 +831,11 @@ read -r -p '请输入 WSL Master 当前地址: ' MASTER_IP
 bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh "$MASTER_IP" mission
 ```
 
-`lidar_loc` 的启动初值固定为起点 `(-0.25, 2.75, 0)`。若任务中途终止且已经离开起点，
-停止完整 launch 后必须先把实车放回起点，才能再次启动 mission。不得在车辆仍位于
-52 或生产区其他点时直接重启整条定位链路；固定初值会造成地图位姿与实车位置不一致。
+`start_2026.sh` 的 `mission` 模式启动前会询问「是否已把车放回起点」，输入 `yes`
+才继续，其他输入直接取消启动。因为 `lidar_loc` 的启动初值固定为起点
+`(-0.25, 2.75, 0)`；若任务中途终止且已经离开起点，停止完整 launch 后必须先把
+实车放回起点，才能再次启动 mission。不得在车辆仍位于 52 或生产区其他点时直接
+重启整条定位链路；固定初值会造成地图位姿与实车位置不一致。
 
 该模式不需要也不启动 RViz。运行时可在连接同一 Master 的诊断终端观察：
 
@@ -1361,6 +1363,21 @@ The normal launch waits 15 seconds before it begins the startup readiness
 check, then requires three seconds of stable `map -> base_link` translation and
 five consecutive nonempty global plans. Do not shorten this delay while the
 laser localization is still settling after power-on.
+
+### QR 服务器（192.168.8.1）
+
+二维码接口服务器运行在局域网网关 `192.168.8.1`（端口 `3663`）。通过 SSH 登录该
+服务器后手动启动 HTTP 服务；服务器侧不依赖 ROS，也不是小车 ROS Master：
+
+```bash
+ssh -l root 192.168.8.1
+# 密码：051520zyfZYF
+python3 /root/server.py
+```
+
+启动后小车端即可查询 `http://192.168.8.1:3663/<字母>` 获取二维码内容对应的 JSON
+结果。若服务器未启动或端口不可达，二维码识别仍可通过 `/qr_result` 正常发布，
+只是 `/qr_api_result` 查询失败。
 
 二维码扫描节点使用 `/usb_cam/image_raw`，原始识别文本发布到 `/qr_result`。单独使用摄像头和扫描器：
 
@@ -2135,6 +2152,14 @@ roslaunch ucar_2026 yolo_dataset_capture.launch \
 关键字映射，仍无结果只记录 `source=none` 并在终端输出"无法与模型取得联系"，不阻断任务。
 结果写入 `observations.json` 的 `qr_classifications`。
 
+二维码内容若是 `http(s)://` URL，helper 会先 GET 该 URL 并解析 JSON 的 `result` 字段
+（`code==200` 时）作为分类文本，例如 `http://192.168.8.1:3663/a` →
+`{"code":200,"result":"蛋糕"}` → 以"蛋糕"分类；GET 失败或非 JSON 则降级用 URL 原文
+分类（结果 JSON 中 `resolved_text`/`error` 字段可诊断）。**小车必须能访问该 API 服务器**：
+2026-08-06 实机验证中小车访问 `192.168.8.1:3663` 报 `Connection refused`（本机 Windows
+同 URL 正常），导致三个码全部降级用 URL 原文喂星火（X2 猜"日用品"）；需场地侧放行
+小车 IP 或检查 AP 隔离。
+
 默认 `spark_classify_enabled=true`（已启用；小车端缺密码文件时自动降级本地映射，不阻断）。
 首次启用前需在小车放好密码文件，步骤：
 
@@ -2173,4 +2198,9 @@ printf '%s\n' '{"command":"classify","qr_text":"旺仔牛奶"}' \
 helper 日志位于 `~/.ros/ucar_2026_observations/spark_classifier.log`；任务日志关键字
 `PRODUCTION_SPARK_CLASSIFY`。注意：从 Windows 终端管道传中文给 Python 可能因 locale
 乱码，正式验证在小车 Ubuntu（UTF-8）上进行。
+
+**2026-08-06 实车验证**：第八次 mission 中二维码阶段三个码（262/232/295）全部完成分类，
+`qr_classifications` 记录 `source=spark`、`attempts=3`（首请求流控重试），分类结果写入
+`observations.json`；此前多次 `ascii codec` 崩溃（Py2 rospy.loginfo 中文参数、JSON 中文
+bytes）已修复，QR 阶段零崩溃，任务可正常进入生产路线巡检。
 

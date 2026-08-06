@@ -475,9 +475,26 @@ class ProductionTask2026(object):
             self.latest_odom_velocity = velocity if finite else None
             if finite:
                 self.consecutive_finite_odom += 1
+                if self.consecutive_finite_odom >= 10:
+                    self.clear_sensor_alive_error()
             else:
                 self.consecutive_finite_odom = 0
                 self.critical_error = "non-finite /odom_raw"
+
+    def clear_sensor_alive_error(self):
+        """A recovered odom stream clears sensor-alive errors only.
+
+        The safety gate checks current odom health (>=10 finite frames and
+        fresh TFs), so a transient startup gap reported by base_driver must
+        not lock the mission forever.  Structural errors (crc16, head_len,
+        tf_nan_input, non-finite) stay sticky and require a full restart.
+        """
+        if not self.critical_error:
+            return
+        lowered = self.critical_error.lower()
+        if ("odom sensor not active" in lowered or
+                "imu sensor not active" in lowered):
+            self.critical_error = ""
 
     def scan_cb(self, message):
         with self.lock:
@@ -506,7 +523,7 @@ class ProductionTask2026(object):
             self.latest_qr_text = text
         self.qr_event.set()
         rospy.loginfo("PRODUCTION_QR_EVENT sequence=%d value=%s",
-                      self.qr_sequence, text)
+                      self.qr_sequence, self.log_safe_text(text))
 
     def rosout_cb(self, message):
         text = message.msg.lower()
@@ -669,8 +686,8 @@ class ProductionTask2026(object):
         self.used_qr_codes.add(detected)
         rospy.loginfo(
             "PRODUCTION_QR_ACCEPTED observation=%d value=%s count=%d/%d",
-            observation_number, detected, len(self.used_qr_codes),
-            len(self.qr_observation_numbers))
+            observation_number, self.log_safe_text(detected),
+            len(self.used_qr_codes), len(self.qr_observation_numbers))
         self.classify_qr_text(observation_number, detected)
 
     def wait_for_qr_scanner(self):
@@ -1212,10 +1229,36 @@ class ProductionTask2026(object):
             self.spark_log_handle = None
         rospy.loginfo("PRODUCTION_SPARK_CLASSIFIER_CLOSED")
 
+    def log_safe_text(self, value):
+        """ASCII-only form of a text value for Python 2 log lines.
+
+        Any Unicode is JSON-escaped (ensure_ascii), so rospy log messages can
+        never hit the Python 2 implicit-ascii decode path (which crashed the
+        task with UnicodeDecodeError once a Chinese category was logged).
+        """
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            try:
+                value = value.decode("utf-8")
+            except UnicodeDecodeError:
+                value = value.decode("utf-8", "replace")
+        if isinstance(value, str):
+            return value
+        return json.dumps(value, ensure_ascii=True)
+
     def classify_qr_text(self, observation_number, qr_text):
         """Classify one QR result; records the outcome, never aborts."""
         if not self.spark_classify_enabled:
             return
+        # /qr_result arrives as UTF-8 bytes on Python 2 (and str on Python 3).
+        # Normalize to unicode so json.dumps(payload) never hits the Python 2
+        # implicit-ascii decode path for non-ASCII bytes.
+        if isinstance(qr_text, bytes):
+            try:
+                qr_text = qr_text.decode("utf-8")
+            except UnicodeDecodeError:
+                qr_text = qr_text.decode("utf-8", "replace")
         entry = {
             "observation": int(observation_number),
             "qr_text": qr_text,
@@ -1235,8 +1278,9 @@ class ProductionTask2026(object):
             entry["error"] = "classifier helper unavailable"
             rospy.logerr(
                 "PRODUCTION_SPARK_CLASSIFY observation=%d qr=%s "
-                "category=null source=none error=%s (无法与模型取得联系)",
-                observation_number, qr_text, entry["error"])
+                "category=null source=none error=%s (cannot reach spark model)",
+                observation_number, self.log_safe_text(qr_text),
+                self.log_safe_text(entry["error"]))
             self.qr_classifications.append(entry)
             return
         try:
@@ -1248,8 +1292,9 @@ class ProductionTask2026(object):
             entry["error"] = "cannot command classifier: %s" % exc
             rospy.logerr(
                 "PRODUCTION_SPARK_CLASSIFY observation=%d qr=%s "
-                "category=null source=none error=%s (无法与模型取得联系)",
-                observation_number, qr_text, entry["error"])
+                "category=null source=none error=%s (cannot reach spark model)",
+                observation_number, self.log_safe_text(qr_text),
+                self.log_safe_text(entry["error"]))
             self.qr_classifications.append(entry)
             return
         response = self.read_spark_message(
@@ -1259,8 +1304,9 @@ class ProductionTask2026(object):
             entry["error"] = "no reply from classifier helper"
             rospy.logerr(
                 "PRODUCTION_SPARK_CLASSIFY observation=%d qr=%s "
-                "category=null source=none error=%s (无法与模型取得联系)",
-                observation_number, qr_text, entry["error"])
+                "category=null source=none error=%s (cannot reach spark model)",
+                observation_number, self.log_safe_text(qr_text),
+                self.log_safe_text(entry["error"]))
             self.qr_classifications.append(entry)
             return
         entry["category"] = response.get("category")
@@ -1269,25 +1315,20 @@ class ProductionTask2026(object):
         entry["model"] = response.get("model", self.spark_model)
         entry["error"] = response.get("error", "")
         self.qr_classifications.append(entry)
-        # Python 2 logs cannot format raw Unicode; keep UTF-8 bytes instead.
-        category_value = entry["category"] or ""
-        error_value = entry["error"] or ""
-        if not isinstance(category_value, str):
-            category_value = category_value.encode("utf-8")
-        if not isinstance(error_value, str):
-            error_value = error_value.encode("utf-8")
         if entry["source"] == "none":
             rospy.logerr(
                 "PRODUCTION_SPARK_CLASSIFY observation=%d qr=%s "
                 "category=null source=none attempts=%d error=%s "
-                "(无法与模型取得联系)",
-                observation_number, qr_text, entry["attempts"],
-                error_value)
+                "(cannot reach spark model)",
+                observation_number, self.log_safe_text(qr_text),
+                entry["attempts"],
+                self.log_safe_text(entry["error"]))
         else:
             rospy.loginfo(
                 "PRODUCTION_SPARK_CLASSIFY observation=%d qr=%s "
                 "category=%s source=%s attempts=%d",
-                observation_number, qr_text, category_value,
+                observation_number, self.log_safe_text(qr_text),
+                self.log_safe_text(entry["category"]),
                 entry["source"], entry["attempts"])
 
     def rotate_for_pixel_error(

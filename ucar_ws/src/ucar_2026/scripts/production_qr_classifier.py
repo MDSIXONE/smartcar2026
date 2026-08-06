@@ -231,12 +231,40 @@ def read_password(path):
         return ""
 
 
+def resolve_url_result(qr_text, timeout=3.0):
+    """If qr_text is an http(s) URL, fetch it and return its JSON 'result'
+    field as the classification text.  On any failure the original text is
+    kept and a short fetch_error is returned for diagnostics."""
+    lowered = (qr_text or "").strip().lower()
+    if not (lowered.startswith("http://") or lowered.startswith("https://")):
+        return qr_text, ""
+    try:
+        request = Request(qr_text.strip(), headers={"User-Agent": "ucar-qr"})
+        response = urlopen(request, timeout=timeout)
+        raw = response.read()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", "replace")
+        data = json.loads(raw)
+    except Exception as exc:
+        return qr_text, "url fetch failed: %s" % exc
+    code = data.get("code") if isinstance(data, dict) else None
+    result = data.get("result") if isinstance(data, dict) else None
+    if code != 200 or not result:
+        return qr_text, "url json code=%s result=%r" % (code, result)
+    return str(result), ""
+
+
 def classify(args, local_map, password, qr_text):
     attempts = 0
     last_error = ""
+    resolved, fetch_error = resolve_url_result(qr_text)
+    if fetch_error:
+        last_error = fetch_error
     if args.api_base_url and password:
-        category, raw, last_error = classify_with_spark(
-            args, password, qr_text)
+        category, raw, spark_error = classify_with_spark(
+            args, password, resolved)
+        if spark_error:
+            last_error = spark_error
         attempts = args.retries + 1
         if category is not None:
             return {
@@ -245,9 +273,10 @@ def classify(args, local_map, password, qr_text):
                 "attempts": attempts,
                 "model": args.model,
                 "raw": raw,
+                "resolved_text": resolved,
                 "error": last_error,
             }
-    category = classify_locally(local_map, qr_text)
+    category = classify_locally(local_map, resolved)
     if category is not None:
         return {
             "category": category,
@@ -255,6 +284,7 @@ def classify(args, local_map, password, qr_text):
             "attempts": attempts,
             "model": args.model,
             "raw": "",
+            "resolved_text": resolved,
             "error": last_error,
         }
     return {
@@ -263,6 +293,7 @@ def classify(args, local_map, password, qr_text):
         "attempts": attempts,
         "model": args.model,
         "raw": "",
+        "resolved_text": resolved,
         "error": last_error or "no remote reply and no local keyword match",
     }
 

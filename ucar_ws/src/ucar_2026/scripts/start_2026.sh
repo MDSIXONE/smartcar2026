@@ -77,6 +77,18 @@ case "$launch_mode" in
       ucar_2026 2026.launch
     ;;
   mission)
+    echo "任务前确认：lidar_loc 定位初值固定为起点 (-0.25, 2.75, 0)，"
+    echo "车辆不在起点时启动会产生错误的地图位姿。"
+    read -r -p '是否已把车放回起点？输入 yes 继续，其他输入将取消启动: ' \
+      confirm_start
+    case "$confirm_start" in
+      yes|Yes|YES|y|Y)
+        ;;
+      *)
+        echo "已取消启动。请先把车物理放回起点 (-0.25, 2.75, 0)，再重新运行本脚本。"
+        exit 2
+        ;;
+    esac
     echo "Master 连接成功。正在启动 ucar_2026 自动生产任务（无 RViz）……"
     exec "$python2_runner" /opt/ros/melodic/bin/roslaunch \
       ucar_2026 2026.launch task_enabled:=true

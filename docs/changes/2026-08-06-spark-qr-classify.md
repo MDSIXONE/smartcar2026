@@ -59,13 +59,27 @@
   Python 2 `codecs`），同时防御小车端 LANG=C 时 Python 2 按 ASCII 解码中文崩溃。
 - Python 2 兼容：日志打印中文 unicode 前先转 UTF-8 字节（复用 2026-08-04 犯错档案
   经验），`json.dumps` 输出保持 `ensure_ascii` 转义，任务侧 `json.loads` 不遇到中文。
+- **实车验证（2026-08-06，第八次 mission，run_20260806_211726）**：
+  - 二维码阶段三个码（262/232/295）全部完成分类，`observations.json` 的
+    `qr_classifications` 三条均 `source=spark`、`attempts=3`、`category=日用品`；
+  - 二维码实际内容为 URL（`http://192.168.8.1:3663/a` 等）；**小车访问
+    `192.168.8.1:3663` 报 `Connection refused`**（本机 Windows 同 URL 正常返回
+    `{"code":200,"result":"蛋糕"}`），helper 按设计降级用 URL 原文喂星火，X2 猜测
+    "日用品"；`resolved_text`/`error` 字段记录了降级原因，任务不阻断；
+  - 任务完整跑通：安全门 → 52 → QR 三码分类（零崩溃）→ 巡检 12→23→（守卫跳过 14）→
+    25（OCR 识别到"日用品加工车间" confidence=68）；点 25 的 protected alignment
+    小角度旋转 2.5s 未转够（actual=0.004 required=0.012 rad）导致 ABORT——**既有
+    对齐逻辑问题，与分类改动无关**；
+  - 累计修复实车验证生效：`clear_sensor_alive_error`（启动期 odom/imu 1.03s 瞬断不再
+    永久锁死安全门）、`log_safe_text`（Py2 rospy.loginfo 中文参数不再 ascii 崩溃）。
 
 ## 已知限制
 
-- 尚未在小车 Ubuntu 18.04 / ROS Melodic 部署与实车验证；小车端只能编译/运行
-  Python 2 任务代码与 Python 3 helper，本机不能编译后上传。
-- 免费 `lite` 模型的识别质量未在真实二维码文本上评估；类别白名单严格限定为
-  日用品 / 食品 / 电子产品，模型回复其它文本一律视为无效并重试/降级。
+- 已在小车 Ubuntu 18.04 / ROS Melodic 部署并通过实车验证（2026-08-06，第八次 mission）；
+  小车端只能编译/运行 Python 2 任务代码与 Python 3 helper，本机不能编译后上传。
+- 类别白名单严格限定为日用品 / 食品 / 电子产品，模型回复其它文本一律视为无效并重试/降级。
+- 二维码若为 URL，需小车能访问场地 API 服务器（2026-08-06 实测 `192.168.8.1:3663`
+  Connection refused，降级用 URL 原文分类）；请场地方放行小车 IP 或关闭 AP 隔离。
 - X2 为授权体验模式，有日/秒级流控（错误码 11201/11202/11203 与 10007 用户流量受限）；
   任务按 `spark_retries` 重试并在连续无结果时降级本地映射。
 - 远程调用需要小车能访问公网（`spark-api-open.xf-yun.com:443`），网络不可达时
