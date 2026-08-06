@@ -119,6 +119,23 @@
             <param name="post_turn_recenter_trigger" value="0.06"/>
             <param name="post_turn_recenter_attempts" value="2"/>
             <param name="require_distinct_qr_codes" value="true"/>
+            <!-- Spark Xunfei QR-text category classification.  The password
+                 file (first line = APIPassword) must live on the vehicle and
+                 is never committed; leave blank to run local-map fallback
+                 only, or set spark_classify_enabled=false to disable. -->
+            <param name="spark_classify_enabled" value="true"/>
+            <param name="spark_python" value="/usr/bin/python3"/>
+            <param name="spark_helper_path"
+                   value="$(find ucar_2026)/scripts/production_qr_classifier.py"/>
+            <param name="spark_model" value="spark-x"/>
+            <param name="spark_api_base_url"
+                   value="https://spark-api-open.xf-yun.com/x2/chat/completions"/>
+            <param name="spark_thinking" value="disabled"/>
+            <param name="spark_password_file"
+                   value="/home/ucar/.ucar/spark_password"/>
+            <param name="spark_retries" value="2"/>
+            <param name="spark_timeout" value="30.0"/>
+            <param name="spark_helper_ready_timeout" value="30.0"/>
             <!-- Before the first move_base goal, production_task_2026 pins
                  CymPlanner to front-lookahead point mode for every task leg. -->
             <param name="navigation_mode_connect_timeout" value="5.0"/>

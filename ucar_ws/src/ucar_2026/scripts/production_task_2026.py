@@ -249,6 +249,35 @@ class ProductionTask2026(object):
         self.result_directory = os.path.expanduser(str(
             rospy.get_param(
                 "~result_directory", "~/.ros/ucar_2026_observations")))
+        # Spark Xunfei QR-text classification.  A helper subprocess owns the
+        # network call so the mission thread is never blocked; classification
+        # failure never aborts the task (local keyword map is the fallback).
+        self.spark_classify_enabled = bool(
+            rospy.get_param("~spark_classify_enabled", False))
+        self.spark_python = str(
+            rospy.get_param("~spark_python", "/usr/bin/python3"))
+        self.spark_helper_path = str(rospy.get_param(
+            "~spark_helper_path",
+            os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "production_qr_classifier.py")))
+        self.spark_model = str(
+            rospy.get_param("~spark_model", "spark-x"))
+        self.spark_api_base_url = str(rospy.get_param(
+            "~spark_api_base_url",
+            "https://spark-api-open.xf-yun.com/x2/chat/completions"))
+        self.spark_thinking = str(rospy.get_param(
+            "~spark_thinking", "disabled"))
+        # Path to a file whose first line is the Xunfei APIPassword.  The file
+        # itself must live on the vehicle and is never committed to the repo.
+        self.spark_password_file = str(
+            rospy.get_param("~spark_password_file", ""))
+        self.spark_retries = max(
+            0, int(rospy.get_param("~spark_retries", 2)))
+        self.spark_timeout = max(
+            0.5, float(rospy.get_param("~spark_timeout", 8.0)))
+        self.spark_helper_ready_timeout = float(
+            rospy.get_param("~spark_helper_ready_timeout", 30.0))
 
         if self.qr_rotation_speed <= 0.0:
             raise TaskDefinitionError("qr_rotation_speed must be positive")
@@ -372,6 +401,9 @@ class ProductionTask2026(object):
         self.mission_finished = False
         self.ocr_process = None
         self.ocr_log_handle = None
+        self.spark_process = None
+        self.spark_log_handle = None
+        self.qr_classifications = []
         self.observations = []
         self.target_scan_events = []
         self.target_guard_events = []
@@ -407,6 +439,7 @@ class ProductionTask2026(object):
             "success": bool(success),
             "reason": str(reason),
             "qr_codes": sorted(self.used_qr_codes),
+            "qr_classifications": self.qr_classifications,
             "recognized_categories": select_three_processing_observations(
                 self.observations),
             "result_file": (
@@ -566,6 +599,7 @@ class ProductionTask2026(object):
             for observation_number in self.qr_observation_numbers:
                 self.scan_observation_point(observation_number)
             self.qr_enable_pub.publish(Int8(data=0))
+            self.stop_qr_classifier()
             self.stop_ros_camera_streaming(required=True)
 
         self.prepare_result_directory()
@@ -637,6 +671,7 @@ class ProductionTask2026(object):
             "PRODUCTION_QR_ACCEPTED observation=%d value=%s count=%d/%d",
             observation_number, detected, len(self.used_qr_codes),
             len(self.qr_observation_numbers))
+        self.classify_qr_text(observation_number, detected)
 
     def wait_for_qr_scanner(self):
         deadline = (
@@ -1069,6 +1104,191 @@ class ProductionTask2026(object):
             self.ocr_log_handle.close()
             self.ocr_log_handle = None
         rospy.loginfo("PRODUCTION_NATIVE_OCR_CLOSED")
+
+    def start_qr_classifier(self):
+        """Lazily start the Spark classifier helper; idempotent."""
+        if not self.spark_classify_enabled:
+            return False
+        if self.spark_process is not None and self.spark_process.poll() is None:
+            return True
+        if self.spark_process is not None:
+            self.stop_qr_classifier()
+        command = [
+            self.spark_python,
+            self.spark_helper_path,
+            "--api-base-url", self.spark_api_base_url,
+            "--model", self.spark_model,
+            "--retries", str(self.spark_retries),
+            "--timeout", str(self.spark_timeout),
+            "--thinking", self.spark_thinking,
+        ]
+        if self.spark_password_file:
+            command += ["--password-file", self.spark_password_file]
+        log_path = os.path.join(
+            self.result_directory, "spark_classifier.log")
+        try:
+            self.spark_log_handle = open(log_path, "ab")
+            self.spark_process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=self.spark_log_handle,
+                bufsize=1)
+        except (IOError, OSError) as exc:
+            self.spark_process = None
+            if self.spark_log_handle is not None:
+                try:
+                    self.spark_log_handle.close()
+                except Exception:
+                    pass
+                self.spark_log_handle = None
+            rospy.logerr(
+                "PRODUCTION_SPARK_CLASSIFIER_START_FAILED %s", exc)
+            return False
+        message = self.read_spark_message(
+            self.spark_helper_ready_timeout, "spark classifier startup")
+        if not message or not message.get("ready"):
+            rospy.logerr(
+                "PRODUCTION_SPARK_CLASSIFIER_READY_FAILED %s",
+                message if message else "no ready reply")
+            self.stop_qr_classifier()
+            return False
+        rospy.loginfo(
+            "PRODUCTION_SPARK_CLASSIFIER_READY model=%s remote=%s "
+            "local_keywords=%s",
+            message.get("model"), message.get("remote_configured"),
+            message.get("local_keywords"))
+        return True
+
+    def read_spark_message(self, timeout, context):
+        """Read one JSON line from the helper; never raises for the task."""
+        deadline = time.time() + float(timeout)
+        while not rospy.is_shutdown() and time.time() < deadline:
+            if (self.spark_process is None or
+                    self.spark_process.poll() is not None):
+                rospy.logerr(
+                    "PRODUCTION_SPARK_CLASSIFIER_GONE %s", context)
+                return None
+            readable, _writable, _errors = select.select(
+                [self.spark_process.stdout], [], [], 0.1)
+            if not readable:
+                continue
+            raw_line = self.spark_process.stdout.readline()
+            if not raw_line:
+                continue
+            try:
+                return json.loads(raw_line)
+            except ValueError:
+                rospy.logwarn(
+                    "PRODUCTION_SPARK_NON_JSON %s",
+                    raw_line.decode("utf-8", "replace").strip()
+                    if not isinstance(raw_line, str) else raw_line.strip())
+        return None
+
+    def stop_qr_classifier(self):
+        process = self.spark_process
+        self.spark_process = None
+        if process is not None and process.poll() is None:
+            try:
+                process.stdin.write(
+                    (json.dumps({"command": "close"}) + "\n").encode("utf-8"))
+                process.stdin.flush()
+            except (IOError, OSError):
+                pass
+            deadline = time.time() + 3.0
+            while process.poll() is None and time.time() < deadline:
+                rospy.sleep(0.05)
+            if process.poll() is None:
+                process.terminate()
+                rospy.sleep(0.2)
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+        if self.spark_log_handle is not None:
+            try:
+                self.spark_log_handle.close()
+            except Exception:
+                pass
+            self.spark_log_handle = None
+        rospy.loginfo("PRODUCTION_SPARK_CLASSIFIER_CLOSED")
+
+    def classify_qr_text(self, observation_number, qr_text):
+        """Classify one QR result; records the outcome, never aborts."""
+        if not self.spark_classify_enabled:
+            return
+        entry = {
+            "observation": int(observation_number),
+            "qr_text": qr_text,
+            "category": None,
+            "source": "none",
+            "attempts": 0,
+            "model": self.spark_model,
+            "error": "",
+        }
+        if not qr_text:
+            rospy.logwarn(
+                "PRODUCTION_SPARK_CLASSIFY observation=%d empty qr_text",
+                observation_number)
+            self.qr_classifications.append(entry)
+            return
+        if not self.start_qr_classifier():
+            entry["error"] = "classifier helper unavailable"
+            rospy.logerr(
+                "PRODUCTION_SPARK_CLASSIFY observation=%d qr=%s "
+                "category=null source=none error=%s (无法与模型取得联系)",
+                observation_number, qr_text, entry["error"])
+            self.qr_classifications.append(entry)
+            return
+        try:
+            payload = {"command": "classify", "qr_text": qr_text}
+            self.spark_process.stdin.write(
+                (json.dumps(payload) + "\n").encode("utf-8"))
+            self.spark_process.stdin.flush()
+        except (IOError, OSError) as exc:
+            entry["error"] = "cannot command classifier: %s" % exc
+            rospy.logerr(
+                "PRODUCTION_SPARK_CLASSIFY observation=%d qr=%s "
+                "category=null source=none error=%s (无法与模型取得联系)",
+                observation_number, qr_text, entry["error"])
+            self.qr_classifications.append(entry)
+            return
+        response = self.read_spark_message(
+            self.spark_timeout, "classify observation %d" %
+            observation_number)
+        if not response:
+            entry["error"] = "no reply from classifier helper"
+            rospy.logerr(
+                "PRODUCTION_SPARK_CLASSIFY observation=%d qr=%s "
+                "category=null source=none error=%s (无法与模型取得联系)",
+                observation_number, qr_text, entry["error"])
+            self.qr_classifications.append(entry)
+            return
+        entry["category"] = response.get("category")
+        entry["source"] = response.get("source", "none")
+        entry["attempts"] = response.get("attempts", 0)
+        entry["model"] = response.get("model", self.spark_model)
+        entry["error"] = response.get("error", "")
+        self.qr_classifications.append(entry)
+        # Python 2 logs cannot format raw Unicode; keep UTF-8 bytes instead.
+        category_value = entry["category"] or ""
+        error_value = entry["error"] or ""
+        if not isinstance(category_value, str):
+            category_value = category_value.encode("utf-8")
+        if not isinstance(error_value, str):
+            error_value = error_value.encode("utf-8")
+        if entry["source"] == "none":
+            rospy.logerr(
+                "PRODUCTION_SPARK_CLASSIFY observation=%d qr=%s "
+                "category=null source=none attempts=%d error=%s "
+                "(无法与模型取得联系)",
+                observation_number, qr_text, entry["attempts"],
+                error_value)
+        else:
+            rospy.loginfo(
+                "PRODUCTION_SPARK_CLASSIFY observation=%d qr=%s "
+                "category=%s source=%s attempts=%d",
+                observation_number, qr_text, category_value,
+                entry["source"], entry["attempts"])
 
     def rotate_for_pixel_error(
             self, error_pixels, context, previous_error_pixels=None,
@@ -2085,6 +2305,7 @@ class ProductionTask2026(object):
             "target_guard_events": self.target_guard_events,
             "target_scan_events": self.target_scan_events,
             "observations": self.observations,
+            "qr_classifications": self.qr_classifications,
             "recognized_categories": select_three_processing_observations(
                 self.observations),
         }
@@ -2466,6 +2687,10 @@ class ProductionTask2026(object):
             pass
         try:
             self.stop_native_ocr()
+        except Exception:
+            pass
+        try:
+            self.stop_qr_classifier()
         except Exception:
             pass
         try:

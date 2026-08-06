@@ -777,6 +777,7 @@ scp ucar_ws/src/ucar_2026/scripts/production_task_2026.py \
   ucar_ws/src/ucar_2026/scripts/production_task_geometry.py \
   ucar_ws/src/ucar_2026/scripts/production_task_perception.py \
   ucar_ws/src/ucar_2026/scripts/production_camera_ocr.py \
+  ucar_ws/src/ucar_2026/scripts/production_qr_classifier.py \
   ucar@<CAR_HOST>:~/ucar_ws/src/ucar_2026/scripts/
 scp ucar_ws/src/ucar_2026/config/production_full_grid_all_numbered.json \
   ucar@<CAR_HOST>:~/ucar_ws/src/ucar_2026/config/
@@ -2126,3 +2127,50 @@ roslaunch ucar_2026 yolo_dataset_capture.launch \
 开始前确认没有已运行的 `2026.launch` 或其它 `/usb_cam` 占用者。不得与生产任务、原生 OCR 或
 手工相机节点同时运行。若改变数量或间隔，只通过 launch 参数显式设置，例如
 `capture_count:=300 capture_interval:=0.5`；采集期间不要关闭 Master 或拔出相机。
+
+## 星火 Spark 二维码分类（QR → 日用品/食品/电子产品）
+
+分类在二维码阶段自动执行：`production_task_2026.py` 每收到一个新二维码，就通过
+`production_qr_classifier.py` helper 调用讯飞星火（OpenAI 兼容 HTTP），失败后降级本地
+关键字映射，仍无结果只记录 `source=none` 并在终端输出"无法与模型取得联系"，不阻断任务。
+结果写入 `observations.json` 的 `qr_classifications`。
+
+默认 `spark_classify_enabled=true`（已启用；小车端缺密码文件时自动降级本地映射，不阻断）。
+首次启用前需在小车放好密码文件，步骤：
+
+1. 注册 https://www.xfyun.cn 并实名，控制台创建应用、领取 X2 授权体验
+   （https://xinghuo.xfyun.cn/sparkapi?scr=price）；
+2. 在控制台 https://console.xfyun.cn/services/bmx1 复制 APIPassword；
+3. 在小车本地保存密码文件（不入库、不备份到仓库），例如（APIKey:
+   `2fe221f22301690618c6756e68975b6b`，APISecret: `YjFjZWM1NDgyNzFkN2JmMjlhMWUzNjk2`，
+   合并为 `APIKey:APISecret` 格式）：
+
+   ```bash
+   printf '%s\n' '<APIPassword>' > ~/.ucar/spark_password
+   chmod 600 ~/.ucar/spark_password
+   ```
+
+4. `2026.launch` 已默认 `spark_classify_enabled=true`、
+   `spark_password_file=/home/ucar/.ucar/spark_password`。默认即深度推理
+   **Spark X2**：`spark_model=spark-x`、`spark_api_base_url=
+   https://spark-api-open.xf-yun.com/x2/chat/completions`、`spark_thinking=disabled`
+   （分类任务关闭深度思考最快；需要深度推理可改 `enabled`，此时建议把
+   `spark_timeout` 提到 60 以上）。X1.5 可用 `/v2/chat/completions`。
+5. 按本文件"ucar_2026 正式生产任务"流程部署并构建（Python 3 helper 在小车端以
+   `/usr/bin/python3` 运行，Python 2 任务端通过 stdin/stdout 与它通信）。
+
+单独验证 helper（可先在任意 Python 3 机器上做，不影响小车）：
+
+```bash
+printf '%s\n' '{"command":"classify","qr_text":"旺仔牛奶"}' \
+             '{"command":"classify","qr_text":"手机充电器"}' \
+             '{"command":"close"}' \
+  | python3 ucar_ws/src/ucar_2026/scripts/production_qr_classifier.py \
+      --password-file ~/.ucar/spark_password
+```
+
+预期依次返回 `source=spark`（或断网时 `source=local`）的 `category`：`食品`、`电子产品`。
+helper 日志位于 `~/.ros/ucar_2026_observations/spark_classifier.log`；任务日志关键字
+`PRODUCTION_SPARK_CLASSIFY`。注意：从 Windows 终端管道传中文给 Python 可能因 locale
+乱码，正式验证在小车 Ubuntu（UTF-8）上进行。
+
