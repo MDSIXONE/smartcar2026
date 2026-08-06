@@ -284,6 +284,91 @@ rosrun fdilink_ahrs ahrs_driver \
 IMU 数据，未复现 CRC；测试时 CP2102 已重新位于外置 Hub 的 `1-2.3`，并非先前的
 根 Hub 直连，所以结果只证明当次间歇故障没有发生，不能宣告硬件修复。
 
+### 底盘串口短读重同步与静态验证
+
+`base_driver` 的每一次串口字段读取必须读满指定字节数才会参与帧校验；零字节或短读会
+清空当前缓冲、丢弃该帧并回到帧头搜索。它不会重发旧里程计、不会放宽任务的
+`/odom_raw` 新鲜度门限，也不会因诊断日志自动恢复运动。为防止“持续少量字节”让读取
+无限延长，每个字段总预算为 `serial_timeout`（默认 `50 ms`），再加最多一次底层读超时；
+`serial_gap_warn`（默认
+`0.35 s`）只控制 `BASE_*_PUBLISH_GAP` / `BASE_SERIAL_SLOW_READ` 的诊断阈值。
+
+先按当次网络发现的小车地址同步；这一步只部署文件，不启动 ROS、不发布速度：
+
+```powershell
+$VEHICLE_HOST = 'ucar@<按 rosmaster/NETWORK_CONFIGURATION.md 发现的小车地址>'
+
+ssh $VEHICLE_HOST 'mkdir -p ~/ucar_ws/src/ucar_controller/test'
+scp ucar_ws/src/ucar_controller/src/base_driver.cpp `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_controller/src/"
+scp ucar_ws/src/ucar_controller/include/ucar_controller/base_driver.h `
+  ucar_ws/src/ucar_controller/include/ucar_controller/serial_read_exact.h `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_controller/include/ucar_controller/"
+scp ucar_ws/src/ucar_controller/config/driver_params_mini.yaml `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_controller/config/"
+scp ucar_ws/src/ucar_controller/CMakeLists.txt `
+  ucar_ws/src/ucar_controller/package.xml `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_controller/"
+scp ucar_ws/src/ucar_controller/test/test_serial_read_exact.cpp `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_controller/test/"
+```
+
+随后只在小车 Ubuntu 18.04 上构建和运行单元测试。每个 `source` 后重新设定当次
+WSL Master 地址；这不启动或要求小车端 `roscore`：
+
+```bash
+cd ~/ucar_ws
+source /opt/ros/melodic/setup.bash
+unset ROS_HOSTNAME
+export ROS_MASTER_URI="http://<MASTER_IP>:11311"
+export ROS_IP="$(ip -4 route get <MASTER_IP> | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+catkin_make --pkg ucar_controller -DCATKIN_ENABLE_TESTING=ON
+source devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_MASTER_URI="http://<MASTER_IP>:11311"
+export ROS_IP="$(ip -4 route get <MASTER_IP> | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+catkin_make run_tests_ucar_controller
+catkin_test_results --verbose build/test_results/ucar_controller
+```
+
+若车端 `CMakeCache.txt` 已有不含 `ucar_controller` 的
+`CATKIN_WHITELIST_PACKAGES`，上面的包级构建仍会提示缺少
+`ucar_controller/all`。此时仅临时切换白名单，测试后恢复本机原有列表；不要删除整个
+`build` 或 `devel` 目录：
+
+```bash
+# 先从 CMakeCache 记录原有列表，再将下面 ORIGINAL_WHITELIST 替换为该值。
+grep '^CATKIN_WHITELIST_PACKAGES:' build/CMakeCache.txt
+ORIGINAL_WHITELIST='cym_planner;jie_ware;yolo2025;ucar_2026'
+catkin_make --force-cmake -DCATKIN_ENABLE_TESTING=ON \
+  "-DCATKIN_WHITELIST_PACKAGES=ucar_controller"
+catkin_make run_tests_ucar_controller
+catkin_test_results --verbose build/test_results/ucar_controller
+catkin_make --force-cmake -DCATKIN_ENABLE_TESTING=ON \
+  "-DCATKIN_WHITELIST_PACKAGES=${ORIGINAL_WHITELIST}"
+```
+
+静态链路验证时，WSL 仍是唯一 Master。先由安全终端发布一次零速度，之后只启动
+`base_driver` 并观察至少 10 分钟；不得发送导航目标：
+
+```bash
+rostopic pub -1 /cmd_vel geometry_msgs/Twist '{}'
+roslaunch ucar_controller base_driver.launch 2>&1 | tee /tmp/base_driver_serial.log
+
+# 另一已连接同一 Master 的终端：
+rostopic info /odom
+timeout 620 rostopic hz -w 300 /odom
+timeout 620 rostopic hz -w 300 /imu
+grep -E 'BASE_SERIAL_(RESYNC_SHORT_READ|SLOW_READ)|BASE_(odom|imu)_PUBLISH_GAP' \
+  /tmp/base_driver_serial.log
+```
+
+任何 `BASE_SERIAL_RESYNC_SHORT_READ`、`BASE_*_PUBLISH_GAP`、CRC、NaN、
+`TF_NAN_INPUT` 或 sensor inactive 都要求立即零速并停止导航/底盘链路。短读日志
+说明实际字节流仍不完整，软件会安全丢帧但不能修复 CP2102、串口线、接地、供电或 MCU
+发帧；应转入物理链路排查。静态通过也只证明该观察窗口内稳定，完整实车任务仍须用户
+重新确认起点后单独执行。
+
 ### 无 RViz 的 yolo2025 自动目标差分
 
 为判断 RViz 的跨机话题流量是否会放大串口问题，必须保持 WSL 为唯一 Master，先用
@@ -2010,3 +2095,34 @@ printf 'y\n' | rosnode cleanup
 
 `rosnode cleanup` 会删除无法联系节点的 Master 注册，因此绝不能在正常运行或网络不稳定、却尚未
 确认进程退出时使用。
+
+## YOLO 图像采集（300 张，0.5 秒间隔）
+
+`yolo_dataset_capture.launch` 只启动 `/usb_cam` 和采集节点，不启动导航、底盘驱动或
+`/cmd_vel` 发布者。默认连续采集 300 张、每 0.5 秒一张（约 150 秒），并把每五张中的
+一张放入验证集，因此生成 240 张训练图和 60 张验证图：
+
+```text
+<output_root>/
+  images/train/capture_*.jpg
+  images/val/capture_*.jpg
+  labels/train/capture_*.txt
+  labels/val/capture_*.txt
+  capture_manifest.json
+```
+
+每张图会有一个同名的空 `.txt` 标签文件，表示尚待标注；标注完成后必须按 YOLO
+`class x_center y_center width height`（全部归一化）覆盖这些文件。采集完成或失败时，节点会调用
+`/usb_cam/stop_capture` 停止视频流。
+
+小车重新供电后，先按本文件的动态网络流程启动唯一 WSL Master；小车端每次 source 后重新设置
+本次 `ROS_MASTER_URI`/`ROS_IP`，然后运行：
+
+```bash
+roslaunch ucar_2026 yolo_dataset_capture.launch \
+  output_root:="$HOME/.ros/ucar_2026_yolo_dataset"
+```
+
+开始前确认没有已运行的 `2026.launch` 或其它 `/usb_cam` 占用者。不得与生产任务、原生 OCR 或
+手工相机节点同时运行。若改变数量或间隔，只通过 launch 参数显式设置，例如
+`capture_count:=300 capture_interval:=0.5`；采集期间不要关闭 Master 或拔出相机。
