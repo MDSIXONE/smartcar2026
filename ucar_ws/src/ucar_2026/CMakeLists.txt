@@ -11,6 +11,7 @@ catkin_install_python(PROGRAMS
   scripts/production_task_2026.py
   scripts/production_task_geometry.py
   scripts/production_task_perception.py
+  scripts/yolo_dataset_capture.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
