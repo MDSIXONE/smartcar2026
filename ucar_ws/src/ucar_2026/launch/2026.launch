@@ -110,9 +110,14 @@
             <param name="staging_point_number" value="52"/>
             <rosparam param="qr_observation_numbers">[262, 232, 295]</rosparam>
             <!-- Each target is reached before one OCR search revolution.  A
-                 candidate is centred/ranged; no candidate goes straight on. -->
-            <rosparam param="production_route_numbers">[12, 23, 14, 25, 16]</rosparam>
-            <rosparam param="production_observation_headings_deg">[-45, 45, -45, 45, 45]</rosparam>
+                 candidate is centred/ranged; no candidate goes straight on.
+                 Scanning stops early once three distinct categories are
+                 recorded, then the vehicle drives to the destination point
+                 facing the heading point. -->
+            <rosparam param="production_route_numbers">[12, 22, 13, 23, 14, 24, 15, 25, 16, 26, 17, 27, 18, 28, 19, 29]</rosparam>
+            <rosparam param="production_observation_headings_deg">[-45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45]</rosparam>
+            <param name="destination_point_number" value="170"/>
+            <param name="destination_heading_point_number" value="319"/>
             <!-- Timeout only: a fresh QR event advances immediately. -->
             <param name="qr_search_timeout" value="4.0"/>
             <param name="qr_rotation_speed" value="0.18"/>

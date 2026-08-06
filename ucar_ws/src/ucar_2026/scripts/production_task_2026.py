@@ -100,6 +100,10 @@ class ProductionTask2026(object):
                 "~production_observation_headings_deg",
                 DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG)
         ]
+        self.destination_point_number = int(
+            rospy.get_param("~destination_point_number", 170))
+        self.destination_heading_point_number = int(
+            rospy.get_param("~destination_heading_point_number", 319))
 
         self.start_delay = float(rospy.get_param("~start_delay", 2.0))
         self.resume_production_only = bool(
@@ -350,7 +354,9 @@ class ProductionTask2026(object):
         all_required_numbers = (
             [self.staging_point_number] +
             self.qr_observation_numbers +
-            self.production_route_numbers)
+            self.production_route_numbers +
+            [self.destination_point_number,
+             self.destination_heading_point_number])
         self.points = load_numbered_points(self.grid_path)
         require_points(self.points, all_required_numbers)
         self.production_navigation_legs = [
@@ -640,6 +646,12 @@ class ProductionTask2026(object):
                 segment_index, start_number, end_number,
                 target_yaw=self.production_observation_headings[
                     segment_index - 1])
+            if len(select_three_processing_observations(
+                    self.observations)) >= 3:
+                rospy.loginfo(
+                    "PRODUCTION_CATEGORIES_COMPLETE count=3 "
+                    "early_stop_at_route_point=%d", end_number)
+                break
 
         self.stop_native_ocr()
         self.ensure_ros_camera_released()
@@ -649,12 +661,21 @@ class ProductionTask2026(object):
             raise MissionAbort(
                 "only %d/3 distinct processing categories were recognized" %
                 len(selected))
+        destination = self.points[self.destination_point_number]
+        heading_point = self.points[self.destination_heading_point_number]
+        destination_yaw = bearing(destination, heading_point)
+        self.publish_state(
+            "DESTINATION_%d" % self.destination_point_number)
+        self.navigate_coordinates(
+            destination[0], destination[1], destination_yaw,
+            "destination point %d" % self.destination_point_number,
+            require_plan=True)
         self.stop_motion()
         self.publish_state("SUCCEEDED")
         self.publish_result(
             True,
-            "saved three processing categories; route completed through point %d" %
-            self.production_route_numbers[-1])
+            "saved three processing categories; arrived at destination point %d" %
+            self.destination_point_number)
 
     def scan_observation_point(self, observation_number):
         staging = self.points[self.staging_point_number]
