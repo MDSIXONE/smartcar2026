@@ -104,6 +104,8 @@ class ProductionTask2026(object):
             rospy.get_param("~destination_point_number", 170))
         self.destination_heading_point_number = int(
             rospy.get_param("~destination_heading_point_number", 319))
+        self.post_qr_waypoint_number = int(
+            rospy.get_param("~post_qr_waypoint_number", 3))
 
         self.start_delay = float(rospy.get_param("~start_delay", 2.0))
         self.resume_production_only = bool(
@@ -193,7 +195,7 @@ class ProductionTask2026(object):
         self.ocr_capture_timeout = float(
             rospy.get_param("~ocr_capture_timeout", 12.0))
         self.ocr_scan_rotation_speed = abs(float(rospy.get_param(
-            "~ocr_scan_rotation_speed", 0.18)))
+            "~ocr_scan_rotation_speed", 0.25)))
         self.ocr_scan_poll_period = float(rospy.get_param(
             "~ocr_scan_poll_period",
             rospy.get_param("~navigation_ocr_poll_period", 0.20)))
@@ -203,7 +205,7 @@ class ProductionTask2026(object):
         self.ocr_min_confidence = float(
             rospy.get_param("~ocr_min_confidence", 0.30))
         self.ocr_alignment_tolerance_px = float(
-            rospy.get_param("~ocr_alignment_tolerance_px", 18.0))
+            rospy.get_param("~ocr_alignment_tolerance_px", 35.0))
         self.ocr_alignment_kp = float(
             rospy.get_param("~ocr_alignment_kp", 0.0025))
         self.ocr_alignment_kd = float(
@@ -356,7 +358,9 @@ class ProductionTask2026(object):
             self.qr_observation_numbers +
             self.production_route_numbers +
             [self.destination_point_number,
-             self.destination_heading_point_number])
+             self.destination_heading_point_number] +
+            ([self.post_qr_waypoint_number]
+             if self.post_qr_waypoint_number else []))
         self.points = load_numbered_points(self.grid_path)
         require_points(self.points, all_required_numbers)
         self.production_navigation_legs = [
@@ -626,6 +630,18 @@ class ProductionTask2026(object):
             self.qr_enable_pub.publish(Int8(data=0))
             self.stop_qr_classifier()
             self.stop_ros_camera_streaming(required=True)
+
+            if self.post_qr_waypoint_number:
+                waypoint = self.points[self.post_qr_waypoint_number]
+                rospy.loginfo(
+                    "PRODUCTION_POST_QR_WAYPOINT %d (no rotation)",
+                    self.post_qr_waypoint_number)
+                self.publish_state(
+                    "WAYPOINT_%d" % self.post_qr_waypoint_number)
+                self.navigate_coordinates(
+                    waypoint[0], waypoint[1], 0.0,
+                    "post-QR waypoint %d" % self.post_qr_waypoint_number,
+                    require_plan=True)
 
         self.prepare_result_directory()
         if self.use_ros_camera_for_ocr:
@@ -1830,9 +1846,9 @@ class ProductionTask2026(object):
                         str(observation.get("range_residual_m")))
                 self.target_scan_events.append(event)
                 self.save_observation_summary()
-                # Alignment changes yaw.  Return to the actual exposure yaw
-                # before resuming so the remaining scan covers one real circle.
-                self.restore_ocr_capture_yaw(response, scan_label + " resume")
+                # Alignment changes yaw.  Resume the scan from the current
+                # heading instead of returning to the capture yaw so the
+                # remaining revolution covers fresh wall angles.
                 return True
 
             _response, turn_progress = self.rotate_full_revolution_for_ocr(

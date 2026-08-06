@@ -118,6 +118,9 @@
             <rosparam param="production_observation_headings_deg">[-45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45]</rosparam>
             <param name="destination_point_number" value="170"/>
             <param name="destination_heading_point_number" value="319"/>
+            <!-- Drive to this waypoint after the QR phase (no OCR rotation),
+                 then start the production route.  0 disables it. -->
+            <param name="post_qr_waypoint_number" value="3"/>
             <!-- Timeout only: a fresh QR event advances immediately. -->
             <param name="qr_search_timeout" value="4.0"/>
             <param name="qr_rotation_speed" value="0.18"/>
@@ -164,14 +167,27 @@
             <param name="ocr_side" value="640"/>
             <param name="camera_mirror" value="true"/>
             <param name="ocr_min_confidence" value="0.30"/>
-            <param name="ocr_scan_rotation_speed" value="0.18"/>
+            <param name="ocr_scan_rotation_speed" value="0.25"/>
+            <!-- Actual rotation is ~55% of command (0.14 rad/s vs 0.25),
+                 so the 360deg OCR turn budget needs a generous scale. -->
+            <param name="rotation_timeout_scale" value="3.5"/>
             <param name="ocr_scan_poll_period" value="0.20"/>
             <param name="ocr_scan_candidate_confidence" value="60.0"/>
-            <param name="goal_cancel_timeout" value="3.0"/>
+            <param name="goal_cancel_timeout" value="5.0"/>
             <param name="stop_confirmation_timeout" value="2.0"/>
+            <!-- The chassis odom/imu briefly goes silent for ~1.0-1.04 s on
+                 every run (MCU/serial characteristic, 5 runs in a row).  The
+                 default 0.35 s freshness threshold made every mission abort;
+                 1.5 s tolerates the normal gap while still failing on real
+                 odom loss. -->
+            <param name="odom_timeout" value="1.5"/>
+            <!-- The same ~1.0-1.04 s odom/imu gap also freezes the odom ->
+                 base_link TF chain; match odom_timeout so the brief gap does
+                 not trip the TF freshness check (default 0.50 s). -->
+            <param name="tf_timeout" value="1.5"/>
             <param name="stopped_odom_speed_epsilon" value="0.02"/>
             <param name="stopped_odom_samples" value="3"/>
-            <param name="ocr_alignment_tolerance_px" value="18.0"/>
+            <param name="ocr_alignment_tolerance_px" value="35.0"/>
             <param name="ocr_alignment_kp" value="0.0025"/>
             <param name="ocr_alignment_kd" value="0.00035"/>
             <param name="ocr_alignment_max_speed" value="0.22"/>
