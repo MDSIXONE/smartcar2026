@@ -841,6 +841,14 @@ bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh "$MASTER_IP" mission
 实车放回起点，才能再次启动 mission。不得在车辆仍位于 52 或生产区其他点时直接
 重启整条定位链路；固定初值会造成地图位姿与实车位置不一致。
 
+任务节点启动后（`WAITING_FOR_ITEM` 状态）会阻塞等待物品输入：在启动
+`start_2026.sh` 的同一终端直接输入本次放入的物品名并回车（如：苹果、可乐、
+螺丝刀）。输入为空将中止任务；只有收到物品名后任务才进入安全等待与 QR 阶段。
+
+语音播报（USB 音箱，`/home/ucar/wake/tts_say.py`，失败不影响任务）：初始化完成
+（安全等待 + 点模式就绪）播放「初始化完成，准备开始任务」；扫码且星火分类返回后
+播放「已取得*<物品名>」。
+
 该模式不需要也不启动 RViz。运行时可在连接同一 Master 的诊断终端观察：
 
 ```bash
@@ -1967,19 +1975,24 @@ CymPlanner 报 local costmap not current 并保持零速。任何 NaN、TF_NAN�
 二维码阶段结束后的生产目标固定为 `12 → 22 → 13 → 23 → 14 → 24 → 15 → 25 → 16 → 26
 → 17 → 27 → 18 → 28 → 19 → 29`（16 点，航向交替 -45°/45°），每一目标均按以下状态机
 执行：导航到点并验证到达 → 开启相机 → 原地最多顺时针转 360° 进行异步 OCR → 关闭相机
-→ 前往下一个目标。行驶途中不会调用 OCR，也不会因 OCR 结果改变当前导航目标。一旦收集
-到 3 个不同类别（`PRODUCTION_CATEGORIES_COMPLETE`），不再前往下一目标，直接导航到
-终点 `170 (0.0,-0.5)`、航向朝点 `319 (0.0,-0.75)`（正南），到达后 SUCCEEDED；16 点
-走完仍不足 3 类则任务失败。
+→ 前往下一个目标。行驶途中不会调用 OCR，也不会因 OCR 结果改变当前导航目标。目标类别
+由二维码文本经星火分类得到（`PRODUCTION_TASK_TARGET_CATEGORY`）；转圈中首个目标类别
+候选被记录（`PRODUCTION_TARGET_CATEGORY_FOUND`）即停止旋转、提前退出生产循环，不再
+识别其余区域。命中后根据前向激光射线与墙的交点编号/坐标，计算停车点 = 墙交点向场内
+垂直 25 cm（如交点 300 → 停点 (0.75,1.25)=点 7；交点 455 → 停点 (2.25,0.75)=点 20），
+导航停稳后停留 `processing_dwell_seconds`（默认 3 s，`PROCESSING_DWELL_%03d`），随后
+直接导航到终点 `17 (0.75,0.75)`、航向朝点 `300 (0.75,1.5)`（顶墙），到达后
+SUCCEEDED；16 点走完仍未识别到目标类别则任务失败（MissionAbort）。
 
 转圈期间的第一个合格 OCR 候选会立即连续发布零速度并等待新鲜低速里程计；由于推理结果
 可能在车辆已继续旋转后才返回，任务会先原地回到候选帧的拍摄朝向并再次验证停车，之后才
 进行 OCR 框居中、前向雷达测距、TF 投影和墙点匹配。转满一圈仍无候选时，仅记录
-`no_ocr_after_full_turn`，立即进入下一目标，不会中止任务。
+`no_ocr_after_full_turn`，立即进入下一目标，不会中止任务。非目标类别的候选只记
+`PRODUCTION_CATEGORY_IGNORED`，不停车继续转圈。
 
 运行目录的 `observations.json` 保留成功候选的 OCR、雷达和墙点结果，并以
-`target_scan_events` 审计每个目标的完整转圈或候选。生产完成后仍要求得到三个不同的有效
-墙点；不足三个时安全停止并报告任务失败。`ocr_scan_rotation_speed`、
+`target_scan_events` 审计每个目标的完整转圈或候选。生产完成后要求得到目标类别的一个
+有效墙点；找不到时安全停止并报告任务失败。`ocr_scan_rotation_speed`、
 `ocr_scan_poll_period` 和 `ocr_scan_candidate_confidence` 可在 `2026.launch` 中调节。
 
 部署、构建和测试不启动 ROS、不发布速度。小车地址和 WSL Master 必须按
@@ -2010,13 +2023,18 @@ source /opt/ros/melodic/setup.bash
 unset ROS_HOSTNAME
 export ROS_MASTER_URI="http://<MASTER_IP>:11311"
 export ROS_IP="$(ip -4 route get <MASTER_IP> | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
-catkin_make --pkg ucar_2026 -DCATKIN_ENABLE_TESTING=ON
+catkin_make -DCATKIN_WHITELIST_PACKAGES="ucar_controller;ucar_2026" --pkg ucar_2026 -DCATKIN_ENABLE_TESTING=ON
 source devel/setup.bash
 export ROS_MASTER_URI="http://<MASTER_IP>:11311"
 export ROS_IP="$(ip -4 route get <MASTER_IP> | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
-catkin_make run_tests_ucar_2026
+catkin_make -DCATKIN_WHITELIST_PACKAGES="ucar_controller;ucar_2026" run_tests_ucar_2026
 catkin_test_results --verbose build/test_results/ucar_2026
 ```
+
+`-DCATKIN_WHITELIST_PACKAGES="ucar_controller;ucar_2026"` 是 2026-08-07 起车上
+CMakeCache 的白名单现值（含历史残留的 ucar_controller）；若车端白名单已变，构建前先
+`grep CATKIN_WHITELIST_PACKAGES build/CMakeCache.txt` 按实际值覆盖，否则会报
+`No rule to make target 'ucar_2026/all'`。
 
 实车运行仍需用户明确确认车辆已放回固定起点。启动前按安全门检查 `/odom_raw`、
 `odom → base_link`、`map → base_link` 和雷达均为有限且新鲜；任何 NaN 或
