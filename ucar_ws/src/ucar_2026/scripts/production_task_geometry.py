@@ -172,6 +172,61 @@ def load_wall_reference_points(path):
     return require_points(points, raw_numbers)
 
 
+def load_middle_zone_geometry(path):
+    """Return ``(x_min, x_max, y_min, y_max, square_side_m)`` for the middle zone."""
+    try:
+        with open(path, "r") as handle:
+            document = json.load(handle)
+    except (IOError, ValueError) as exc:
+        raise TaskDefinitionError("cannot load grid file %s: %s" % (path, exc))
+    try:
+        side_length = float(document["square_side_m"])
+        bounds = document["middle_zone_bounds_m"]
+        x_min, x_max = float(bounds["x"][0]), float(bounds["x"][1])
+        y_min, y_max = float(bounds["y"][0]), float(bounds["y"][1])
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise TaskDefinitionError(
+            "grid file has invalid middle zone geometry: %s" % exc)
+    if not is_finite(side_length) or side_length <= 0.0:
+        raise TaskDefinitionError("square_side_m must be finite and positive")
+    for value in (x_min, x_max, y_min, y_max):
+        if not is_finite(value):
+            raise TaskDefinitionError("middle zone bounds must be finite")
+    if x_min >= x_max or y_min >= y_max:
+        raise TaskDefinitionError("middle zone bounds are reversed")
+    return (x_min, x_max, y_min, y_max, side_length)
+
+
+def stop_point_for_wall_point(wall_coordinate, square_side_m, middle_bounds):
+    """Return the parking pose ``(x, y)`` half a cell inside a wall point.
+
+    ``middle_bounds`` is the ``(x_min, x_max, y_min, y_max)`` tuple returned by
+    :func:`load_middle_zone_geometry`.  The wall point must lie on one of the
+    four middle-zone boundaries; the stop point is the boundary coordinate
+    displaced by ``square_side_m / 2`` toward the inside of the zone.
+    """
+    x_min, x_max, y_min, y_max = middle_bounds
+    wall_x = float(wall_coordinate[0])
+    wall_y = float(wall_coordinate[1])
+    if not is_finite(wall_x) or not is_finite(wall_y):
+        raise TaskDefinitionError("wall point coordinate is not finite")
+    if not is_finite(square_side_m) or square_side_m <= 0.0:
+        raise TaskDefinitionError("square_side_m must be finite and positive")
+    offset = square_side_m / 2.0
+    tolerance = 1e-6
+    if abs(wall_y - y_max) <= tolerance and x_min <= wall_x <= x_max:
+        return (wall_x, y_max - offset)
+    if abs(wall_y - y_min) <= tolerance and x_min <= wall_x <= x_max:
+        return (wall_x, y_min + offset)
+    if abs(wall_x - x_min) <= tolerance and y_min <= wall_y <= y_max:
+        return (x_min + offset, wall_y)
+    if abs(wall_x - x_max) <= tolerance and y_min <= wall_y <= y_max:
+        return (x_max - offset, wall_y)
+    raise TaskDefinitionError(
+        "wall point (%.3f, %.3f) is not on the middle zone boundary" %
+        (wall_x, wall_y))
+
+
 def load_middle_target_guard_points(path, target_numbers):
     """Return the four numbered middle-grid vertices around each target.
 

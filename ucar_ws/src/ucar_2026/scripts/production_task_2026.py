@@ -28,6 +28,7 @@ import math
 import os
 import select
 import subprocess
+import sys
 import threading
 import time
 
@@ -54,12 +55,14 @@ from production_task_geometry import (
     is_finite,
     load_numbered_points,
     load_middle_target_guard_points,
+    load_middle_zone_geometry,
     load_wall_reference_points,
     needs_recenter,
     normalize_angle,
     position_error,
     positive_turn_increment,
     require_points,
+    stop_point_for_wall_point,
 )
 from production_task_perception import (
     alignment_angular_speed,
@@ -104,8 +107,26 @@ class ProductionTask2026(object):
             rospy.get_param("~destination_point_number", 170))
         self.destination_heading_point_number = int(
             rospy.get_param("~destination_heading_point_number", 319))
+        self.destination_midpoint_point_numbers = [
+            int(value) for value in
+            rospy.get_param(
+                "~destination_midpoint_point_numbers", "").split(",")
+            if value.strip()
+        ]
+        self.processing_dwell_seconds = float(rospy.get_param(
+            "~processing_dwell_seconds", 3.0))
+        self.tf_lookup_retry_seconds = float(rospy.get_param(
+            "~tf_lookup_retry_seconds", 0.5))
+        self.tts_enabled = bool(
+            rospy.get_param("~tts_enabled", True))
+        self.tts_python = str(rospy.get_param(
+            "~tts_python", "/usr/bin/python3"))
+        self.tts_helper_path = str(rospy.get_param(
+            "~tts_helper_path", "/home/ucar/wake/tts_say.py"))
         self.post_qr_waypoint_number = int(
             rospy.get_param("~post_qr_waypoint_number", 3))
+        self.post_qr_waypoint_heading_point_number = int(
+            rospy.get_param("~post_qr_waypoint_heading_point_number", 0))
 
         self.start_delay = float(rospy.get_param("~start_delay", 2.0))
         self.resume_production_only = bool(
@@ -249,7 +270,7 @@ class ProductionTask2026(object):
             rospy.get_param(
                 "~straight_segment_angle_tolerance_deg", 1.0)))
         self.stop_confirmation_timeout = float(
-            rospy.get_param("~stop_confirmation_timeout", 2.0))
+            rospy.get_param("~stop_confirmation_timeout", 4.0))
         self.stopped_odom_speed_epsilon = float(
             rospy.get_param("~stopped_odom_speed_epsilon", 0.02))
         self.stopped_odom_samples = max(
@@ -289,6 +310,19 @@ class ProductionTask2026(object):
 
         if self.qr_rotation_speed <= 0.0:
             raise TaskDefinitionError("qr_rotation_speed must be positive")
+        if (not is_finite(self.processing_dwell_seconds) or
+                self.processing_dwell_seconds < 0.0):
+            raise TaskDefinitionError(
+                "processing_dwell_seconds must be finite and non-negative")
+        if (not is_finite(self.tf_lookup_retry_seconds) or
+                self.tf_lookup_retry_seconds < 0.0):
+            raise TaskDefinitionError(
+                "tf_lookup_retry_seconds must be finite and non-negative")
+        if self.tts_enabled:
+            if not self.tts_python.strip() or not self.tts_helper_path.strip():
+                raise TaskDefinitionError(
+                    "tts_python and tts_helper_path must be set when "
+                    "tts_enabled")
         if (
                 len(self.production_route_numbers) !=
                 len(self.production_observation_headings)):
@@ -352,6 +386,10 @@ class ProductionTask2026(object):
                 self.target_guard_scan_max_age <= 0.0):
             raise TaskDefinitionError(
                 "target guard scan parameters must be finite and positive")
+        if len(self.destination_midpoint_point_numbers) not in (0, 2):
+            raise TaskDefinitionError(
+                "destination_midpoint_point_numbers must list exactly two "
+                "point numbers or stay empty")
 
         all_required_numbers = (
             [self.staging_point_number] +
@@ -359,8 +397,11 @@ class ProductionTask2026(object):
             self.production_route_numbers +
             [self.destination_point_number,
              self.destination_heading_point_number] +
+            self.destination_midpoint_point_numbers +
             ([self.post_qr_waypoint_number]
-             if self.post_qr_waypoint_number else []))
+             if self.post_qr_waypoint_number else []) +
+            ([self.post_qr_waypoint_heading_point_number]
+             if self.post_qr_waypoint_heading_point_number else []))
         self.points = load_numbered_points(self.grid_path)
         require_points(self.points, all_required_numbers)
         self.production_navigation_legs = [
@@ -372,6 +413,13 @@ class ProductionTask2026(object):
             self.grid_path, self.production_route_numbers)
         self.wall_reference_points = load_wall_reference_points(
             self.grid_path)
+        (self.middle_zone_x_min, self.middle_zone_x_max,
+         self.middle_zone_y_min, self.middle_zone_y_max,
+         self.middle_zone_square_side) = load_middle_zone_geometry(
+            self.grid_path)
+        self.middle_zone_bounds = (
+            self.middle_zone_x_min, self.middle_zone_x_max,
+            self.middle_zone_y_min, self.middle_zone_y_max)
 
         self.move_base = actionlib.SimpleActionClient(
             "move_base", MoveBaseAction)
@@ -421,6 +469,9 @@ class ProductionTask2026(object):
         self.target_guard_events = []
         self.run_directory = None
         self.capture_sequence = 0
+        self.expected_item_text = u""
+        self.expected_production_category = None
+        self._ocr_turn_stop_flag = False
 
         rospy.Subscriber(
             "/odom_raw", Odometry, self.odom_cb, queue_size=20)
@@ -450,6 +501,8 @@ class ProductionTask2026(object):
         payload = {
             "success": bool(success),
             "reason": str(reason),
+            "item_text": self.expected_item_text,
+            "target_category": self.expected_production_category,
             "qr_codes": sorted(self.used_qr_codes),
             "qr_classifications": self.qr_classifications,
             "recognized_categories": select_three_processing_observations(
@@ -597,6 +650,9 @@ class ProductionTask2026(object):
                 self.mission_finished = True
 
     def run_mission(self):
+        self.publish_state("WAITING_FOR_ITEM")
+        self.speak(u"初始化完成，准备开始任务")
+        self.expected_item_text = self.wait_for_item_input()
         self.publish_state("WAITING_SAFE_START")
         if not self.move_base.wait_for_server(
                 rospy.Duration(self.move_base_ready_timeout)):
@@ -606,14 +662,18 @@ class ProductionTask2026(object):
         self.wait_for_safe_start()
         self.switch_to_point_mode()
 
+        observation_key = 0
         if self.resume_production_only:
             self.qr_enable_pub.publish(Int8(data=0))
             rospy.logwarn(
                 "PRODUCTION_TASK_RESUME production-only route=%s",
                 self.production_route_numbers)
+            self.classify_qr_text(
+                observation_key, self.expected_item_text.encode("utf-8"))
         else:
+            observation_key = self.qr_observation_numbers[0]
             staging = self.points[self.staging_point_number]
-            first_observation = self.points[self.qr_observation_numbers[0]]
+            first_observation = self.points[observation_key]
             staging_yaw = bearing(staging, first_observation)
             self.navigate_to(
                 self.staging_point_number, staging_yaw, "STAGING_52")
@@ -625,23 +685,40 @@ class ProductionTask2026(object):
             self.wait_for_qr_scanner()
             self.start_ros_camera_and_wait("QR sequence")
             self.qr_enable_pub.publish(Int8(data=1))
-            for observation_number in self.qr_observation_numbers:
-                self.scan_observation_point(observation_number)
+            self.scan_observation_point(observation_key)
             self.qr_enable_pub.publish(Int8(data=0))
             self.stop_qr_classifier()
             self.stop_ros_camera_streaming(required=True)
 
             if self.post_qr_waypoint_number:
                 waypoint = self.points[self.post_qr_waypoint_number]
+                waypoint_yaw = 0.0
+                if self.post_qr_waypoint_heading_point_number:
+                    heading_point = self.points[
+                        self.post_qr_waypoint_heading_point_number]
+                    waypoint_yaw = bearing(waypoint, heading_point)
                 rospy.loginfo(
                     "PRODUCTION_POST_QR_WAYPOINT %d (no rotation)",
                     self.post_qr_waypoint_number)
                 self.publish_state(
                     "WAYPOINT_%d" % self.post_qr_waypoint_number)
                 self.navigate_coordinates(
-                    waypoint[0], waypoint[1], 0.0,
+                    waypoint[0], waypoint[1], waypoint_yaw,
                     "post-QR waypoint %d" % self.post_qr_waypoint_number,
                     require_plan=True)
+
+        target_category = self.qr_classification_category(observation_key)
+        if target_category is None:
+            raise MissionAbort(
+                "QR item category was not recognised for observation %d" %
+                observation_key)
+        self.expected_production_category = target_category
+        rospy.loginfo(
+            "PRODUCTION_TASK_TARGET_CATEGORY %s",
+            self.log_safe_text(target_category))
+        self.speak(
+            u"取得*%s*属于*%s" % (
+                self.expected_item_text, target_category))
 
         self.prepare_result_directory()
         if self.use_ros_camera_for_ocr:
@@ -662,36 +739,79 @@ class ProductionTask2026(object):
                 segment_index, start_number, end_number,
                 target_yaw=self.production_observation_headings[
                     segment_index - 1])
-            if len(select_three_processing_observations(
-                    self.observations)) >= 3:
+            if self.production_category_recorded(target_category):
                 rospy.loginfo(
-                    "PRODUCTION_CATEGORIES_COMPLETE count=3 "
-                    "early_stop_at_route_point=%d", end_number)
+                    "PRODUCTION_TARGET_CATEGORY_FOUND "
+                    "route_point=%d category=%s",
+                    end_number, self.log_safe_text(target_category))
                 break
 
         self.stop_native_ocr()
         self.ensure_ros_camera_released()
-        selected = select_three_processing_observations(self.observations)
         self.save_observation_summary()
-        if len(selected) < 3:
+        observation = self.last_recorded_observation(target_category)
+        if observation is None:
             raise MissionAbort(
-                "only %d/3 distinct processing categories were recognized" %
-                len(selected))
-        destination = self.points[self.destination_point_number]
+                "target production category was not recognised on the route")
+        self.stop_motion()
+        self.wait_for_chassis_stop("stop before processing area dwell")
+        wall_number = observation["wall_point_number"]
+        wall_coordinate = observation["wall_point_coordinate"]
+        intersection = observation.get(
+            "forward_ray_wall_intersection_map", wall_coordinate)
+        stop_x, stop_y = stop_point_for_wall_point(
+            intersection, self.middle_zone_square_side,
+            self.middle_zone_bounds)
+        parking_yaw = normalize_angle(
+            bearing((stop_x, stop_y), intersection) + math.pi)
+        self.publish_state("PROCESSING_STOP_%03d" % wall_number)
+        rospy.loginfo(
+            "PRODUCTION_PROCESSING_STOP wall_point=%d wall_coordinate=%s "
+            "intersection=%s stop=%.3f,%.3f",
+            wall_number, wall_coordinate, intersection, stop_x, stop_y)
+        self.navigate_coordinates(
+            stop_x, stop_y, parking_yaw,
+            "processing stop point %d" % wall_number,
+            require_plan=True)
+        self.stop_motion()
+        self.publish_state("PROCESSING_DWELL_%03d" % wall_number)
+        rospy.loginfo(
+            "PRODUCTION_PROCESSING_DWELL wall_point=%d seconds=%.1f",
+            wall_number, self.processing_dwell_seconds)
+        if self.processing_dwell_seconds > 0.0:
+            rospy.sleep(self.processing_dwell_seconds)
+
+        if self.destination_midpoint_point_numbers:
+            first = self.points[
+                self.destination_midpoint_point_numbers[0]]
+            second = self.points[
+                self.destination_midpoint_point_numbers[1]]
+            destination = (
+                (first[0] + second[0]) / 2.0,
+                (first[1] + second[1]) / 2.0)
+            destination_label = "midpoint %d-%d" % tuple(
+                self.destination_midpoint_point_numbers)
+        else:
+            destination = self.points[self.destination_point_number]
+            destination_label = "point %d" % self.destination_point_number
         heading_point = self.points[self.destination_heading_point_number]
         destination_yaw = bearing(destination, heading_point)
         self.publish_state(
-            "DESTINATION_%d" % self.destination_point_number)
+            "DESTINATION_%s" %
+            "_".join(str(value)
+                     for value in self.destination_midpoint_point_numbers)
+            if self.destination_midpoint_point_numbers
+            else "DESTINATION_%d" % self.destination_point_number)
         self.navigate_coordinates(
             destination[0], destination[1], destination_yaw,
-            "destination point %d" % self.destination_point_number,
+            "destination %s" % destination_label,
             require_plan=True)
         self.stop_motion()
         self.publish_state("SUCCEEDED")
         self.publish_result(
             True,
-            "saved three processing categories; arrived at destination point %d" %
-            self.destination_point_number)
+            "recognized target category; dwelled at processing area; "
+            "arrived at destination %s" % destination_label)
 
     def scan_observation_point(self, observation_number):
         staging = self.points[self.staging_point_number]
@@ -727,7 +847,8 @@ class ProductionTask2026(object):
             "PRODUCTION_QR_ACCEPTED observation=%d value=%s count=%d/%d",
             observation_number, self.log_safe_text(detected),
             len(self.used_qr_codes), len(self.qr_observation_numbers))
-        self.classify_qr_text(observation_number, detected)
+        self.classify_qr_text(
+            observation_number, self.expected_item_text.encode("utf-8"))
 
     def wait_for_qr_scanner(self):
         deadline = (
@@ -1286,6 +1407,71 @@ class ProductionTask2026(object):
             return value
         return json.dumps(value, ensure_ascii=True)
 
+    def speak(self, text):
+        """Play one TTS announcement asynchronously; never aborts the task."""
+        if not self.tts_enabled:
+            return
+        try:
+            payload = text
+            if isinstance(payload, bytes):
+                payload = payload.decode("utf-8", "replace")
+            argv = [
+                self.tts_python, self.tts_helper_path,
+                payload.encode("utf-8")]
+            devnull = open(os.devnull, "wb")
+            try:
+                subprocess.Popen(argv, stdout=devnull, stderr=devnull)
+            finally:
+                devnull.close()
+        except (OSError, IOError, ValueError) as exc:
+            rospy.logwarn("PRODUCTION_TASK_TTS_FAILED %s", exc)
+
+    def wait_for_item_input(self):
+        """Block on standard input for the placed item name, then normalize it."""
+        prompt = u"PRODUCTION_TASK_INPUT_PROMPT: 请输入本次放置的物品名称后回车"
+        if sys.version_info[0] < 3:
+            sys.stdout.write(prompt.encode("utf-8"))
+        else:
+            sys.stdout.write(prompt)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        raw_line = sys.stdin.readline()
+        if isinstance(raw_line, bytes):
+            text = raw_line.decode("utf-8", "replace")
+        else:
+            text = raw_line
+        item_text = text.strip()
+        if not item_text:
+            raise MissionAbort("no item text was provided on standard input")
+        rospy.loginfo("PRODUCTION_TASK_ITEM %s", self.log_safe_text(item_text))
+        return item_text
+
+    def qr_classification_entry(self, observation_number):
+        for entry in self.qr_classifications:
+            if (entry.get("observation") == int(observation_number) and
+                    entry.get("category")):
+                return entry
+        return None
+
+    def qr_classification_category(self, observation_number):
+        entry = self.qr_classification_entry(observation_number)
+        if entry is None:
+            return None
+        category = entry.get("category")
+        if category is None or category == "null":
+            return None
+        return category
+
+    def production_category_recorded(self, category):
+        return self.last_recorded_observation(category) is not None
+
+    def last_recorded_observation(self, category):
+        for observation in reversed(self.observations):
+            if (observation.get("processing_category") == category and
+                    observation.get("wall_point_number") is not None):
+                return observation
+        return None
+
     def classify_qr_text(self, observation_number, qr_text):
         """Classify one QR result; records the outcome, never aborts."""
         if not self.spark_classify_enabled:
@@ -1792,6 +1978,15 @@ class ProductionTask2026(object):
                 category = normalize_production_category(detection.get("text"))
                 if category is None or category in recorded_categories:
                     return False
+                if (self.expected_production_category is not None and
+                        category != self.expected_production_category):
+                    rospy.loginfo(
+                        "PRODUCTION_CATEGORY_IGNORED category=%s expected=%s "
+                        "route_point=%d",
+                        category.encode("utf-8"),
+                        self.expected_production_category.encode("utf-8"),
+                        point_number)
+                    return False
                 self.stop_motion()
                 self.wait_for_chassis_stop(scan_label + " candidate")
                 self.restore_ocr_capture_yaw(response, scan_label)
@@ -1827,6 +2022,7 @@ class ProductionTask2026(object):
                 if observation["aligned"] and observation.get("wall_point_number") is not None:
                     recorded_categories.add(category)
                     self.observations.append(observation)
+                    self._ocr_turn_stop_flag = True
                     event["outcome"] = "processing_category_recorded"
                     rospy.loginfo(
                         "PRODUCTION_CATEGORY_RECORDED category=%s route_point=%d "
@@ -1851,6 +2047,7 @@ class ProductionTask2026(object):
                 # remaining revolution covers fresh wall angles.
                 return True
 
+            self._ocr_turn_stop_flag = False
             _response, turn_progress = self.rotate_full_revolution_for_ocr(
                 scan_label, candidate_handler=handle_candidate)
             event = {
@@ -1946,6 +2143,11 @@ class ProductionTask2026(object):
                             label + " candidate resume")
                         if not handled:
                             self.discard_unmatched_motion_frame(response)
+                        if self._ocr_turn_stop_flag:
+                            self.stop_motion()
+                            self.wait_for_chassis_stop(
+                                label + " target category found")
+                            return response, progress
                     else:
                         self.discard_unmatched_motion_frame(response)
                     next_capture = (
@@ -1974,6 +2176,8 @@ class ProductionTask2026(object):
                             deadline += rospy.Time.now() - paused_at
                             if not handled:
                                 self.discard_unmatched_motion_frame(response)
+                            if self._ocr_turn_stop_flag:
+                                return response, progress
                         else:
                             self.discard_unmatched_motion_frame(response)
                     rospy.loginfo(
@@ -2370,15 +2574,28 @@ class ProductionTask2026(object):
         frame = scan.header.frame_id
         if not frame:
             raise MissionAbort("front scan has no frame_id")
-        try:
-            translation, rotation = self.tf_listener.lookupTransform(
-                "map", frame, scan.header.stamp)
-            yaw = tf.transformations.euler_from_quaternion(rotation)[2]
-            return translation[0], translation[1], yaw
-        except tf.Exception as exc:
-            raise MissionAbort(
-                "map pose for lidar frame %s at scan stamp unavailable: %s" %
-                (frame, exc))
+        # A fresh scan stamp may briefly outrun the TF clock (observed ~9 ms
+        # jitter on the real vehicle).  Retry that transient extrapolation
+        # instead of aborting; any other TF failure stays fatal.
+        retry_deadline = time.time() + self.tf_lookup_retry_seconds
+        while True:
+            try:
+                translation, rotation = self.tf_listener.lookupTransform(
+                    "map", frame, scan.header.stamp)
+                yaw = tf.transformations.euler_from_quaternion(rotation)[2]
+                return translation[0], translation[1], yaw
+            except tf.ExtrapolationException:
+                if time.time() >= retry_deadline:
+                    raise MissionAbort(
+                        "map pose for lidar frame %s at scan stamp "
+                        "unavailable after %.1f s: %s" %
+                        (frame, self.tf_lookup_retry_seconds,
+                         "TF still extrapolating into the future"))
+                time.sleep(0.01)
+            except tf.Exception as exc:
+                raise MissionAbort(
+                    "map pose for lidar frame %s at scan stamp unavailable: %s" %
+                    (frame, exc))
 
     def save_observation_summary(self):
         if self.run_directory is None:

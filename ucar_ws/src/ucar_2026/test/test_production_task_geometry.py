@@ -25,6 +25,7 @@ from production_task_geometry import (  # noqa: E402
     bearing,
     build_straight_segments,
     load_middle_target_guard_points,
+    load_middle_zone_geometry,
     load_numbered_points,
     load_wall_reference_points,
     needs_recenter,
@@ -32,6 +33,7 @@ from production_task_geometry import (  # noqa: E402
     position_error,
     positive_turn_increment,
     require_points,
+    stop_point_for_wall_point,
 )
 from production_task_perception import target_guard_scan_matches  # noqa: E402
 
@@ -100,27 +102,24 @@ class ProductionTaskGeometryTest(unittest.TestCase):
     def test_production_route_and_observation_headings_are_exact(self):
         self.assertEqual(
             DEFAULT_PRODUCTION_ROUTE,
-            [12, 23, 14, 25, 16])
+            [12, 22, 13, 23, 14, 24, 15, 25, 16, 26, 17, 27,
+             18, 28, 19, 29])
         self.assertEqual(
             DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG,
-            [-45, 45, -45, 45, 45])
-        for index in range(len(DEFAULT_PRODUCTION_ROUTE) - 1):
-            source = self.points[DEFAULT_PRODUCTION_ROUTE[index]]
-            target = self.points[DEFAULT_PRODUCTION_ROUTE[index + 1]]
-            self.assertAngleAlmostEqual(
-                math.radians(
-                    DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG[index]),
-                bearing(source, target))
+            [-45, 45] * 8)
+        # One heading per navigation leg (staging leg + route legs).
         self.assertEqual(
-            DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG[-1],
-            DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG[-2])
+            len(DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG),
+            len(DEFAULT_PRODUCTION_ROUTE))
 
     def test_production_route_collapses_to_exact_straight_segments(self):
         self.assertEqual(
             build_straight_segments(
                 DEFAULT_PRODUCTION_ROUTE, self.points,
                 math.radians(1.0)),
-            [(12, 23), (23, 14), (14, 25), (25, 16)])
+            [(12, 22), (22, 13), (13, 23), (23, 14), (14, 24),
+             (24, 15), (15, 25), (25, 16), (16, 26), (26, 17),
+             (17, 27), (27, 18), (18, 28), (28, 19), (19, 29)])
 
     def test_middle_target_guard_mapping_and_filtered_scan_match(self):
         guards = load_middle_target_guard_points(
@@ -130,10 +129,21 @@ class ProductionTaskGeometryTest(unittest.TestCase):
                  for number, points in guards.items()),
             {
                 12: [419, 420, 428, 429],
+                22: [428, 429, 437, 438],
+                13: [420, 421, 429, 430],
                 23: [429, 430, 438, 439],
                 14: [421, 422, 430, 431],
+                24: [430, 431, 439, 440],
+                15: [422, 423, 431, 432],
                 25: [431, 432, 440, 441],
                 16: [423, 424, 432, 433],
+                26: [432, 433, 441, 442],
+                17: [424, 425, 433, 434],
+                27: [433, 434, 442, 443],
+                18: [425, 426, 434, 435],
+                28: [434, 435, 443, 444],
+                19: [426, 427, 435, 436],
+                29: [435, 436, 444, 445],
             })
 
         class Scan(object):
@@ -206,6 +216,37 @@ class ProductionTaskGeometryTest(unittest.TestCase):
         self.assertTrue(needs_recenter(0.061, 0.060))
         self.assertTrue(needs_recenter(0.102, 0.060))
 
+    def test_middle_zone_geometry_matches_grid_document(self):
+        x_min, x_max, y_min, y_max, side = load_middle_zone_geometry(
+            self.grid_path)
+        self.assertEqual(
+            (x_min, x_max, y_min, y_max, side),
+            (-2.5, 2.5, -0.5, 1.5, 0.5))
+
+    def test_stop_point_for_wall_point_is_25cm_inside_the_field(self):
+        bounds = (-2.5, 2.5, -0.5, 1.5)
+        cases = [
+            # wall intersection -> processing-area stop point:
+            ((0.75, 1.5), (0.75, 1.25)),    # 300 -> point 7
+            ((2.5, 0.75), (2.25, 0.75)),    # 455 -> point 20
+            ((-2.5, 0.75), (-2.25, 0.75)),  # 454 -> point 11
+            ((-2.5, 0.5), (-2.25, 0.5)),    # 448 -> midpoint of 11 and 21
+            ((-0.75, -0.5), (-0.75, -0.25)),  # 307 -> point 34
+        ]
+        for wall_point, expected_stop in cases:
+            self.assertEqual(
+                stop_point_for_wall_point(wall_point, 0.5, bounds),
+                expected_stop)
+
+    def test_stop_point_for_wall_point_rejects_off_boundary_point(self):
+        bounds = (-2.5, 2.5, -0.5, 1.5)
+        with self.assertRaises(TaskDefinitionError):
+            stop_point_for_wall_point((0.0, 0.0), 0.5, bounds)
+        with self.assertRaises(TaskDefinitionError):
+            stop_point_for_wall_point((0.75, 0.75), 0.5, bounds)
+        with self.assertRaises(TaskDefinitionError):
+            stop_point_for_wall_point((-2.5, 2.5), 0.5, bounds)
+
 
 @unittest.skipIf(
     task_module is None,
@@ -222,6 +263,16 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.original_loginfo = task_module.rospy.loginfo
         task_module.rospy.logwarn = self.capture_warning
         task_module.rospy.loginfo = lambda *_args: None
+        self.task.qr_classifications = []
+        self.task.expected_item_text = u""
+        self.task.expected_production_category = None
+        self.task._ocr_turn_stop_flag = False
+        self.task.processing_dwell_seconds = 0.0
+        self.task.middle_zone_square_side = 0.5
+        self.task.middle_zone_bounds = (-2.5, 2.5, -0.5, 1.5)
+        self.task.ocr_alignment_min_speed = 0.12
+        self.task.spark_classify_enabled = False
+        self.task.tts_enabled = False
 
     def tearDown(self):
         task_module.rospy.logwarn = self.original_logwarn
@@ -528,6 +579,8 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.move_base = MoveBase()
         self.task.move_base_ready_timeout = 1.0
         self.task.publish_state = lambda _state: None
+        self.task.wait_for_item_input = (
+            lambda: (events.append("item_input"), u"测试物品")[1])
         self.task.wait_for_safe_start = lambda: events.append("safe_start")
         self.task.switch_to_point_mode = lambda: events.append("point_mode")
         self.task.resume_production_only = False
@@ -544,7 +597,9 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
             self.task.run_mission()
 
         self.assertEqual(
-            events, ["safe_start", "point_mode", "staging_navigation"])
+            events,
+            ["item_input", "safe_start", "point_mode",
+             "staging_navigation"])
 
     def test_point_mode_is_selected_before_resumed_production_navigation(self):
         events = []
@@ -563,10 +618,25 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.move_base = MoveBase()
         self.task.move_base_ready_timeout = 1.0
         self.task.publish_state = lambda _state: None
+        self.task.wait_for_item_input = (
+            lambda: (events.append("item_input"), u"测试物品")[1])
         self.task.wait_for_safe_start = lambda: events.append("safe_start")
         self.task.switch_to_point_mode = lambda: events.append("point_mode")
         self.task.resume_production_only = True
         self.task.qr_enable_pub = QrPublisher()
+
+        def classify_qr_text(observation_number, qr_text):
+            self.task.qr_classifications.append({
+                "observation": observation_number,
+                "qr_text": qr_text.decode("utf-8"),
+                "category": u"日用品",
+                "source": "stub",
+                "attempts": 0,
+                "model": "test",
+                "error": "",
+            })
+
+        self.task.classify_qr_text = classify_qr_text
         self.task.prepare_result_directory = lambda: None
         self.task.use_ros_camera_for_ocr = True
         self.task.camera_image_topic = "/usb_cam/image_raw"
@@ -584,7 +654,9 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
             self.task.run_mission()
 
         self.assertEqual(
-            events, ["safe_start", "point_mode", "production_navigation"])
+            events,
+            ["item_input", "safe_start", "point_mode",
+             "production_navigation"])
 
     def test_qr_completion_does_not_switch_before_first_production_leg(self):
         events = []
@@ -606,6 +678,8 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.move_base = MoveBase()
         self.task.move_base_ready_timeout = 1.0
         self.task.publish_state = lambda _state: None
+        self.task.wait_for_item_input = (
+            lambda: (events.append("item_input"), u"测试物品")[1])
         self.task.wait_for_safe_start = lambda: events.append("safe_start")
         self.task.switch_to_point_mode = lambda: events.append("point_mode")
         self.task.switch_to_body_projection = lambda: self.fail(
@@ -619,8 +693,22 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.wait_for_qr_scanner = lambda: None
         self.task.start_ros_camera_and_wait = lambda _context: None
         self.task.qr_enable_pub = QrPublisher()
-        self.task.scan_observation_point = (
-            lambda _number: events.append("qr_scan"))
+        self.task.stop_qr_classifier = lambda: None
+        self.task.post_qr_waypoint_number = 0
+
+        def scan_observation_point(observation_number):
+            events.append("qr_scan")
+            self.task.qr_classifications.append({
+                "observation": observation_number,
+                "qr_text": u"测试",
+                "category": u"日用品",
+                "source": "stub",
+                "attempts": 0,
+                "model": "test",
+                "error": "",
+            })
+
+        self.task.scan_observation_point = scan_observation_point
         self.task.stop_ros_camera_streaming = lambda required=True: None
         self.task.prepare_result_directory = lambda: None
         self.task.use_ros_camera_for_ocr = True
@@ -645,8 +733,8 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
 
         self.assertEqual(
             events,
-            ["safe_start", "point_mode", "STAGING_52", "qr_scan",
-             "ocr_start", "production_navigation"])
+            ["item_input", "safe_start", "point_mode", "STAGING_52",
+             "qr_scan", "ocr_start", "production_navigation"])
 
     def test_camera_stream_start_and_stop_are_idempotent(self):
         events = []
@@ -921,7 +1009,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.assertEqual(calls[0], "restore")
         self.assertEqual(calls[1], ("observe", 12))
         self.assertEqual(calls[2], "save")
-        self.assertEqual(calls[3], "restore")
+        self.assertEqual(calls[3], "save")
         self.assertEqual(
             self.task.observations[0]["turn_detection_pose_map"],
             [1.0, 2.0, 0.3])

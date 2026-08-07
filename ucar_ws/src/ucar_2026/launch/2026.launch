@@ -111,16 +111,37 @@
             <rosparam param="qr_observation_numbers">[262, 232, 295]</rosparam>
             <!-- Each target is reached before one OCR search revolution.  A
                  candidate is centred/ranged; no candidate goes straight on.
-                 Scanning stops early once three distinct categories are
-                 recorded, then the vehicle drives to the destination point
-                 facing the heading point. -->
+                 Scanning stops as soon as the target category (from the QR
+                 item classification) is recorded, then the vehicle drives to
+                 the processing-area stop point (wall intersection moved
+                 25 cm into the field), dwells there, and finishes at the
+                 destination point facing the heading point. -->
             <rosparam param="production_route_numbers">[12, 22, 13, 23, 14, 24, 15, 25, 16, 26, 17, 27, 18, 28, 19, 29]</rosparam>
             <rosparam param="production_observation_headings_deg">[-45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45]</rosparam>
-            <param name="destination_point_number" value="170"/>
-            <param name="destination_heading_point_number" value="319"/>
+            <param name="destination_point_number" value="17"/>
+            <!-- Destination is the midpoint of the two listed points
+                 (35-36 line midpoint), facing the heading point 170.
+                 Empty disables the midpoint mode. -->
+            <param name="destination_midpoint_point_numbers" value="35,36"/>
+            <param name="destination_heading_point_number" value="170"/>
+            <!-- Dwell at the processing-area stop point (seconds) before
+                 driving to the destination.  0 disables the dwell. -->
+            <param name="processing_dwell_seconds" value="3.0"/>
+            <!-- Retry window (s) for a scan stamp briefly outrunning the TF
+                 clock (~9 ms jitter seen on the real vehicle); the lookup
+                 stays fatal after the window. -->
+            <param name="tf_lookup_retry_seconds" value="0.5"/>
+            <!-- Voice announcements via the vehicle-local tts_say.py helper
+                 (asynchronous, failures never abort the mission). -->
+            <param name="tts_enabled" value="true"/>
+            <param name="tts_python" value="/usr/bin/python3"/>
+            <param name="tts_helper_path" value="/home/ucar/wake/tts_say.py"/>
             <!-- Drive to this waypoint after the QR phase (no OCR rotation),
                  then start the production route.  0 disables it. -->
             <param name="post_qr_waypoint_number" value="3"/>
+            <!-- Heading the waypoint must face after arrival; 0 keeps the
+                 current yaw (no rotation). -->
+            <param name="post_qr_waypoint_heading_point_number" value="13"/>
             <!-- Timeout only: a fresh QR event advances immediately. -->
             <param name="qr_search_timeout" value="4.0"/>
             <param name="qr_rotation_speed" value="0.18"/>
@@ -174,7 +195,11 @@
             <param name="ocr_scan_poll_period" value="0.20"/>
             <param name="ocr_scan_candidate_confidence" value="60.0"/>
             <param name="goal_cancel_timeout" value="5.0"/>
-            <param name="stop_confirmation_timeout" value="2.0"/>
+            <!-- Cancelling a goal while the chassis is mid-motion leaves
+                 inertia + move_base residual speed; 2.0 s was too tight for
+                 guard-triggered cancels (observed abort), 4.0 s gives the
+                 odom samples time to settle below the stop epsilon. -->
+            <param name="stop_confirmation_timeout" value="4.0"/>
             <!-- The chassis odom/imu briefly goes silent for ~1.0-1.04 s on
                  every run (MCU/serial characteristic, 5 runs in a row).  The
                  default 0.35 s freshness threshold made every mission abort;

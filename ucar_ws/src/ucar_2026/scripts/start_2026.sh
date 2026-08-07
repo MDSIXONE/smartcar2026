@@ -90,6 +90,21 @@ case "$launch_mode" in
         ;;
     esac
     echo "Master 连接成功。正在启动 ucar_2026 自动生产任务（无 RViz）……"
+    echo "关闭 USB autosuspend，防止串口间歇挂起导致 odom/imu 断流……"
+    if sudo -n sh -c '
+      for d in /sys/bus/usb/devices/*/power/autosuspend_delay_ms; do
+        [ -w "$d" ] && echo -1 > "$d"
+      done
+      for d in /sys/bus/usb/devices/*/power/control; do
+        [ -w "$d" ] && echo on > "$d"
+      done
+    ' 2>/dev/null; then
+      echo "USB autosuspend 已关闭。"
+    else
+      echo "警告：无法自动关闭 USB autosuspend（无 sudo 权限），串口可能被间歇挂起。" >&2
+    fi
+    echo "任务节点启动后会等待物品输入：请在本终端直接输入本次放入的物品名并回车（"
+    echo "例如：苹果、可乐、螺丝刀 等，任务将根据二维码读取结果确认物品并判断加工类别）。"
     exec "$python2_runner" /opt/ros/melodic/bin/roslaunch \
       ucar_2026 2026.launch task_enabled:=true
     ;;
