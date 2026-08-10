@@ -103,8 +103,9 @@ case "$launch_mode" in
     else
       echo "警告：无法自动关闭 USB autosuspend（无 sudo 权限），串口可能被间歇挂起。" >&2
     fi
-    echo "任务节点启动后会等待物品输入：请在本终端直接输入本次放入的物品名并回车（"
-    echo "例如：苹果、可乐、螺丝刀 等，任务将根据二维码读取结果确认物品并判断加工类别）。"
+    echo "任务节点启动后会等待两个物品输入：请在本终端依次输入现实物品名和仿真物品名"
+    echo "并回车（例如：苹果、手机，两个名称不能相同；任务将根据二维码读取结果确认"
+    echo "物品并判断加工类别，仿真物品停入后会联动本机仿真任务）。"
     exec "$python2_runner" /opt/ros/melodic/bin/roslaunch \
       ucar_2026 2026.launch task_enabled:=true
     ;;

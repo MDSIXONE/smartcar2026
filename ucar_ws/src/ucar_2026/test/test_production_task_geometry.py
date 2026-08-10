@@ -264,8 +264,14 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         task_module.rospy.logwarn = self.capture_warning
         task_module.rospy.loginfo = lambda *_args: None
         self.task.qr_classifications = []
+        self.task.observations = []
         self.task.expected_item_text = u""
         self.task.expected_production_category = None
+        self.task.expected_real_item_text = u""
+        self.task.expected_sim_item_text = u""
+        self.task.expected_real_category = None
+        self.task.expected_sim_category = None
+        self.task.served_wall_points = set()
         self.task._ocr_turn_stop_flag = False
         self.task.processing_dwell_seconds = 0.0
         self.task.middle_zone_square_side = 0.5
@@ -579,8 +585,8 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.move_base = MoveBase()
         self.task.move_base_ready_timeout = 1.0
         self.task.publish_state = lambda _state: None
-        self.task.wait_for_item_input = (
-            lambda: (events.append("item_input"), u"测试物品")[1])
+        self.task.wait_for_item_inputs = (
+            lambda: (events.append("item_input"), (u"苹果", u"手机"))[1])
         self.task.wait_for_safe_start = lambda: events.append("safe_start")
         self.task.switch_to_point_mode = lambda: events.append("point_mode")
         self.task.resume_production_only = False
@@ -618,8 +624,8 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.move_base = MoveBase()
         self.task.move_base_ready_timeout = 1.0
         self.task.publish_state = lambda _state: None
-        self.task.wait_for_item_input = (
-            lambda: (events.append("item_input"), u"测试物品")[1])
+        self.task.wait_for_item_inputs = (
+            lambda: (events.append("item_input"), (u"苹果", u"手机"))[1])
         self.task.wait_for_safe_start = lambda: events.append("safe_start")
         self.task.switch_to_point_mode = lambda: events.append("point_mode")
         self.task.resume_production_only = True
@@ -678,8 +684,8 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.move_base = MoveBase()
         self.task.move_base_ready_timeout = 1.0
         self.task.publish_state = lambda _state: None
-        self.task.wait_for_item_input = (
-            lambda: (events.append("item_input"), u"测试物品")[1])
+        self.task.wait_for_item_inputs = (
+            lambda: (events.append("item_input"), (u"苹果", u"手机"))[1])
         self.task.wait_for_safe_start = lambda: events.append("safe_start")
         self.task.switch_to_point_mode = lambda: events.append("point_mode")
         self.task.switch_to_body_projection = lambda: self.fail(
@@ -696,11 +702,21 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.stop_qr_classifier = lambda: None
         self.task.post_qr_waypoint_number = 0
 
-        def scan_observation_point(observation_number):
+        qr_codes = iter([u"苹果", u"手机"])
+
+        def scan_observation_point(observation_number, accept_text=None):
             events.append("qr_scan")
+            try:
+                return next(qr_codes)
+            except StopIteration:
+                return None
+
+        self.task.scan_observation_point = scan_observation_point
+
+        def classify_qr_text(observation_number, qr_text):
             self.task.qr_classifications.append({
                 "observation": observation_number,
-                "qr_text": u"测试",
+                "qr_text": qr_text.decode("utf-8"),
                 "category": u"日用品",
                 "source": "stub",
                 "attempts": 0,
@@ -708,7 +724,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
                 "error": "",
             })
 
-        self.task.scan_observation_point = scan_observation_point
+        self.task.classify_qr_text = classify_qr_text
         self.task.stop_ros_camera_streaming = lambda required=True: None
         self.task.prepare_result_directory = lambda: None
         self.task.use_ros_camera_for_ocr = True
@@ -734,7 +750,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.assertEqual(
             events,
             ["item_input", "safe_start", "point_mode", "STAGING_52",
-             "qr_scan", "ocr_start", "production_navigation"])
+             "qr_scan", "qr_scan", "ocr_start", "production_navigation"])
 
     def test_camera_stream_start_and_stop_are_idempotent(self):
         events = []
@@ -799,19 +815,21 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
 
     def test_fresh_qr_callback_wakes_search_without_fixed_hold(self):
         self.task.lock = threading.RLock()
-        self.task.qr_sequence = 0
-        self.task.latest_qr_text = ""
+        self.task.api_sequence = 0
+        self.task.latest_api_text = ""
         self.task.used_qr_codes = set()
         self.task.require_distinct_qr_codes = True
-        self.task.qr_event = threading.Event()
+        self.task.api_event = threading.Event()
         self.task.require_safe = lambda: None
 
-        class QrMessage(object):
-            data = "next-code"
+        class ApiMessage(object):
+            data = ('{"ok": true, "key": "a", '
+                    '"qr_text": "http://192.168.8.1:3663/a", '
+                    '"response": {"code": 200, "result": "\u82f9\u679c"}}')
 
         def publish_qr():
             time.sleep(0.01)
-            self.task.qr_result_cb(QrMessage())
+            self.task.qr_api_result_cb(ApiMessage())
 
         worker = threading.Thread(target=publish_qr)
         worker.start()
@@ -820,26 +838,28 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         elapsed = time.time() - started
         worker.join()
 
-        self.assertEqual(detected, "next-code")
+        self.assertEqual(detected, u"苹果")
         self.assertLess(elapsed, 0.20)
 
     def test_qr_seen_while_facing_is_accepted_without_search_wait(self):
         self.task.lock = threading.RLock()
         self.task.points = {52: (-1.75, 2.25), 262: (-2.50, 2.25)}
         self.task.staging_point_number = 52
-        self.task.qr_sequence = 0
-        self.task.latest_qr_text = ""
+        self.task.api_sequence = 0
+        self.task.latest_api_text = ""
         self.task.used_qr_codes = set()
         self.task.qr_observation_numbers = [262]
         self.task.require_distinct_qr_codes = True
-        self.task.qr_event = threading.Event()
+        self.task.api_event = threading.Event()
         self.task.publish_state = lambda _state: None
 
-        class QrMessage(object):
-            data = "turning-code"
+        class ApiMessage(object):
+            data = ('{"ok": true, "key": "a", '
+                    '"qr_text": "http://192.168.8.1:3663/a", '
+                    '"response": {"code": 200, "result": "\u82f9\u679c"}}')
 
         def navigate(*_args, **_kwargs):
-            self.task.qr_result_cb(QrMessage())
+            self.task.qr_api_result_cb(ApiMessage())
 
         self.task.navigate_coordinates = navigate
         self.task.wait_for_fresh_qr = (
@@ -847,7 +867,61 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
 
         self.task.scan_observation_point(262)
 
-        self.assertEqual(self.task.used_qr_codes, set(["turning-code"]))
+        self.assertEqual(self.task.used_qr_codes, set([u"苹果"]))
+
+    def test_scan_observation_point_turns_full_revolution_after_timeout(self):
+        self.task.lock = threading.RLock()
+        self.task.points = {52: (-1.75, 2.25), 262: (-2.50, 2.25)}
+        self.task.staging_point_number = 52
+        self.task.api_sequence = 0
+        self.task.latest_api_text = ""
+        self.task.api_event = threading.Event()
+        self.task.publish_state = lambda _state: None
+        self.task.qr_search_timeout = 1.0
+        self.task.qr_rotation_speed = 0.18
+        self.task.navigate_coordinates = lambda *_args, **_kwargs: None
+        self.task.accepted_qr_after = lambda *_args: None
+        self.task.wait_for_fresh_qr = lambda *_args: None
+        turns = []
+
+        def rotate_full_revolution(label, speed, stop_for_qr, qr_baseline,
+                                   qr_accept=None,
+                                   qr_observation_number=None):
+            turns.append((label, speed, stop_for_qr, qr_baseline,
+                          qr_accept is not None, qr_observation_number))
+            return None
+
+        self.task.rotate_full_revolution = rotate_full_revolution
+
+        # One full turn still finds no code: the face yields None and the
+        # collection loop moves on to the next face.
+        self.assertIsNone(
+            self.task.scan_observation_point(262, lambda raw: True))
+        self.assertEqual(turns, [(
+            "QR observation point 262", 0.18, True, 0,
+            True, 262)])
+
+    def test_scan_observation_point_accepts_code_during_fallback_turn(self):
+        self.task.lock = threading.RLock()
+        self.task.points = {52: (-1.75, 2.25), 262: (-2.50, 2.25)}
+        self.task.staging_point_number = 52
+        self.task.api_sequence = 0
+        self.task.latest_api_text = ""
+        self.task.api_event = threading.Event()
+        self.task.publish_state = lambda _state: None
+        self.task.qr_search_timeout = 1.0
+        self.task.qr_rotation_speed = 0.18
+        self.task.used_qr_codes = set()
+        self.task.navigate_coordinates = lambda *_args, **_kwargs: None
+        self.task.accepted_qr_after = lambda *_args: None
+        self.task.wait_for_fresh_qr = lambda *_args: None
+        self.task.rotate_full_revolution = (
+            lambda *_args, **_kwargs: u"苹果")
+
+        detected = self.task.scan_observation_point(262)
+
+        self.assertEqual(detected, u"苹果")
+        self.assertEqual(self.task.used_qr_codes, set([u"苹果"]))
 
     def test_camera_stop_retries_once_before_succeeding(self):
         calls = []
@@ -1178,6 +1252,790 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.addCleanup(
             setattr, task_module.rospy, "is_shutdown", original_is_shutdown)
         return calls
+
+
+@unittest.skipIf(
+    task_module is None,
+    "ROS Python modules are only available in the vehicle workspace")
+class ProductionTaskDualItemTest(unittest.TestCase):
+    def setUp(self):
+        task_module.rospy.rostime.set_rostime_initialized(True)
+        self.task = object.__new__(task_module.ProductionTask2026)
+        self.task.points = {16: (0.25, 0.75)}
+        self.task.arrival_tolerance = 0.10
+        self.task.current_map_pose = lambda _context: (0.18, 0.826, 0.0)
+        self.warnings = []
+        self.original_logwarn = task_module.rospy.logwarn
+        self.original_loginfo = task_module.rospy.loginfo
+        task_module.rospy.logwarn = self.capture_warning
+        task_module.rospy.loginfo = lambda *_args: None
+        self.task.qr_classifications = []
+        self.task.observations = []
+        self.task.expected_item_text = u""
+        self.task.expected_production_category = None
+        self.task.expected_real_item_text = u""
+        self.task.expected_sim_item_text = u""
+        self.task.expected_real_category = None
+        self.task.expected_sim_category = None
+        self.task.served_wall_points = set()
+        self.task._ocr_turn_stop_flag = False
+        self.task.processing_dwell_seconds = 0.0
+        self.task.middle_zone_square_side = 0.5
+        self.task.middle_zone_bounds = (-2.5, 2.5, -0.5, 1.5)
+        self.task.ocr_alignment_min_speed = 0.12
+        self.task.spark_classify_enabled = False
+        self.task.tts_enabled = False
+
+    def tearDown(self):
+        task_module.rospy.logwarn = self.original_logwarn
+        task_module.rospy.loginfo = self.original_loginfo
+
+    def capture_warning(self, message, *args):
+        self.warnings.append(message % args)
+
+    def _patch_stdin_lines(self, lines):
+        """Swap sys.stdin for the given lines and sys.stdout to devnull."""
+        iterator = iter(lines)
+
+        class FakeStdin(object):
+            def readline(self):
+                return next(iterator)
+
+        original_stdin = task_module.sys.stdin
+        original_stdout = task_module.sys.stdout
+        task_module.sys.stdin = FakeStdin()
+        task_module.sys.stdout = open(os.devnull, "w")
+
+        def restore():
+            task_module.sys.stdout.close()
+            task_module.sys.stdin = original_stdin
+            task_module.sys.stdout = original_stdout
+
+        return restore
+
+    def test_wait_for_item_inputs_reads_two_distinct_items(self):
+        restore = self._patch_stdin_lines([u"苹果\n", u"手机\n"])
+        try:
+            real_item, sim_item = self.task.wait_for_item_inputs()
+        finally:
+            restore()
+        self.assertEqual((real_item, sim_item), (u"苹果", u"手机"))
+        self.assertEqual(self.task.expected_real_item_text, u"苹果")
+        self.assertEqual(self.task.expected_sim_item_text, u"手机")
+        self.assertEqual(self.task.expected_item_text, u"苹果")
+
+    def test_wait_for_item_inputs_rejects_empty_first_item(self):
+        restore = self._patch_stdin_lines([u"\n", u"手机\n"])
+        try:
+            with self.assertRaises(task_module.MissionAbort) as raised:
+                self.task.wait_for_item_inputs()
+        finally:
+            restore()
+        self.assertIn("no item text was provided", str(raised.exception))
+
+    def test_wait_for_item_inputs_rejects_identical_items(self):
+        restore = self._patch_stdin_lines([u"苹果\n", u"苹果\n"])
+        try:
+            with self.assertRaises(task_module.MissionAbort) as raised:
+                self.task.wait_for_item_inputs()
+        finally:
+            restore()
+        self.assertIn("real and simulation items must be different",
+                      str(raised.exception))
+
+    def test_qr_collection_filters_targets_and_takes_first_only(self):
+        self.task.qr_observation_numbers = [262, 232, 295]
+        faces = []
+        codes = iter([u"苹果", u"无关码", u"苹果", u"手机"])
+
+        def scan(observation_number, accept_text=None):
+            faces.append(observation_number)
+            code = next(codes)
+            if accept_text is not None and not accept_text(code):
+                return None
+            return code
+
+        self.task.scan_observation_point = scan
+        collected = self.task.collect_target_qr_codes(
+            set([u"苹果", u"手机"]))
+
+        # The non-target code is skipped, the repeated 苹果 keeps its first
+        # face, and the scan stops as soon as both targets are collected.
+        self.assertEqual(collected, {u"苹果": 262, u"手机": 262})
+        self.assertEqual(faces, [262, 232, 295, 262])
+
+    def test_qr_collection_scans_two_full_rounds_when_targets_missing(self):
+        self.task.qr_observation_numbers = [262, 232, 295]
+        faces = []
+
+        def scan(observation_number, accept_text=None):
+            faces.append(observation_number)
+            return None
+
+        self.task.scan_observation_point = scan
+        collected = self.task.collect_target_qr_codes(
+            set([u"苹果", u"手机"]))
+        self.assertEqual(collected, {})
+        self.assertEqual(faces, [262, 232, 295, 262, 232, 295])
+
+    def test_run_mission_aborts_when_qr_codes_not_all_collected(self):
+        class MoveBase(object):
+            def wait_for_server(self, _timeout):
+                return True
+
+            def cancel_all_goals(self):
+                pass
+
+        class QrPublisher(object):
+            def publish(self, _message):
+                pass
+
+        self.task.move_base = MoveBase()
+        self.task.move_base_ready_timeout = 1.0
+        self.task.publish_state = lambda _state: None
+        self.task.wait_for_item_inputs = (
+            lambda: (u"苹果", u"手机"))
+        self.task.wait_for_safe_start = lambda: None
+        self.task.switch_to_point_mode = lambda: None
+        self.task.resume_production_only = False
+        self.task.staging_point_number = 52
+        self.task.qr_observation_numbers = [262]
+        self.task.points = {52: (-1.75, 2.25), 262: (-2.50, 2.25)}
+        self.task.stop_motion = lambda: None
+        self.task.wait_for_chassis_stop = lambda _context: None
+        self.task.wait_for_qr_scanner = lambda: None
+        self.task.start_ros_camera_and_wait = lambda _context: None
+        self.task.qr_enable_pub = QrPublisher()
+        self.task.navigate_to = lambda *_args, **_kwargs: None
+        self.task.scan_observation_point = (
+            lambda _observation_number, _accept_text=None: None)
+
+        with self.assertRaises(task_module.MissionAbort) as raised:
+            self.task.run_mission()
+        self.assertIn("not all target QR codes", str(raised.exception))
+
+    def test_run_mission_cruises_two_rounds_and_posts_simulation(self):
+        events = []
+
+        class MoveBase(object):
+            def wait_for_server(self, _timeout):
+                return True
+
+            def cancel_all_goals(self):
+                pass
+
+        class QrPublisher(object):
+            def publish(self, _message):
+                pass
+
+        self.task.move_base = MoveBase()
+        self.task.move_base_ready_timeout = 1.0
+        self.task.publish_state = lambda _state: None
+        self.task.wait_for_item_inputs = (
+            lambda: (events.append("item_input"), (u"苹果", u"手机"))[1])
+        self.task.wait_for_safe_start = lambda: None
+        self.task.switch_to_point_mode = lambda: None
+        self.task.resume_production_only = False
+        self.task.staging_point_number = 52
+        self.task.qr_observation_numbers = [262]
+        self.task.points = {
+            52: (-1.75, 2.25), 262: (-2.50, 2.25),
+            12: (-1.75, 0.75), 13: (-1.75, 0.75), 14: (-1.75, 0.75),
+            170: (1.0, 0.0), 319: (1.0, 1.0),
+        }
+        self.task.destination_midpoint_point_numbers = []
+        self.task.destination_point_number = 170
+        self.task.destination_heading_point_number = 319
+        self.task.stop_motion = lambda: None
+        self.task.wait_for_chassis_stop = lambda _context: None
+        self.task.wait_for_qr_scanner = lambda: None
+        self.task.start_ros_camera_and_wait = lambda _context: None
+        self.task.qr_enable_pub = QrPublisher()
+        self.task.navigate_to = lambda *_args, **_kwargs: None
+        self.task.collect_target_qr_codes = (
+            lambda targets: {u"苹果": 262, u"手机": 262})
+        self.task.stop_qr_classifier = lambda: None
+        self.task.stop_ros_camera_streaming = lambda required=True: None
+        self.task.post_qr_waypoint_number = 0
+
+        def classify_qr_text(observation_number, qr_text):
+            item = qr_text.decode("utf-8")
+            self.task.qr_classifications.append({
+                "observation": observation_number,
+                "qr_text": item,
+                "category": (
+                    u"日用品" if item == u"苹果" else u"电子产品"),
+                "source": "stub",
+                "attempts": 0,
+                "model": "test",
+                "error": "",
+            })
+
+        self.task.classify_qr_text = classify_qr_text
+        self.task.prepare_result_directory = lambda: None
+        self.task.use_ros_camera_for_ocr = True
+        self.task.camera_image_topic = "/usb_cam/image_raw"
+        self.task.start_native_ocr = lambda: None
+        self.task.production_route_numbers = [12, 13, 14]
+        self.task.production_navigation_legs = [
+            (52, 12), (12, 13), (13, 14)]
+        self.task.production_observation_headings = [0.0, 0.0, 0.0]
+        self.task.observations = []
+
+        def navigate_target_and_scan(leg_index, start_number, end_number,
+                                     target_yaw, target_category=None):
+            events.append((
+                "nav", leg_index, start_number, end_number,
+                target_category))
+            if end_number == 13:
+                self.task.observations.append({
+                    "processing_category": u"日用品",
+                    "wall_point_number": 100,
+                    "wall_point_coordinate": [0.0, 1.5],
+                    "forward_ray_wall_intersection_map": [0.0, 1.5],
+                })
+            if end_number == 14:
+                self.task.observations.append({
+                    "processing_category": u"电子产品",
+                    "wall_point_number": 200,
+                    "wall_point_coordinate": [1.0, 1.5],
+                    "forward_ray_wall_intersection_map": [1.0, 1.5],
+                })
+
+        self.task.navigate_target_and_scan = navigate_target_and_scan
+
+        def navigate_coordinates(x_value, y_value, yaw, label,
+                                 require_plan, **_kwargs):
+            events.append(("nav_coord", label))
+            return True
+
+        self.task.navigate_coordinates = navigate_coordinates
+        self.task.speak_wait = (
+            lambda text, timeout=None: events.append(("announce", text)))
+        self.task.stop_native_ocr = lambda: events.append("ocr_stop")
+        self.task.ensure_ros_camera_released = (
+            lambda: events.append("camera_release"))
+        self.task.save_observation_summary = lambda: events.append("save")
+        self.task.simulation_request_start = (
+            lambda item, category: events.append(
+                ("sim_start", item, category)))
+        self.task.simulation_wait_done = (
+            lambda: events.append("sim_wait_done"))
+        self.task.publish_result = (
+            lambda success, reason: events.append(("result", success)))
+        self.task.lane_handoff_enabled = False
+
+        # The real run_mission ends with rospy.signal_shutdown() to hand the
+        # vehicle over to lane_proto.  In the shared nosetests process that
+        # would set the global rospy shutdown flag and break every later
+        # test that waits on rospy.is_shutdown(); stub it out here.
+        original_signal_shutdown = task_module.rospy.signal_shutdown
+        task_module.rospy.signal_shutdown = (
+            lambda _reason: events.append("signal_shutdown"))
+        try:
+            self.task.run_mission()
+        finally:
+            task_module.rospy.signal_shutdown = original_signal_shutdown
+
+        self.assertEqual(events, [
+            "item_input",
+            ("announce", u"取得*苹果*属于*日用品*应放置在*日用品加工车间"),
+            ("announce", u"仿真环境中取得*手机*属于*电子产品*应放置在*电子产品生产车间"),
+            ("nav", 1, 52, 12, u"日用品"),
+            ("nav", 2, 12, 13, u"日用品"),
+            ("nav_coord", "processing stop point 100"),
+            ("announce", u"已将苹果放入日用品"),
+            ("nav", 3, 13, 14, u"电子产品"),
+            ("nav_coord", "processing stop point 200"),
+            "ocr_stop",
+            "camera_release",
+            "save",
+            ("sim_start", u"手机", u"电子产品"),
+            "sim_wait_done",
+            ("announce", u"仿真任务已完成，已将手机放入电子产品"),
+            ("nav_coord", "destination point 170"),
+            ("result", True),
+            "signal_shutdown",
+        ])
+
+    def test_run_mission_aborts_when_real_item_stops_on_last_leg(self):
+        class MoveBase(object):
+            def wait_for_server(self, _timeout):
+                return True
+
+            def cancel_all_goals(self):
+                pass
+
+        class QrPublisher(object):
+            def publish(self, _message):
+                pass
+
+        self.task.move_base = MoveBase()
+        self.task.move_base_ready_timeout = 1.0
+        self.task.publish_state = lambda _state: None
+        self.task.wait_for_item_inputs = (
+            lambda: (u"苹果", u"手机"))
+        self.task.wait_for_safe_start = lambda: None
+        self.task.switch_to_point_mode = lambda: None
+        self.task.resume_production_only = False
+        self.task.staging_point_number = 52
+        self.task.qr_observation_numbers = [262]
+        self.task.points = {
+            52: (-1.75, 2.25), 262: (-2.50, 2.25),
+            12: (-1.75, 0.75), 13: (-1.75, 0.75),
+        }
+        self.task.stop_motion = lambda: None
+        self.task.wait_for_chassis_stop = lambda _context: None
+        self.task.wait_for_qr_scanner = lambda: None
+        self.task.start_ros_camera_and_wait = lambda _context: None
+        self.task.navigate_to = lambda *_args, **_kwargs: None
+        self.task.collect_target_qr_codes = (
+            lambda targets: {u"苹果": 262, u"手机": 262})
+        self.task.qr_enable_pub = QrPublisher()
+        self.task.stop_qr_classifier = lambda: None
+        self.task.stop_ros_camera_streaming = lambda required=True: None
+        self.task.post_qr_waypoint_number = 0
+        self.task.prepare_result_directory = lambda: None
+        self.task.use_ros_camera_for_ocr = True
+        self.task.camera_image_topic = "/usb_cam/image_raw"
+        self.task.start_native_ocr = lambda: None
+        self.task.production_route_numbers = [12, 13]
+        self.task.production_navigation_legs = [(52, 12), (12, 13)]
+        self.task.production_observation_headings = [0.0, 0.0]
+        self.task.observations = []
+
+        def classify_qr_text(observation_number, qr_text):
+            item = qr_text.decode("utf-8")
+            self.task.qr_classifications.append({
+                "observation": observation_number,
+                "qr_text": item,
+                "category": (
+                    u"日用品" if item == u"苹果" else u"电子产品"),
+                "source": "stub",
+                "attempts": 0,
+                "model": "test",
+                "error": "",
+            })
+
+        self.task.classify_qr_text = classify_qr_text
+
+        def navigate_target_and_scan(leg_index, start_number, end_number,
+                                     target_yaw, target_category=None):
+            # The real item is found on the very last leg.
+            if end_number == 13:
+                self.task.observations.append({
+                    "processing_category": u"日用品",
+                    "wall_point_number": 100,
+                    "wall_point_coordinate": [0.0, 1.5],
+                    "forward_ray_wall_intersection_map": [0.0, 1.5],
+                })
+
+        self.task.navigate_target_and_scan = navigate_target_and_scan
+        self.task.navigate_coordinates = lambda *_args, **_kwargs: True
+        self.task.speak_wait = lambda text, timeout=None: None
+
+        with self.assertRaises(task_module.MissionAbort) as raised:
+            self.task.run_mission()
+        self.assertIn(
+            "simulation item category was not found after the real item "
+            "stop", str(raised.exception))
+
+    def test_speak_wait_timeout_terminates_helper_and_continues(self):
+        calls = []
+
+        class FakeProcess(object):
+            def __init__(self):
+                self.returncode = None
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                calls.append("terminate")
+
+            def kill(self):
+                calls.append("kill")
+
+        self.task.tts_enabled = True
+        self.task.tts_python = "/usr/bin/python3"
+        self.task.tts_helper_path = "/home/ucar/wake/tts_say.py"
+        self.task.speak_wait_timeout = 0.2
+        original_popen = task_module.subprocess.Popen
+        original_is_shutdown = task_module.rospy.is_shutdown
+        task_module.subprocess.Popen = (
+            lambda *_args, **_kwargs: FakeProcess())
+        task_module.rospy.is_shutdown = lambda: False
+        try:
+            self.task.speak_wait(u"测试播报")
+        finally:
+            task_module.subprocess.Popen = original_popen
+            task_module.rospy.is_shutdown = original_is_shutdown
+        self.assertIn("terminate", calls)
+        self.assertIn("kill", calls)
+        self.assertTrue(any(
+            "PRODUCTION_TASK_TTS_TIMEOUT" in warning
+            for warning in self.warnings))
+
+    def test_speak_wait_returns_after_helper_exits(self):
+        calls = []
+
+        class FakeProcess(object):
+            def __init__(self):
+                self.returncode = 0
+                self.poll_count = 0
+
+            def poll(self):
+                self.poll_count += 1
+                if self.poll_count >= 2:
+                    return 0
+                return None
+
+            def terminate(self):
+                calls.append("terminate")
+
+            def kill(self):
+                calls.append("kill")
+
+        self.task.tts_enabled = True
+        self.task.tts_python = "/usr/bin/python3"
+        self.task.tts_helper_path = "/home/ucar/wake/tts_say.py"
+        self.task.speak_wait_timeout = 5.0
+        original_popen = task_module.subprocess.Popen
+        original_is_shutdown = task_module.rospy.is_shutdown
+        task_module.subprocess.Popen = (
+            lambda *_args, **_kwargs: FakeProcess())
+        task_module.rospy.is_shutdown = lambda: False
+        try:
+            self.task.speak_wait(u"测试播报")
+        finally:
+            task_module.subprocess.Popen = original_popen
+            task_module.rospy.is_shutdown = original_is_shutdown
+        self.assertEqual(calls, [])
+        self.assertFalse(any(
+            "PRODUCTION_TASK_TTS_TIMEOUT" in warning
+            for warning in self.warnings))
+
+    def test_resolve_simulation_host_from_ros_master_uri(self):
+        self.task.simulation_host = ""
+        original = os.environ.get("ROS_MASTER_URI")
+        os.environ["ROS_MASTER_URI"] = "http://192.168.1.5:11311"
+        try:
+            self.assertEqual(
+                self.task.resolve_simulation_host(), "192.168.1.5")
+        finally:
+            if original is None:
+                del os.environ["ROS_MASTER_URI"]
+            else:
+                os.environ["ROS_MASTER_URI"] = original
+
+    def test_resolve_simulation_host_explicit_value_wins(self):
+        self.task.simulation_host = "10.0.0.2"
+        self.assertEqual(self.task.resolve_simulation_host(), "10.0.0.2")
+
+    def test_resolve_simulation_host_aborts_without_source(self):
+        self.task.simulation_host = ""
+        original = os.environ.get("ROS_MASTER_URI")
+        os.environ.pop("ROS_MASTER_URI", None)
+        try:
+            with self.assertRaises(task_module.MissionAbort):
+                self.task.resolve_simulation_host()
+        finally:
+            if original is not None:
+                os.environ["ROS_MASTER_URI"] = original
+
+    def test_simulation_request_start_posts_item_and_category(self):
+        self.task.simulation_host = "192.168.1.5"
+        self.task.simulation_port = 11313
+        self.task.simulation_start_timeout = 1.0
+        self.task.simulation_start_retries = 3
+        self.task.require_safe = lambda: None
+
+        sent = {}
+
+        def fake_urlopen(request, timeout=None):
+            sent["url"] = request.get_full_url()
+            sent["body"] = request.get_data()
+            sent["content_type"] = request.get_header("Content-type")
+            self.assertEqual(timeout, 1.0)
+
+            class Response(object):
+                def read(self):
+                    return '{"accepted": true}'
+
+                def close(self):
+                    pass
+
+            return Response()
+
+        original_urlopen = task_module.urllib2.urlopen
+        task_module.urllib2.urlopen = fake_urlopen
+        try:
+            self.task.simulation_request_start(u"手机", u"电子产品")
+        finally:
+            task_module.urllib2.urlopen = original_urlopen
+
+        self.assertEqual(sent["url"], "http://192.168.1.5:11313/start")
+        self.assertEqual(sent["content_type"], "application/json")
+        payload = json.loads(sent["body"].decode("utf-8"))
+        self.assertEqual(
+            payload, {"item_name": u"手机", "category": u"电子产品"})
+
+    def test_simulation_request_start_409_aborts_immediately(self):
+        self.task.simulation_host = "192.168.1.5"
+        self.task.simulation_port = 11313
+        self.task.simulation_start_timeout = 1.0
+        self.task.simulation_start_retries = 3
+        self.task.require_safe = lambda: None
+
+        def fake_urlopen(request, timeout=None):
+            raise task_module.urllib2.HTTPError(
+                request.get_full_url(), 409, "Conflict", {}, None)
+
+        original_urlopen = task_module.urllib2.urlopen
+        task_module.urllib2.urlopen = fake_urlopen
+        try:
+            with self.assertRaises(task_module.MissionAbort) as raised:
+                self.task.simulation_request_start(u"手机", u"电子产品")
+        finally:
+            task_module.urllib2.urlopen = original_urlopen
+        self.assertIn("simulation already running", str(raised.exception))
+
+    def test_simulation_request_start_retries_then_succeeds(self):
+        self.task.simulation_host = "192.168.1.5"
+        self.task.simulation_port = 11313
+        self.task.simulation_start_timeout = 1.0
+        self.task.simulation_start_retries = 3
+        self.task.require_safe = lambda: None
+        attempts = []
+        sleeps = []
+        original_sleep = task_module.time.sleep
+        task_module.time.sleep = lambda seconds: sleeps.append(seconds)
+
+        def fake_urlopen(request, timeout=None):
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise task_module.urllib2.URLError("connection refused")
+
+            class Response(object):
+                def read(self):
+                    return '{"accepted": true}'
+
+                def close(self):
+                    pass
+
+            return Response()
+
+        original_urlopen = task_module.urllib2.urlopen
+        task_module.urllib2.urlopen = fake_urlopen
+        try:
+            self.task.simulation_request_start(u"手机", u"电子产品")
+        finally:
+            task_module.urllib2.urlopen = original_urlopen
+            task_module.time.sleep = original_sleep
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(sleeps, [2.0, 2.0])
+
+    def test_simulation_request_start_aborts_after_all_retries(self):
+        self.task.simulation_host = "192.168.1.5"
+        self.task.simulation_port = 11313
+        self.task.simulation_start_timeout = 1.0
+        self.task.simulation_start_retries = 3
+        self.task.require_safe = lambda: None
+        attempts = []
+        original_sleep = task_module.time.sleep
+        task_module.time.sleep = lambda _seconds: None
+
+        def fake_urlopen(request, timeout=None):
+            attempts.append(1)
+            raise task_module.urllib2.URLError("connection refused")
+
+        original_urlopen = task_module.urllib2.urlopen
+        task_module.urllib2.urlopen = fake_urlopen
+        try:
+            with self.assertRaises(task_module.MissionAbort) as raised:
+                self.task.simulation_request_start(u"手机", u"电子产品")
+        finally:
+            task_module.urllib2.urlopen = original_urlopen
+            task_module.time.sleep = original_sleep
+        self.assertEqual(len(attempts), 3)
+        self.assertIn("failed after 3 attempts", str(raised.exception))
+
+    def test_simulation_wait_done_returns_after_done(self):
+        self.task.simulation_host = "192.168.1.5"
+        self.task.simulation_port = 11313
+        self.task.simulation_done_timeout = 10.0
+        self.task.simulation_poll_period = 0.01
+        self.task.require_safe = lambda: None
+        states = iter(['{"state": "running"}', '{"state": "done"}'])
+        original_is_shutdown = task_module.rospy.is_shutdown
+        task_module.rospy.is_shutdown = lambda: False
+
+        def fake_urlopen(url, timeout=None):
+            self.assertEqual(timeout, 10.0)
+
+            class Response(object):
+                def read(self):
+                    return next(states)
+
+                def close(self):
+                    pass
+
+            return Response()
+
+        original_urlopen = task_module.urllib2.urlopen
+        task_module.urllib2.urlopen = fake_urlopen
+        try:
+            self.task.simulation_wait_done()
+        finally:
+            task_module.urllib2.urlopen = original_urlopen
+            task_module.rospy.is_shutdown = original_is_shutdown
+
+    def test_simulation_wait_done_aborts_on_failed_state(self):
+        self.task.simulation_host = "192.168.1.5"
+        self.task.simulation_port = 11313
+        self.task.simulation_done_timeout = 10.0
+        self.task.simulation_poll_period = 0.01
+        self.task.require_safe = lambda: None
+        original_is_shutdown = task_module.rospy.is_shutdown
+        task_module.rospy.is_shutdown = lambda: False
+
+        def fake_urlopen(url, timeout=None):
+            class Response(object):
+                def read(self):
+                    return '{"state": "failed", "detail": "sim crashed"}'
+
+                def close(self):
+                    pass
+
+            return Response()
+
+        original_urlopen = task_module.urllib2.urlopen
+        task_module.urllib2.urlopen = fake_urlopen
+        try:
+            with self.assertRaises(task_module.MissionAbort) as raised:
+                self.task.simulation_wait_done()
+        finally:
+            task_module.urllib2.urlopen = original_urlopen
+            task_module.rospy.is_shutdown = original_is_shutdown
+        self.assertIn("simulation failed: sim crashed",
+                      str(raised.exception))
+
+    def test_simulation_wait_done_aborts_on_timeout(self):
+        self.task.simulation_host = "192.168.1.5"
+        self.task.simulation_port = 11313
+        self.task.simulation_done_timeout = 0.05
+        self.task.simulation_poll_period = 0.01
+        self.task.require_safe = lambda: None
+        original_is_shutdown = task_module.rospy.is_shutdown
+        task_module.rospy.is_shutdown = lambda: False
+
+        def fake_urlopen(url, timeout=None):
+            class Response(object):
+                def read(self):
+                    return '{"state": "running"}'
+
+                def close(self):
+                    pass
+
+            return Response()
+
+        original_urlopen = task_module.urllib2.urlopen
+        task_module.urllib2.urlopen = fake_urlopen
+        try:
+            with self.assertRaises(task_module.MissionAbort) as raised:
+                self.task.simulation_wait_done()
+        finally:
+            task_module.urllib2.urlopen = original_urlopen
+            task_module.rospy.is_shutdown = original_is_shutdown
+        self.assertIn("simulation did not finish", str(raised.exception))
+
+    def test_warehouse_name_for_category_matches_workshop_signs(self):
+        self.assertEqual(
+            self.task.warehouse_name_for_category(u"食品"),
+            u"食品加工车间")
+        self.assertEqual(
+            self.task.warehouse_name_for_category(u"日用品"),
+            u"日用品加工车间")
+        # The real-field sign reads 生产车间, not 加工车间.
+        self.assertEqual(
+            self.task.warehouse_name_for_category(u"电子产品"),
+            u"电子产品生产车间")
+
+    def test_warehouse_name_for_category_falls_back_with_warning(self):
+        name = self.task.warehouse_name_for_category(u"未知类别")
+        self.assertEqual(name, u"未知类别加工车间")
+        self.assertTrue(any(
+            "PRODUCTION_TTS_WAREHOUSE_UNKNOWN" in warning
+            for warning in self.warnings))
+
+    def test_handoff_to_lane_disabled_does_not_spawn(self):
+        self.task.lane_handoff_enabled = False
+        self.task.lane_handoff_script = (
+            "/home/ucar/ucar_ws/src/ucar_2026/scripts/handoff_lane.sh")
+        spawned = []
+        original_popen = task_module.subprocess.Popen
+        task_module.subprocess.Popen = (
+            lambda *args, **kwargs: spawned.append(args))
+        try:
+            self.task.handoff_to_lane()
+        finally:
+            task_module.subprocess.Popen = original_popen
+        self.assertEqual(spawned, [])
+
+    def test_handoff_to_lane_spawns_setsid_with_master_ip(self):
+        self.task.lane_handoff_enabled = True
+        self.task.lane_handoff_delay = 0.0
+        self.task.lane_handoff_script = (
+            "/home/ucar/ucar_ws/src/ucar_2026/scripts/handoff_lane.sh")
+        spawned = []
+        original_popen = task_module.subprocess.Popen
+        original_sleep = task_module.rospy.sleep
+        task_module.rospy.sleep = lambda _seconds: None
+        task_module.subprocess.Popen = (
+            lambda *args, **kwargs: spawned.append(args))
+        original_env = os.environ.get("ROS_MASTER_URI")
+        os.environ["ROS_MASTER_URI"] = "http://192.168.8.198:11311"
+        try:
+            self.task.handoff_to_lane()
+        finally:
+            task_module.subprocess.Popen = original_popen
+            task_module.rospy.sleep = original_sleep
+            if original_env is None:
+                del os.environ["ROS_MASTER_URI"]
+            else:
+                os.environ["ROS_MASTER_URI"] = original_env
+        self.assertEqual(spawned, [([
+            "setsid",
+            "/home/ucar/ucar_ws/src/ucar_2026/scripts/handoff_lane.sh",
+            "192.168.8.198"],)])
+
+    def test_handoff_to_lane_popen_failure_warns_without_raising(self):
+        self.task.lane_handoff_enabled = True
+        self.task.lane_handoff_delay = 0.0
+        self.task.lane_handoff_script = (
+            "/home/ucar/ucar_ws/src/ucar_2026/scripts/handoff_lane.sh")
+        original_popen = task_module.subprocess.Popen
+        original_sleep = task_module.rospy.sleep
+        task_module.rospy.sleep = lambda _seconds: None
+
+        def failing_popen(*args, **kwargs):
+            raise OSError("setsid not found")
+
+        task_module.subprocess.Popen = failing_popen
+        original_env = os.environ.get("ROS_MASTER_URI")
+        os.environ["ROS_MASTER_URI"] = "http://192.168.8.198:11311"
+        try:
+            self.task.handoff_to_lane()  # must not raise
+        finally:
+            task_module.subprocess.Popen = original_popen
+            task_module.rospy.sleep = original_sleep
+            if original_env is None:
+                del os.environ["ROS_MASTER_URI"]
+            else:
+                os.environ["ROS_MASTER_URI"] = original_env
+        self.assertTrue(any(
+            "PRODUCTION_LANE_HANDOFF_FAILED" in warning
+            for warning in self.warnings))
 
 
 if __name__ == "__main__":

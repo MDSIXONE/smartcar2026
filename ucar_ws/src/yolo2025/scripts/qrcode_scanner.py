@@ -1,11 +1,15 @@
 #!/home/ucar/myenv/bin/python3
-"""ROS QR-code scanner with an optional a-i HTTP result lookup."""
+"""ROS QR-code scanner with an optional HTTP item-name lookup.
+
+Real-field QR codes carry a full URL; when api_enabled the decoded URL
+itself is GET-requested and the JSON reply ({"code": 200, "result": "<item>"})
+is published on /qr_api_result for the task node to match item names.
+"""
 
 import json
 import os
 import threading
 import time
-from urllib.parse import unquote, urlparse
 from urllib.request import urlopen
 
 import cv2
@@ -20,7 +24,6 @@ class QRCodeScanner(object):
         self.image_topic = rospy.get_param("~image_topic", "/usb_cam/image_raw")
         self.scan_enabled = rospy.get_param("~scan_enabled", True)
         self.api_enabled = rospy.get_param("~api_enabled", False)
-        self.api_base_url = rospy.get_param("~api_base_url", "http://192.168.8.1:3663").rstrip("/")
         self.api_timeout_sec = float(rospy.get_param("~api_timeout_sec", 5.0))
         self.same_code_cooldown_sec = float(rospy.get_param("~same_code_cooldown_sec", 1.0))
 
@@ -79,9 +82,7 @@ class QRCodeScanner(object):
         rospy.loginfo("QR detected: %s", decoded_text)
 
         if self.api_enabled:
-            key = self.extract_api_key(decoded_text)
-            if key:
-                self.query_api_async(key, decoded_text)
+            self.query_api_async(decoded_text)
 
     @staticmethod
     def image_message_to_bgr(message):
@@ -125,41 +126,29 @@ class QRCodeScanner(object):
             rospy.logwarn_throttle(2.0, "OpenCV QR detection failed: %s", error)
             return ""
 
-    @staticmethod
-    def extract_api_key(decoded_text):
-        text = unquote(decoded_text.strip())
-        if len(text) == 1 and text.lower() in "abcdefghi":
-            return text.lower()
-        parsed = urlparse(text)
-        if parsed.scheme in ("http", "https"):
-            key = parsed.path.rstrip("/").split("/")[-1].lower()
-            if len(key) == 1 and key in "abcdefghi":
-                return key
-        return None
-
-    def query_api_async(self, key, decoded_text):
+    def query_api_async(self, decoded_text):
         with self.api_lock:
-            if key in self.api_inflight:
+            if decoded_text in self.api_inflight:
                 return
-            self.api_inflight.add(key)
-        worker = threading.Thread(target=self.query_api, args=(key, decoded_text))
+            self.api_inflight.add(decoded_text)
+        worker = threading.Thread(target=self.query_api, args=(decoded_text,))
         worker.daemon = True
         worker.start()
 
-    def query_api(self, key, decoded_text):
-        response = {"qr_text": decoded_text, "key": key, "ok": False}
+    def query_api(self, decoded_text):
+        url = decoded_text.strip()
+        response = {"qr_text": decoded_text, "key": "", "ok": False}
         try:
-            url = "%s/%s" % (self.api_base_url, key)
             with urlopen(url, timeout=self.api_timeout_sec) as http_response:
                 parsed = json.loads(http_response.read().decode("utf-8"))
                 response.update({"ok": True, "http_status": http_response.getcode(), "response": parsed})
-                rospy.loginfo("QR API %s -> code=%s result=%s", key, parsed.get("code"), parsed.get("result"))
+                rospy.loginfo("QR API %s -> code=%s result=%s", url, parsed.get("code"), parsed.get("result"))
         except Exception as error:
             response["error"] = str(error)
-            rospy.logwarn("QR API lookup for %s failed: %s", key, error)
+            rospy.logwarn("QR API lookup for %s failed: %s", url, error)
         finally:
             with self.api_lock:
-                self.api_inflight.discard(key)
+                self.api_inflight.discard(decoded_text)
         self.api_result_pub.publish(json.dumps(response, ensure_ascii=False, sort_keys=True))
 
 

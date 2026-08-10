@@ -3,7 +3,6 @@
   <arg name="image_topic" default="/usb_cam/image_raw" />
   <arg name="scan_enabled" default="true" />
   <arg name="api_enabled" default="false" />
-  <arg name="api_base_url" default="http://192.168.8.1:3663" />
 
   <!-- Do not include ucar_cam.launch: its optional cv_bridge flip node is
        Python-2-only on this car and is not required for QR scanning. -->
@@ -24,6 +23,5 @@
     <param name="image_topic" value="$(arg image_topic)" />
     <param name="scan_enabled" value="$(arg scan_enabled)" />
     <param name="api_enabled" value="$(arg api_enabled)" />
-    <param name="api_base_url" value="$(arg api_base_url)" />
   </node>
 </launch>

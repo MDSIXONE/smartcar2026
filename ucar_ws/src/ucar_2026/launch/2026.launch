@@ -55,7 +55,10 @@
         <param name="global_obstacle_filter_enabled" value="true"/>
         <param name="global_static_filter_radius" value="0.22"/>
         <param name="global_static_filter_threshold" value="65"/>
-        <param name="global_transform_max_age" value="0.20"/>
+        <!-- 0.30 tolerates the same transient TF jitter (~0.22 s, seen on
+             the real vehicle) that laser_map_pose retries through; 0.20
+             dropped the global scan mid-navigation and aborted the guard. -->
+        <param name="global_transform_max_age" value="0.30"/>
     </node>
 
     <!-- Use the field-wall map without middle vertices for real navigation. -->
@@ -94,11 +97,15 @@
 
     <group if="$(arg task_enabled)">
         <!-- ucar_2026 already owns the camera.  Keep decoding disabled until
-             the mission explicitly enters its QR stage. -->
+             the mission explicitly enters its QR stage.  Real-field QR codes
+             carry a full URL whose host/path changes per competition; when
+             api_enabled, qrcode_scanner GETs the decoded URL directly and
+             publishes the JSON reply ({"code":200,"result":"<item>"}) on
+             /qr_api_result, which production_task_2026 matches by item name. -->
         <include file="$(find yolo2025)/launch/qrcode.launch">
             <arg name="start_camera" value="false"/>
             <arg name="scan_enabled" value="false"/>
-            <arg name="api_enabled" value="false"/>
+            <arg name="api_enabled" value="true"/>
         </include>
 
         <node pkg="ucar_2026" type="production_task_2026.py"
@@ -118,15 +125,39 @@
                  destination point facing the heading point. -->
             <rosparam param="production_route_numbers">[12, 22, 13, 23, 14, 24, 15, 25, 16, 26, 17, 27, 18, 28, 19, 29]</rosparam>
             <rosparam param="production_observation_headings_deg">[-45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45]</rosparam>
-            <param name="destination_point_number" value="17"/>
-            <!-- Destination is the midpoint of the two listed points
-                 (35-36 line midpoint), facing the heading point 170.
-                 Empty disables the midpoint mode. -->
-            <param name="destination_midpoint_point_numbers" value="35,36"/>
+            <param name="destination_point_number" value="441"/>
+            <!-- Destination: point 441 (0.0, 0.0), facing the heading point
+                 170 (0.0, -0.5) so the lane-follow handoff sees the yellow
+                 line.  Midpoint mode is disabled. -->
+            <param name="destination_midpoint_point_numbers" value=""/>
             <param name="destination_heading_point_number" value="170"/>
-            <!-- Dwell at the processing-area stop point (seconds) before
-                 driving to the destination.  0 disables the dwell. -->
+            <!-- Dwell at the processing-area stop point has been replaced by
+                 the synchronous stop announcement (speak_wait); the parameter
+                 is kept with its default 3.0 for launch compatibility and is
+                 no longer used by the task code. -->
             <param name="processing_dwell_seconds" value="3.0"/>
+            <!-- Local simulation (host PC) coordination: after the second
+                 item stop the task POSTs /start then polls /status until
+                 done.  simulation_host empty derives the host from
+                 ROS_MASTER_URI. -->
+            <param name="simulation_port" value="11313"/>
+            <param name="simulation_host" value=""/>
+            <param name="simulation_start_timeout" value="30"/>
+            <param name="simulation_start_retries" value="3"/>
+            <param name="simulation_done_timeout" value="900"/>
+            <param name="simulation_poll_period" value="2.0"/>
+            <!-- Synchronous announcement budget; a timeout terminates the
+                 TTS helper and continues the mission. -->
+            <param name="speak_wait_timeout" value="60"/>
+            <!-- After SUCCEEDED, hand off to the lane-follow launch
+                 (lane_proto owns the chassis serial and camera, so
+                 2026.launch must fully exit first; the handoff script waits
+                 for that, then starts lane_proto.launch).  Set false to keep
+                 the old post-success spin behaviour. -->
+            <param name="lane_handoff_enabled" value="true"/>
+            <param name="lane_handoff_script"
+                   value="$(find ucar_2026)/scripts/handoff_lane.sh"/>
+            <param name="lane_handoff_delay" value="1.0"/>
             <!-- Retry window (s) for a scan stamp briefly outrunning the TF
                  clock (~9 ms jitter seen on the real vehicle); the lookup
                  stays fatal after the window. -->
@@ -212,7 +243,7 @@
             <param name="tf_timeout" value="1.5"/>
             <param name="stopped_odom_speed_epsilon" value="0.02"/>
             <param name="stopped_odom_samples" value="3"/>
-            <param name="ocr_alignment_tolerance_px" value="35.0"/>
+            <param name="ocr_alignment_tolerance_px" value="20.0"/>
             <param name="ocr_alignment_kp" value="0.0025"/>
             <param name="ocr_alignment_kd" value="0.00035"/>
             <param name="ocr_alignment_max_speed" value="0.22"/>

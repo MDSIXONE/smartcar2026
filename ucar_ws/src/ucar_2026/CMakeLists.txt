@@ -19,6 +19,7 @@ install(PROGRAMS
   scripts/run_melodic_python2.sh
   scripts/start_2026.sh
   scripts/stop_2026_task.sh
+  scripts/handoff_lane.sh
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

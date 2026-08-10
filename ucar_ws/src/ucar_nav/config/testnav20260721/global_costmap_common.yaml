@@ -1,5 +1,5 @@
 # testnav20260721 global costmap.  Keep the real vehicle footprint/frames and
-# the user-selected 0.205 m global safety inflation.
+# the user-selected 0.215 m global safety inflation.
 footprint: [[0.171, -0.128], [0.171, 0.128], [-0.171, 0.128], [-0.171, -0.128]]
 footprint_padding: 0.0
 transform_tolerance: 0.5
@@ -29,5 +29,5 @@ obstacle_layer:
 
 inflation_layer:
   enabled: true
-  inflation_radius: 0.205
+  inflation_radius: 0.215
   cost_scaling_factor: 0.05
