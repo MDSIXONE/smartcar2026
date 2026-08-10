@@ -1,8 +1,9 @@
 # 2026 主流程启动指南（其他电脑/新操作者）
 
 本文档面向**首次在这台控制电脑上启动 2026 智能车主流程**的操作者。主流程
-（物品输入 → 单二维码 → 大模型分类 → 目标加工区停车停留 → 终点）已在实车
-连续多次验证通过（最近两次 mission_run11 / mission_run12 均 SUCCEEDED）。
+（双物品输入 → 双二维码 → 大模型分类 → 现实物品加工区停入播报 → 仿真物品加工区
+停入并联动本机 WSL 仿真 → 终点）已完成车端单测与静态验证，实车联调序列见
+`docs/changes/2026-08-10-dual-item-simulation-link.md`。
 
 只需按顺序执行下列步骤，不需要理解任务代码内部实现。
 
@@ -46,6 +47,7 @@ scp $src\scripts\production_task_geometry.py  ucar@<小车IP>:~/ucar_ws/src/ucar
 scp $src\scripts\production_qr_classifier.py  ucar@<小车IP>:~/ucar_ws/src/ucar_2026/scripts/
 scp $src\scripts\start_2026.sh                ucar@<小车IP>:~/ucar_ws/src/ucar_2026/scripts/
 scp $src\launch\2026.launch                   ucar@<小车IP>:~/ucar_ws/src/ucar_2026/launch/
+scp $src\test\test_production_task_geometry.py ucar@<小车IP>:~/ucar_ws/src/ucar_2026/test/
 ```
 
 校验文件一致（本机哈希与小车端 sha256sum 必须相同）：
@@ -63,7 +65,7 @@ ssh ucar@<小车IP> "source /opt/ros/melodic/setup.bash && cd ~/ucar_ws && \
   catkin_test_results build/test_results/ucar_2026"
 ```
 
-预期输出：`60 tests, 0 errors, 0 failures, 0 skipped`。
+预期输出：`80 tests, 0 errors, 0 failures, 0 skipped`。
 
 > 若报 `No rule to make target 'ucar_2026/all'`：先看车上
 > `grep CATKIN_WHITELIST_PACKAGES build/CMakeCache.txt`，用其中实际值覆盖。
@@ -103,6 +105,27 @@ XML-RPC=HTTP/1.0
 
 ## 4. 启动主流程任务（mission 模式）
 
+### 4.1 提前启动本机仿真（2026-08-10 起新增）
+
+本机 WSL 仿真需要**提前打开**并等待小车消息。在控制电脑 WSL 依次执行（两个终端，
+参考 `docs/operations.md`「2026 双物品主流程 + 本机仿真联动」）：
+
+```bash
+# 终端 A：仿真环境（Gazebo + RViz + 机械臂初始化）
+cd /home/car/smartcar2026-simulation
+source /opt/ros/noetic/setup.bash && source devel/setup.bash
+export ROS_MASTER_URI=http://127.0.0.1:11312
+roslaunch car3 task3_prepare.launch    # 等机械臂初始化完成
+
+# 终端 B：仿真桥接服务（初始化完成后等待小车消息）
+source /opt/ros/noetic/setup.bash && source devel/setup.bash
+export ROS_MASTER_URI=http://127.0.0.1:11312
+python3 /home/car/simulation_bridge/sim_bridge.py
+# 看到 SIMULATION_BRIDGE_READY 即就绪，等待小车 POST
+```
+
+### 4.2 启动小车任务
+
 在小车终端（或 ssh 登录小车）执行：
 
 ```bash
@@ -117,14 +140,16 @@ bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh <Master地址> mission
 3. 询问 `是否已把车放回起点？`——**输入 `yes` 回车**才继续，其他输入取消启动；
 4. 启动 `2026.launch`（定位、底盘、相机、二维码、任务节点）。
 
-任务节点启动后打印提示并**阻塞等待物品输入**：
+任务节点启动后打印提示并**阻塞等待两个物品输入**：
 
 ```text
-PRODUCTION_TASK_INPUT_PROMPT: 请输入本次放置的物品名称后回车
+PRODUCTION_TASK_INPUT_PROMPT: 请输入现实物品名称后回车
+PRODUCTION_TASK_INPUT_PROMPT: 请输入仿真物品名称后回车
 ```
 
-在**同一个终端**直接输入本次物品名并回车（如：`蛋糕`、`苹果`、`螺丝刀`）。
-输入为空会中止任务；只有收到物品名任务才进入 QR 阶段。
+在**同一个终端**依次输入本次的**现实物品名**（如：`苹果`）和**仿真物品名**
+（如：`手机`）并回车。任一输入为空或两个名称相同会中止任务；只有集齐两个物品名
+任务才进入 QR 阶段。
 
 ---
 
@@ -133,19 +158,33 @@ PRODUCTION_TASK_INPUT_PROMPT: 请输入本次放置的物品名称后回车
 任务自动执行（无需人工干预）：
 
 ```
-WAITING_FOR_ITEM（等输入）→ WAITING_SAFE_START（安全检查）
-→ STAGING_52（去 QR 区）→ QR_FACE_262（只扫 1 个二维码）
-→ WAYPOINT_3 →（星火大模型分类物品 → 确定目标类别）
-→ PRODUCTION_TARGET_xxx（沿生产路线巡航，OCR 识别加工厂招牌，
-   命中目标类别即停；有障碍的点自动守卫跳过）
+WAITING_FOR_ITEM（等两个物品输入）
+→ WAITING_SAFE_START（安全检查）
+→ STAGING_52（去 QR 区）→ QR_SEQUENCE（扫 3 个观察面，集齐 2 个匹配
+   物品名的码，只取第一次结果；非目标码忽略）
+→（星火大模型分别分类两个物品 → 现实类别 + 仿真类别）
+→ WAYPOINT_3
+→ PRODUCTION_CRUISE_1（第一轮：沿生产路线巡航，OCR 识别加工厂招牌，
+   命中现实物品类别即停；有障碍的点自动守卫跳过）
 → PROCESSING_STOP_xxx（墙交点向内 25cm 停车，车头朝外）
-→ PROCESSING_DWELL_xxx（停留 3 秒）
+→ PROCESSING_ANNOUNCE_xxx（同步播报：已将[现实物品名]放入[仓库类别]，
+   确认播报完成后从找到的点继续）
+→ PRODUCTION_CRUISE_2（第二轮：剩余路线找仿真物品类别）
+→ PROCESSING_STOP_xxx（停入仿真物品对应类别）
+→ SIMULATION_START（POST 本机仿真 /start，把仿真物品输入仿真）
+→ SIMULATION_WAIT_DONE（小车静止，轮询 /status 等仿真完成）
+→ SIMULATION_DONE →（同步播报：仿真任务已完成，已将[仿真物品名]放入[仓库类别]）
 → DESTINATION_35_36（终点：35/36 连线中点，车头朝 170）
 → SUCCEEDED
+→（自动交接 lane_proto 巡线：2026.launch 自动退出释放串口/相机 → 黄线对齐 →
+   等绿灯认箭头 → 进三岔口 → 巡线 → 终点横线 STOPPED）
 ```
 
 语音播报（USB 音箱，失败不影响任务）：启动时「初始化完成，准备开始任务」、
-扫码分类后「取得*<物品名>*属于*<类别>」。
+扫码分类后顺序播报「取得*<现实物品名>*属于*<类别>*应放置在*<仓库名>」与
+「仿真环境中取得*<仿真物品名>*属于*<类别>*应放置在*<仓库名>」、现实物品停入后
+「已将*<物品名>*放入*<类别>」（同步，播报完成才继续）、仿真完成后「仿真任务
+已完成，已将*<物品名>*放入*<类别>」（同步）。
 
 在控制电脑任一终端（已 `source` 且 ROS_MASTER_URI 指向 WSL Master）观察：
 
@@ -190,7 +229,10 @@ ps aux | grep -E 'roslaunch|production_task' | grep -v grep   # 应为空
 | 任务中途 ABORTED | 看 task_result 的 reason；多数是点 12 等有障碍被守卫跳过（正常）或停车确认超时（已放宽到 4s） |
 | 大模型分类结果错误 | 任务喂给大模型的是你输入的**物品名**（不是二维码文本）；确认输入的是真实物品名 |
 | `move_base unavailable after 90s` | 检查 WSL Master 是否还活着、小车与 Master 网络是否正常 |
-| 想重跑一次 | 先按第 6 节停止 → 放回起点 → 再按第 4 节启动 |
+| 仿真物品停入后任务中止（`simulation /start` 失败） | 确认仿真桥接服务已启动且打印 `SIMULATION_BRIDGE_READY`；`/start` 会重试 3 次后中止 |
+| 仿真物品停入后一直等待（`SIMULATION_WAIT_DONE`） | 检查仿真端 `task3_run_*.log` 与 `/sim_task3/done` 话题；仿真任务异常会超时（默认 900s）中止 |
+| SUCCEEDED 后进入 lane_proto 巡线（黄线对齐/红绿灯/三岔口） | 正常行为——终点后自动交接巡线；观察 `/lane_proto/state`，结束用 `bash ~/ucar_ws/src/lane_proto/scripts/stop_lane.sh`（或 Ctrl-C） |
+| 想重跑一次 | 先按第 6 节停止 → 放回起点 → 再按第 4 节启动；仿真桥接服务单次任务后需重启（Ctrl-C 后重新运行 sim_bridge.py） |
 | 车上有残留任务进程 | 先执行第 6 节停止脚本，再启动新任务（顺序不可颠倒） |
 
 ---
@@ -200,5 +242,8 @@ ps aux | grep -E 'roslaunch|production_task' | grep -v grep   # 应为空
 - `docs/operations.md`：部署、构建、测试的完整操作命令。
 - `docs/quickstart.md`：日常手动导航、RViz 使用。
 - `rosmaster/NETWORK_CONFIGURATION.md`：ROS 网络动态配置。
-- `docs/changes/2026-08-07-item-input-single-qr-target-category.md`：本主流程
-  的改造记录（含实车验证序列）。
+- `docs/changes/2026-08-07-item-input-single-qr-target-category.md`：单物品主流程
+   的改造记录（含实车验证序列）。
+- `docs/changes/2026-08-10-dual-item-simulation-link.md`：双物品 + 本机仿真联动
+   的改造记录（含小车↔仿真 HTTP 协议）。
+- `simulation/bridge/README.md`：仿真桥接服务的部署、启动与协议文档。

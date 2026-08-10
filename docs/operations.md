@@ -841,13 +841,16 @@ bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh "$MASTER_IP" mission
 实车放回起点，才能再次启动 mission。不得在车辆仍位于 52 或生产区其他点时直接
 重启整条定位链路；固定初值会造成地图位姿与实车位置不一致。
 
-任务节点启动后（`WAITING_FOR_ITEM` 状态）会阻塞等待物品输入：在启动
-`start_2026.sh` 的同一终端直接输入本次放入的物品名并回车（如：苹果、可乐、
-螺丝刀）。输入为空将中止任务；只有收到物品名后任务才进入安全等待与 QR 阶段。
+任务节点启动后（`WAITING_FOR_ITEM` 状态）会阻塞等待**两个**物品输入（2026-08-10
+起）：在启动 `start_2026.sh` 的同一终端依次输入**现实物品名**和**仿真物品名**
+并回车（如：苹果、手机）。任一输入为空或两个名称相同将中止任务；只有集齐两个
+物品名后任务才进入安全等待与 QR 阶段。
 
 语音播报（USB 音箱，`/home/ucar/wake/tts_say.py`，失败不影响任务）：初始化完成
 （安全等待 + 点模式就绪）播放「初始化完成，准备开始任务」；扫码且星火分类返回后
-播放「已取得*<物品名>」。
+播放「已取得*<现实物品名>」；现实物品停入加工区后**同步播报**「已将*<物品名>*放入
+*<类别>」（播报完成才继续找仿真物品）；仿真任务完成后**同步播报**「仿真任务已
+完成，已将*<物品名>*放入*<类别>」。
 
 该模式不需要也不启动 RViz。运行时可在连接同一 Master 的诊断终端观察：
 
@@ -1340,7 +1343,8 @@ roslaunch yolo2025 2026.launch
 The current task map has a narrow doorway and a slight laser/static-map offset.
 Keep the global plugin order as `static_layer`, `obstacle_layer`, then
 `inflation_layer`; the global obstacle source must be `/scan_global_obstacles`,
-and the global inflation radius must remain `0.21 m`. After deploying
+and the global inflation radius must remain `0.215 m`（2026-08-10 起，原 0.205；
+配置文件 `config/testnav20260721/global_costmap_common.yaml`）。After deploying
 `global_costmap_params.yaml`, restart the launch and use the no-motion probe
 below before running the automatic task:
 
@@ -2234,4 +2238,104 @@ helper 日志位于 `~/.ros/ucar_2026_observations/spark_classifier.log`；任�
 `qr_classifications` 记录 `source=spark`、`attempts=3`（首请求流控重试），分类结果写入
 `observations.json`；此前多次 `ascii codec` 崩溃（Py2 rospy.loginfo 中文参数、JSON 中文
 bytes）已修复，QR 阶段零崩溃，任务可正常进入生产路线巡检。
+
+## 2026 双物品主流程 + 本机仿真联动（2026-08-10 起）
+
+主流程改版：输入**两个**物品（现实物品 + 仿真物品）→ 扫码集齐两个匹配物品名的码
+→ 大模型分类两个类别 → 第一轮找现实类别、停入并同步播报「已将X放入Y」→ 从找到点
+继续第二轮找仿真类别、停入 → POST 本机 WSL 仿真 `/start` → 轮询 `/status` 至 done
+→ 播报「仿真任务已完成，已将X放入Y」→ 终点 → **自动交接 lane_proto 巡线**
+（黄线对齐 → 等绿灯认箭头 → 进三岔口 → 巡线 → 终点横线 STOPPED）。详细行为见
+`docs/changes/2026-08-10-dual-item-simulation-link.md`。
+
+### 终点自动交接 lane_proto（2026-08-10 起）
+
+- 2026 任务 SUCCEEDED 后：发布 task_result → 延迟 1s（`lane_handoff_delay`）
+  → 任务节点 `setsid` 启动 `handoff_lane.sh` 并 `signal_shutdown` 退出
+  （required=true 触发 2026.launch 整体关闭，释放底盘串口与相机）→ 脚本等待
+  2026.launch 退出（30s）与 `/dev/ttyUSB0` 可打开（10s）后前台启动：
+  ```bash
+  roslaunch lane_proto lane_proto.launch dry_run:=false linear_speed:=0.2 \
+    gain:=1.0 template:="$(rospack find lane_proto)/config/red_template_band.png" \
+    is_fork:=yolo yellow_target:=0.90 align_offset:=0.15 start_offset:=0.25
+  ```
+  （yellow_target=0.90 黄线在画面下方 10%；align_offset=0.15 对准黄线后前进
+  0.15m 到规定位；start_offset=0.25 等绿灯后前进 0.25m 进三岔口中心）
+- **硬约束**：lane_proto.launch 自带 ucar_controller_simple 底盘驱动 + V4L2
+  直连相机，与 2026.launch **不能同时跑**（同串口、相机被抢）——交接必须等
+  2026.launch 完全退出，人工重跑时先 `stop_2026_task.sh` 再启动 lane_proto。
+- 交接开关：`2026.launch` 参数 `lane_handoff_enabled`（默认 true；false 保持
+  旧行为——任务 SUCCEEDED 后节点继续 spin，由 stop 脚本停止）。
+- lane_proto 观察：`rostopic echo /lane_proto/state`（FOLLOW→PAUSE→APPROACH→
+  STOPPED）；急停 `/lane_proto/estop`；停止 `bash ~/ucar_ws/src/lane_proto/
+  scripts/stop_lane.sh`（或 Ctrl-C）；日志关键字 `HANDOFF_LANE_STARTED` /
+  `HANDOFF_LANE_FAILED`、`HANDOFF_WAIT_2026_EXIT`、`HANDOFF_SERIAL_READY`。
+
+### 仿真桥接服务部署（本机 WSL，一次）
+
+```bash
+# 从仓库复制 bridge 目录到 WSL（不能手写）
+mkdir -p /home/car/simulation_bridge
+cp /mnt/d/WORK/ALLCODE/smartcar2026/simulationforreal/simulation/bridge/sim_bridge.py \
+  /home/car/simulation_bridge/
+chmod 0755 /home/car/simulation_bridge/sim_bridge.py
+```
+
+Windows 防火墙放行端口 11313（管理员 PowerShell，只限局域网子网）：
+
+```powershell
+New-NetFirewallRule -DisplayName 'SimBridge from UCar' -Direction Inbound \
+  -Protocol TCP -LocalPort 11313 -RemoteAddress LocalSubnet -Action Allow
+```
+
+### 任务运行顺序（2026-08-10 起，新增仿真前置步骤）
+
+0. （一次性，本机 WSL2 常驻配置）在 `C:\Users\<用户>\.wslconfig` 的 `[wsl2]`
+   段设置 `vmIdleTimeout=-1` 并 `wsl --shutdown` 重启——否则最后一个 `wsl`
+   会话退出后发行版关闭，后台 roslaunch 被连带杀掉（master 日志出现
+   `keyboard interrupt, will exit`）。
+1. WSL 启动 ROS Master（`~/start_ros_master.sh`，显示非 localhost）；
+2. **仿真端**（另一 WSL 终端，先于小车任务）：
+   ```bash
+   cd /home/car/smartcar2026-simulation && \
+   source /opt/ros/noetic/setup.bash && source devel/setup.bash && \
+   export ROS_MASTER_URI=http://127.0.0.1:11312 && \
+   roslaunch car3 task3_prepare.launch   # 等机械臂初始化完成
+   ```
+   再起桥接服务（终端 B）：
+   ```bash
+   source /opt/ros/noetic/setup.bash && source devel/setup.bash && \
+   export ROS_MASTER_URI=http://127.0.0.1:11312 && \
+   python3 /home/car/simulation_bridge/sim_bridge.py
+   # 看到 SIMULATION_BRIDGE_READY 后即进入 waiting 状态
+   # （就绪判定轮询常驻的 /map 话题，不可用 /sim_task3/arm_initial_pose_ready：
+   #  该话题由 set_arm_initial_pose 节点发布一次后即注销）
+   ```
+3. 把车放回起点 `(-0.25, 2.75, 0)`（车头 x 负方向朝场内）；
+4. 小车端 `bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh <Master地址> mission`
+   → 依次输入**现实物品名**和**仿真物品名**（如 `苹果`、`手机`）；
+5. 任务自动执行；仿真物品停入后小车 POST 桥接服务启动仿真（`cargo_category` +
+   `cargo_name` 透传），等待 `/sim_task3/done` 期间小车保持静止；
+6. 任务结束（SUCCEEDED）后：
+   ```bash
+   MASTER_IP=<Master地址> bash ~/ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh
+   ```
+   仿真端桥接服务与 prepare.launch 按需 Ctrl-C 停止，不留后台进程。
+
+### 仿真桥接协议与故障排查
+
+- 小车 → 桥：`POST /start` `{"item_name":"苹果","category":"食品"}` → 200
+  `{"accepted":true}`；409 = 仿真已在跑/已完成（单次任务后需重启 bridge 再跑）；
+- 小车 → 桥：`GET /status` → `{"state":"waiting|running|done|failed", ...}`；
+- 桥日志关键字：`SIMULATION_BRIDGE_READY` / `SIMULATION_BRIDGE_DONE` /
+  `SIMULATION_BRIDGE_FAILED`；roslaunch 输出在 bridge 目录
+  `task3_run_<时间戳>.log`；
+- 小车日志关键字：`PRODUCTION_SIMULATION_START_ACCEPTED` /
+  `PRODUCTION_SIMULATION_STATUS_DONE`；`/start` 失败重试 3 次后 MissionAbort；
+- 端口被占：`ss -tlnp | grep 11313`；done 话题无数据：确认 prepare.launch 已就绪
+  （`rostopic echo -n 1 /map` 有输出即就绪）；
+- 小车端 `simulation_host` 默认从 `ROS_MASTER_URI` 自动推导（同一台电脑），
+  一般无需配置；多机场景在 2026.launch 显式传 `simulation_host`。
+- 防火墙：无需为 11313 新建规则——既有 `ROS TCPROS from UCar to WSL` 已是
+  `port=Any + RemoteAddress=LocalSubnet`，自动覆盖（2026-08-10 联调实测）。
 
