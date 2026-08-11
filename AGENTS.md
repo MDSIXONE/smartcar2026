@@ -9,6 +9,13 @@
 - 每次需要备份时，只能把本地的上传到github对应分支；小车端不得保留备份目录或归档文件。
 - 若用户修改了本地参数，就把本地参数同步到小车，若用户在下次端修改了，就把小车端的也同步到本机
 - 每次启动完后不得在后端残留启动终端，需要停止后才能结束对话
+- 启动带 GUI 的本机仿真（Gazebo/RViz，如 `task3_prepare.launch`）**之前**，必须先做 WSLg COPY MODE 预检；窗口标题出现 `[WARN:COPY MODE]` 或 weston.log 出现 `use_gfxredir = 0` 时，不得带病启动仿真。预检与修复（详见 `犯错档案/2026-08-10.md`）：
+  ```bash
+  # 预检：两条必须同时满足才算健康
+  grep -c 'use_gfxredir = 0' /mnt/wslg/weston.log   # 必须为 0
+  findmnt /mnt/shared_memory                         # 必须为 tmpfs 挂载
+  ```
+  预检不通过时先 `wsl --terminate Ubuntu-20.04`；若 weston.log 仍含 `use_gfxredir = 0`，必须 `wsl --shutdown` 完全重启 WSL（Docker Desktop 会临时 Stopped，无影响），重启后复检两条预检通过，才允许启动 GUI 仿真。注意：从 PowerShell 检查 weston.log 时，双引号内的 Bash `$()` 会被 PowerShell 提前展开（报 `grep: =: No such file or directory`），应使用 Base64 脚本或避免嵌套 `$()`。
 - 编写时不能只考虑固定 IP；由于 Wi-Fi 网络环境会变化，必须支持 IP 动态变化或提供相应的配置/发现机制。
 - 编写代码时参考(MODEL_ROUTING.md)来部署子智能体
 

@@ -739,8 +739,9 @@ active 且重新规划恢复，可继续观察；连续失败或状态转为 abo
 2. 车辆保持在 52，依次面向墙边观察点
    262 `(-2.50, 2.25)`、232 `(-1.75, 3.00)`、
    295 `(-1.75, 1.50)` 扫码。观察点只决定车头方向，车辆不得导航到墙边。
-3. 每个观察方向收到新且去重后的二维码便立即前往下一个方向；未识别时才以
-   `0.18 rad/s` 最多正转一整圈。整圈没有新结果则停车并终止任务。
+3. 每个观察方向收到新且去重后的二维码后，若物品与输入目标匹配则记录并前往下一方向；
+   若收到但物品不匹配，也直接前往下一固定观察方向，**不得**转圈。只有该面完全没有新的
+   二维码事件时，才以 `0.18 rad/s` 最多正转一整圈；整圈没有新结果则停车并终止任务。
 4. 二维码结束后关闭扫码与相机采集，启动 Python 3 OCR helper；生产阶段的相机只在每一个
    已到达目标时重新开启，转圈扫描、复拍、测距结束后立即再次暂停。
 5. 任务在安全门通过、**任何** `move_base` 目标之前锁存连续发布三次
@@ -766,8 +767,8 @@ active 且重新规划恢复，可继续观察；连续失败或状态转为 abo
    `target_guard_events` 并直接规划下一个目标。被跳过的目标不启动相机、OCR 或 360° 转圈；
    即使跳过 12，去 23 也从车辆的实际当前位置重新规划。16 被跳过时不会伪造“到达 16”。
 9. 首个 OCR 候选会先零速并经过新鲜低速里程计停车门；若推理返回时车辆已经多转，任务
-   先回到候选帧朝向，再进行居中、前方雷达测距、TF 投影和墙点匹配。居中仍通过受控
-   move_base 同位置小角度目标完成，完成前必须再次停车。
+   先回到候选帧朝向，再以任务节点连续发布角速度完成像素居中。仅在对准后再次停车确认，
+   才进行前方雷达测距、TF 投影和墙点匹配。
 10. 雷达处理使用正前方 ±3° 的有限距离中位数和同一时间的 `map ← laser` TF；最近点只在
    JSON 的 `wall_reference_point_numbers` 中查询，误差大于 `0.18 m` 不计入正式结果。
 11. 每次运行把 `target_guard_events`、`target_scan_events` 和有效 `observations` 写入
@@ -841,10 +842,19 @@ bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh "$MASTER_IP" mission
 实车放回起点，才能再次启动 mission。不得在车辆仍位于 52 或生产区其他点时直接
 重启整条定位链路；固定初值会造成地图位姿与实车位置不一致。
 
-任务节点启动后（`WAITING_FOR_ITEM` 状态）会阻塞等待**两个**物品输入（2026-08-10
-起）：在启动 `start_2026.sh` 的同一终端依次输入**现实物品名**和**仿真物品名**
-并回车（如：苹果、手机）。任一输入为空或两个名称相同将中止任务；只有集齐两个
-物品名后任务才进入安全等待与 QR 阶段。
+任务节点启动后（`WAITING_FOR_ITEM` 状态）会等待**一条语音双类别指令**（2026-08-11
+起），不再从启动终端读取两个物品名。听到提示后先说唤醒词“**小飞小飞**”，再完整说：
+
+```text
+前往物品领取区，取得日用品，放置在对应仓库，并领取仿真环境中需要的食品放置在对应仓库
+```
+
+其中“日用品”和“食品”可替换为 `食品`、`日用品`、`电子产品` 中两个**不同**的类别。
+`wake_listen.py --loop --asr --set-wake 小飞小飞 --json` 槽位缺失、ASR 失败、未知类别或
+重复类别时会继续等待下一次唤醒，车辆保持静止。二维码阶段再按所说类别扫描并分类，取得
+现场二维码的实际物品名；后续播报与仿真桥接仍使用该实际物品名。无麦克风的开发测试可在
+`2026.launch` 临时传入 `item_input_mode:=stdin`，恢复旧的“现实物品名、仿真物品名”两行终端输入。
+语音类别模式必须执行二维码阶段来解析实际物品名，故不能与 `resume_production_only:=true` 组合。
 
 语音播报（USB 音箱，`/home/ucar/wake/tts_say.py`，失败不影响任务）：初始化完成
 （安全等待 + 点模式就绪）播放「初始化完成，准备开始任务」；扫码且星火分类返回后
@@ -1997,7 +2007,11 @@ SUCCEEDED；16 点走完仍未识别到目标类别则任务失败（MissionAbor
 运行目录的 `observations.json` 保留成功候选的 OCR、雷达和墙点结果，并以
 `target_scan_events` 审计每个目标的完整转圈或候选。生产完成后要求得到目标类别的一个
 有效墙点；找不到时安全停止并报告任务失败。`ocr_scan_rotation_speed`、
-`ocr_scan_poll_period` 和 `ocr_scan_candidate_confidence` 可在 `2026.launch` 中调节。
+`ocr_scan_poll_period` 和 `ocr_scan_candidate_confidence` 可在 `2026.launch` 中调节。当前
+`ocr_scan_rotation_speed=0.30 rad/s`；整圈截止时间按
+`2π / speed × rotation_timeout_scale + 2 s` 自动计算，`rotation_timeout_scale=3.5` 时约
+`75.3 s`。首次实车观察 `PRODUCTION_TASK_TURN_START` 的速度、完整圈进度、识别率和停车稳定性；
+任何 NaN、TF 或 CRC 异常均立即停车，不以提高速度绕过安全门。
 
 部署、构建和测试不启动 ROS、不发布速度。小车地址和 WSL Master 必须按
 `rosmaster/NETWORK_CONFIGURATION.md` 在当次网络中发现，示例中的变量不是固定 IP：
@@ -2031,7 +2045,7 @@ catkin_make -DCATKIN_WHITELIST_PACKAGES="ucar_controller;ucar_2026" --pkg ucar_2
 source devel/setup.bash
 export ROS_MASTER_URI="http://<MASTER_IP>:11311"
 export ROS_IP="$(ip -4 route get <MASTER_IP> | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
-catkin_make -DCATKIN_WHITELIST_PACKAGES="ucar_controller;ucar_2026" run_tests_ucar_2026
+catkin_make -DCATKIN_WHITELIST_PACKAGES="ucar_controller;ucar_2026" run_tests
 catkin_test_results --verbose build/test_results/ucar_2026
 ```
 
@@ -2059,30 +2073,41 @@ CMakeCache 的白名单现值（含历史残留的 ucar_controller）；若车�
 `map ← laser` 前向射线到中间墙边界的距离相差不超过 `ray_range_agreement_m`（默认 `0.30 m`），
 否则该类别不记入完成数。
 
-OCR 水平居中不再通过 `move_base` 的同位置 yaw 目标实现，而是由任务在停车后按 OCR 框中心误差
-（P）与相邻抓拍误差变化（D）直接发布受限角速度，并用 `odom → base_link` 的实际有向 yaw 变化确认完成；未在
-`ocr_alignment_turn_timeout` 内达到控制循环门限时，会先零速、确认底盘停止并补采最后一帧 odom yaw；
-补采后仍未达原阈值才中止。使用镜像 OCR 帧时，bbox 已处在后处理坐标系，控制器直接使用其误差符号，
-不能手工再反向设置 `ocr_alignment_kp`。若 PD 输出的角速度低于底盘 MCU 旋转死区（实车曾见
-0.073 rad/s 转不动而 0.18 rad/s 正常），对齐会超时中止；`rotate_in_place_for_yaw` 发布前会把速度
-钳制到 `ocr_alignment_min_speed`（默认 `0.12`）以上，可在 launch 中调整。
+OCR 水平居中不再通过 `move_base` 的同位置 yaw 目标实现。首次静止抓拍取得 OCR 框中心误差后，
+任务以 P/D 直接发布受限角速度，并在**下一张 OCR 帧异步识别期间持续发布**该速度；每一张新帧只会
+更新速度，不会在中间停车。首次落入 `ocr_alignment_tolerance_px` 后才发送零速、确认连续低速 odom，
+然后进行前向激光测距、TF 投影和墙点匹配。OCR 空帧、识别超时、对准次数耗尽或安全异常均立即零速
+并确认停车。使用镜像 OCR 帧时，bbox 已处在后处理坐标系，控制器直接使用其误差符号，不能手工再
+反向设置 `ocr_alignment_kp`。若 PD 输出的角速度低于底盘 MCU 旋转死区（实车曾见 0.073 rad/s
+转不动而 0.18 rad/s 正常），连续对准仍会钳制到 `ocr_alignment_min_speed`（默认 `0.12`）以上。
 
 部署时需额外同步本次纯函数回归文件，随后仅在小车 Ubuntu 18.04 上构建和测试：
 
 ```powershell
 scp ucar_ws/src/ucar_2026/scripts/production_task_2026.py `
-  ucar_ws/src/ucar_2026/scripts/production_task_perception.py `
-  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/scripts/"
-scp ucar_ws/src/ucar_2026/test/test_production_task_perception.py `
-  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/test/"
-scp ucar_ws/src/ucar_2026/launch/2026.launch `
-  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/launch/"
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/scripts/production_task_2026.py"
+scp ucar_ws/src/ucar_2026/test/test_production_task_geometry.py `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/test/test_production_task_geometry.py"
 ```
 
 不要把多个源文件上传到包根目录。随后使用本文件既有的动态 `<MASTER_IP>` 环境设置运行
 `catkin_make --pkg ucar_2026` 和
-`run_melodic_python2.sh ~/ucar_ws/src/ucar_2026/test/test_production_task_perception.py -v`。部署、构建
+`catkin_make run_tests`。部署、构建
 和测试不启动 ROS、不发布速度；实车试跑仍需用户重新确认起点和安全门。
+
+### USB 扬声器音量
+
+播放设备由 `~/wake/audio_dev.py` 按 USB VID:PID 动态识别，不能把声卡序号写入代码。先查看
+当次识别的声卡索引，再将该声卡的 `PCM` 左右声道设为目标百分比并保存；下例将当前识别出的声卡
+设为 50%。这只修改播放混音，不启动 ROS、不发声、不发布速度。
+
+```bash
+python3 ~/wake/audio_dev.py
+# 将 <AUDIO_CARD> 替换为上一条输出中 UACDemoV1.0 的当前 idx。
+amixer -M -c <AUDIO_CARD> set PCM 50% unmute
+amixer -M -c <AUDIO_CARD> get PCM
+sudo alsactl store
+```
 
 当前自动任务在安全门通过、任一 `move_base` 目标前，等待 CymPlanner 连接
 `/ucar/navigation_mode` 并锁存连续发布三次 `point`。因此起点到 52、二维码朝向、
@@ -2241,12 +2266,34 @@ bytes）已修复，QR 阶段零崩溃，任务可正常进入生产路线巡检
 
 ## 2026 双物品主流程 + 本机仿真联动（2026-08-10 起）
 
-主流程改版：输入**两个**物品（现实物品 + 仿真物品）→ 扫码集齐两个匹配物品名的码
-→ 大模型分类两个类别 → 第一轮找现实类别、停入并同步播报「已将X放入Y」→ 从找到点
+主流程改版：唤醒后说出**两个**物品类别（现实类别 + 仿真类别）→ 扫码并分类集齐两个
+匹配类别的码、取得实际物品名 → 第一轮找现实类别、停入并同步播报「已将X放入Y」→ 从找到点
 继续第二轮找仿真类别、停入 → POST 本机 WSL 仿真 `/start` → 轮询 `/status` 至 done
 → 播报「仿真任务已完成，已将X放入Y」→ 终点 → **自动交接 lane_proto 巡线**
 （黄线对齐 → 等绿灯认箭头 → 进三岔口 → 巡线 → 终点横线 STOPPED）。详细行为见
 `docs/changes/2026-08-10-dual-item-simulation-link.md`。
+
+### 二维码固定观察面回归（2026-08-11 起）
+
+二维码观察面固定按 180°（262）→90°（232）→-90°（295）推进。某面收到二维码但
+物品名不属于两个输入目标时，日志应出现
+`PRODUCTION_QR_FACE_REJECTED ... advance_to_next_face=true`，随后进入下一面；该面
+不得出现 `QR_SEARCH_TURN`。只有该面完全没有二维码事件时才允许转圈兜底。
+
+同步代码到小车后，只在小车 Ubuntu 18.04 / ROS Melodic 上执行下列回归；所有
+`source` 完成后必须恢复当前 WSL Master，且测试不会启动任务节点或发送运动命令：
+
+```bash
+cd ~/ucar_ws
+source /opt/ros/melodic/setup.bash
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+read -r -p '请输入 WSL Master 当前地址: ' MASTER_IP
+export ROS_MASTER_URI="http://${MASTER_IP}:11311"
+export ROS_IP="$(ip -4 route get "$MASTER_IP" | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+catkin_make -DCATKIN_WHITELIST_PACKAGES=ucar_2026 run_tests
+catkin_test_results --verbose build/test_results/ucar_2026
+```
 
 ### 终点自动交接 lane_proto（2026-08-10 起）
 
@@ -2267,8 +2314,9 @@ bytes）已修复，QR 阶段零崩溃，任务可正常进入生产路线巡检
 - 交接开关：`2026.launch` 参数 `lane_handoff_enabled`（默认 true；false 保持
   旧行为——任务 SUCCEEDED 后节点继续 spin，由 stop 脚本停止）。
 - lane_proto 观察：`rostopic echo /lane_proto/state`（FOLLOW→PAUSE→APPROACH→
-  STOPPED）；急停 `/lane_proto/estop`；停止 `bash ~/ucar_ws/src/lane_proto/
-  scripts/stop_lane.sh`（或 Ctrl-C）；日志关键字 `HANDOFF_LANE_STARTED` /
+  STOPPED）；急停 `/lane_proto/estop`。当前车端没有 `stop_lane.sh`；若自动交接的
+  launch 仍在运行，先发布零速度，再从 `pgrep -af 'roslaunch lane_proto lane_proto.launch'`
+  输出中确认本次 PID 并 `kill -INT <PID>`（前台手工启动时可直接 Ctrl-C）。日志关键字 `HANDOFF_LANE_STARTED` /
   `HANDOFF_LANE_FAILED`、`HANDOFF_WAIT_2026_EXIT`、`HANDOFF_SERIAL_READY`。
 
 ### 仿真桥接服务部署（本机 WSL，一次）
@@ -2295,17 +2343,28 @@ New-NetFirewallRule -DisplayName 'SimBridge from UCar' -Direction Inbound \
    会话退出后发行版关闭，后台 roslaunch 被连带杀掉（master 日志出现
    `keyboard interrupt, will exit`）。
 1. WSL 启动 ROS Master（`~/start_ros_master.sh`，显示非 localhost）；
-2. **仿真端**（另一 WSL 终端，先于小车任务）：
+2. **仿真端**（独立于真车 Master，先于小车任务）：先在一个保持打开的 WSL 终端启动
+   仿真专用 Master；不能用一次性后台 WSL 子进程启动，否则子进程退出会连带关闭
+   `roscore`，使随后 Gazebo、`map_server` 和 `move_base` 消失。
+   ```bash
+   export HOME=/home/car
+   source /opt/ros/noetic/setup.bash
+   export ROS_MASTER_URI=http://127.0.0.1:11312
+   export ROS_IP=127.0.0.1
+   roscore -p 11312
+   ```
+   保持该终端运行后，再在**另一个** WSL 终端启动准备阶段：
    ```bash
    cd /home/car/smartcar2026-simulation && \
    source /opt/ros/noetic/setup.bash && source devel/setup.bash && \
-   export ROS_MASTER_URI=http://127.0.0.1:11312 && \
+   export ROS_MASTER_URI=http://127.0.0.1:11312 && export ROS_IP=127.0.0.1 && \
    roslaunch car3 task3_prepare.launch   # 等机械臂初始化完成
    ```
-   再起桥接服务（终端 B）：
+   确认 `/gazebo/get_link_state`、`/move_base/clear_costmaps` 和 `/map` 都可读后，再起桥接服务
+   （第三个 WSL 终端）：
    ```bash
    source /opt/ros/noetic/setup.bash && source devel/setup.bash && \
-   export ROS_MASTER_URI=http://127.0.0.1:11312 && \
+   export ROS_MASTER_URI=http://127.0.0.1:11312 && export ROS_IP=127.0.0.1 && \
    python3 /home/car/simulation_bridge/sim_bridge.py
    # 看到 SIMULATION_BRIDGE_READY 后即进入 waiting 状态
    # （就绪判定轮询常驻的 /map 话题，不可用 /sim_task3/arm_initial_pose_ready：
@@ -2313,7 +2372,7 @@ New-NetFirewallRule -DisplayName 'SimBridge from UCar' -Direction Inbound \
    ```
 3. 把车放回起点 `(-0.25, 2.75, 0)`（车头 x 负方向朝场内）；
 4. 小车端 `bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh <Master地址> mission`
-   → 依次输入**现实物品名**和**仿真物品名**（如 `苹果`、`手机`）；
+   → 听到提示后先说“小飞小飞”，再说固定双类别指令（如现实 `日用品`、仿真 `食品`）；
 5. 任务自动执行；仿真物品停入后小车 POST 桥接服务启动仿真（`cargo_category` +
    `cargo_name` 透传），等待 `/sim_task3/done` 期间小车保持静止；
 6. 任务结束（SUCCEEDED）后：
@@ -2338,4 +2397,3 @@ New-NetFirewallRule -DisplayName 'SimBridge from UCar' -Direction Inbound \
   一般无需配置；多机场景在 2026.launch 显式传 `simulation_host`。
 - 防火墙：无需为 11313 新建规则——既有 `ROS TCPROS from UCar to WSL` 已是
   `port=Any + RemoteAddress=LocalSubnet`，自动覆盖（2026-08-10 联调实测）。
-
