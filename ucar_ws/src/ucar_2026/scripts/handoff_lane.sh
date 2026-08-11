@@ -26,28 +26,29 @@ source "$HOME/ucar_ws/devel/setup.bash"
 # Wait for 2026.launch to exit.  production_task_2026 is a required=true
 # node, so when the mission finishes the whole launch dies and releases the
 # chassis serial port and the camera.
-for attempt in $(seq 1 30); do
+# 2026-08-11：轮询粒度 1s→0.2s，缩短终点→巡线交接延迟（方案3）。
+for attempt in $(seq 1 150); do
   if ! pgrep -f "roslaunch ucar_2026 2026.launch" >/dev/null 2>&1; then
-    echo "HANDOFF_WAIT_2026_EXIT done after ${attempt}s"
+    echo "HANDOFF_WAIT_2026_EXIT done after ${attempt}x0.2s"
     break
   fi
-  if [[ "$attempt" -eq 30 ]]; then
+  if [[ "$attempt" -eq 150 ]]; then
     echo "HANDOFF_ERROR 2026.launch still running after 30s" >&2
     exit 3
   fi
-  sleep 1
+  sleep 0.2
 done
 
 # Wait for the chassis serial port to be openable (driver released it).
 serial_ready=false
-for attempt in $(seq 1 10); do
+for attempt in $(seq 1 50); do
   if [[ -e /dev/ttyUSB0 ]] && exec 3<>/dev/ttyUSB0 2>/dev/null; then
     exec 3>&-
     serial_ready=true
-    echo "HANDOFF_SERIAL_READY after ${attempt}s"
+    echo "HANDOFF_SERIAL_READY after ${attempt}x0.2s"
     break
   fi
-  sleep 1
+  sleep 0.2
 done
 if [[ "$serial_ready" != true ]]; then
   echo "HANDOFF_ERROR chassis serial port did not become available" >&2
@@ -70,9 +71,12 @@ export ROS_IP
 
 lane_template="$(rospack find lane_proto)/config/red_template_band.png"
 echo "HANDOFF_LANE_STARTED master=$ROS_MASTER_URI ip=$ROS_IP template=$lane_template"
+# goal_y_lo: 横线识别条带位置（0.78=底部22%, 0.85=底部15%）。
+# 2026-08-11 调大到 0.85：终点横线需更贴近车底才触发检出，打点位置
+# 更靠近横线，最终停车（打点+0.50m 进给）多前进几厘米，补偿后轮过线。
 roslaunch lane_proto lane_proto.launch dry_run:=false linear_speed:=0.2 gain:=1.0 \
   "template:=$lane_template" is_fork:=yolo yellow_target:=0.90 \
-  align_offset:=0.15 start_offset:=0.25
+  align_offset:=0.15 start_offset:=0.25 goal_y_lo:=0.85 dump_every:=0
 lane_status=$?
 if [[ "$lane_status" -ne 0 ]]; then
   echo "HANDOFF_LANE_FAILED exit=$lane_status" >&2

@@ -19,6 +19,19 @@ DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG = [
     -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45,
 ]
 
+# The primary zig-zag only covers the inner production lanes.  When a required
+# category was not recognised there, the mission makes one complete perimeter
+# pass instead of aborting: top row left-to-right, right side downward, bottom
+# row right-to-left, then the left side upward.  Each target still receives a
+# full 360-degree OCR turn; these headings merely start that turn facing into
+# the middle production zone.
+DEFAULT_FALLBACK_PRODUCTION_ROUTE = (
+    list(range(1, 11)) + [20, 30, 40] + list(range(39, 30, -1)) + [21, 11]
+)
+DEFAULT_FALLBACK_PRODUCTION_OBSERVATION_HEADINGS_DEG = (
+    [-90] * 10 + [180] * 3 + [90] * 9 + [0] * 2
+)
+
 
 class TaskDefinitionError(ValueError):
     """Raised when the numbered-grid task configuration is incomplete."""

@@ -19,6 +19,8 @@ if SCRIPT_ROOT not in sys.path:
     sys.path.insert(0, SCRIPT_ROOT)
 
 from production_task_geometry import (  # noqa: E402
+    DEFAULT_FALLBACK_PRODUCTION_OBSERVATION_HEADINGS_DEG,
+    DEFAULT_FALLBACK_PRODUCTION_ROUTE,
     DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG,
     DEFAULT_PRODUCTION_ROUTE,
     TaskDefinitionError,
@@ -111,6 +113,16 @@ class ProductionTaskGeometryTest(unittest.TestCase):
         self.assertEqual(
             len(DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG),
             len(DEFAULT_PRODUCTION_ROUTE))
+        self.assertEqual(
+            DEFAULT_FALLBACK_PRODUCTION_ROUTE,
+            list(range(1, 11)) + [20, 30, 40] +
+            list(range(39, 30, -1)) + [21, 11])
+        self.assertEqual(
+            DEFAULT_FALLBACK_PRODUCTION_OBSERVATION_HEADINGS_DEG,
+            [-90] * 10 + [180] * 3 + [90] * 9 + [0] * 2)
+        self.assertEqual(
+            len(DEFAULT_FALLBACK_PRODUCTION_OBSERVATION_HEADINGS_DEG),
+            len(DEFAULT_FALLBACK_PRODUCTION_ROUTE))
 
     def test_production_route_collapses_to_exact_straight_segments(self):
         self.assertEqual(
@@ -476,6 +488,17 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.assertIsNone(self.task.poll_target_guard(monitor))
         self.assertEqual(monitor["hit_counts"], {419: 1})
 
+    def test_fallback_target_without_middle_guard_uses_navigation_layers(self):
+        self.task.lock = threading.RLock()
+        self.task.target_guard_points = {12: {419: (-2.0, 1.0)}}
+        self.task.target_guard_scan_sequence = 0
+
+        monitor = self.task.new_target_guard_monitor(1)
+
+        self.assertFalse(monitor["guard_enabled"])
+        self.assertIsNone(self.task.wait_for_target_guard_precheck(monitor))
+        self.assertFalse(self.task.target_guard_scan_expired(monitor))
+
     def test_target_guard_scan_expiry_cancels_then_aborts_a_target_leg(self):
         events = []
         self.task.points = {12: (-1.75, 0.75)}
@@ -693,14 +716,17 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.resume_production_only = False
         self.task.staging_point_number = 52
         self.task.qr_observation_numbers = [262]
-        self.task.points = {52: (-1.75, 2.25), 262: (-2.50, 2.25)}
+        self.task.points = {
+            52: (-1.75, 2.25), 262: (-2.50, 2.25), 3: (-1.25, 1.25),
+        }
         self.task.stop_motion = lambda: None
         self.task.wait_for_chassis_stop = lambda _context: None
         self.task.wait_for_qr_scanner = lambda: None
         self.task.start_ros_camera_and_wait = lambda _context: None
         self.task.qr_enable_pub = QrPublisher()
         self.task.stop_qr_classifier = lambda: None
-        self.task.post_qr_waypoint_number = 0
+        self.task.post_qr_waypoint_number = 3
+        self.task.post_qr_waypoint_heading_point_number = 0
 
         qr_codes = iter([u"苹果", u"手机"])
 
@@ -730,6 +756,11 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.use_ros_camera_for_ocr = True
         self.task.camera_image_topic = "/usb_cam/image_raw"
         self.task.start_native_ocr = lambda: events.append("ocr_start")
+        self.task.speak_wait = (
+            lambda text, timeout=None: events.append(("announce", text)))
+        self.task.navigate_coordinates = (
+            lambda _x, _y, _yaw, label, **_kwargs:
+            events.append(("navigate", label)))
         self.task.production_route_numbers = [12]
         self.task.production_navigation_legs = [(52, 12)]
         self.task.production_observation_headings = [0.0]
@@ -750,7 +781,12 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.assertEqual(
             events,
             ["item_input", "safe_start", "point_mode", "STAGING_52",
-             "qr_scan", "qr_scan", "ocr_start", "production_navigation"])
+             "qr_scan", "qr_scan",
+             ("announce", u"二维码识别完成，已获取苹果和手机"),
+             ("announce", u"取得*苹果*属于*日用品*应放置在*日用品加工车间"),
+             ("announce", u"仿真环境中取得*手机*属于*日用品*应放置在*日用品加工车间"),
+             ("navigate", "post-QR waypoint 3"), "ocr_start",
+             "production_navigation"])
 
     def test_camera_stream_start_and_stop_are_idempotent(self):
         events = []
@@ -880,8 +916,8 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.qr_search_timeout = 1.0
         self.task.qr_rotation_speed = 0.18
         self.task.navigate_coordinates = lambda *_args, **_kwargs: None
-        self.task.accepted_qr_after = lambda *_args: None
-        self.task.wait_for_fresh_qr = lambda *_args: None
+        self.task.accepted_qr_after = lambda *_args, **_kwargs: (None, False)
+        self.task.wait_for_fresh_qr = lambda *_args, **_kwargs: (None, False)
         turns = []
 
         def rotate_full_revolution(label, speed, stop_for_qr, qr_baseline,
@@ -901,6 +937,40 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
             "QR observation point 262", 0.18, True, 0,
             True, 262)])
 
+    def test_scan_observation_point_advances_after_non_target_qr(self):
+        self.task.lock = threading.RLock()
+        self.task.points = {52: (-1.75, 2.25), 232: (-1.75, 3.00)}
+        self.task.staging_point_number = 52
+        self.task.api_sequence = 0
+        self.task.latest_api_text = ""
+        self.task.api_event = threading.Event()
+        self.task.publish_state = lambda _state: None
+        self.task.navigate_coordinates = lambda *_args, **_kwargs: None
+        self.task.accepted_qr_after = lambda *_args, **_kwargs: (None, True)
+        self.task.wait_for_fresh_qr = (
+            lambda *_args, **_kwargs: self.fail(
+                "a non-target QR must not wait at the current face"))
+        self.task.rotate_full_revolution = (
+            lambda *_args, **_kwargs: self.fail(
+                "a non-target QR must advance to the next fixed face"))
+
+        self.assertIsNone(
+            self.task.scan_observation_point(
+                232, lambda text: text == u"苹果"))
+
+    def test_accepted_qr_after_reports_non_target_qr(self):
+        rejected = []
+        self.task.fresh_qr_after = lambda _baseline: u"毛巾"
+        self.task._reject_qr_code = (
+            lambda text, observation: rejected.append((text, observation)))
+
+        result = self.task.accepted_qr_after(
+            7, lambda text: text == u"苹果", 232,
+            report_rejection=True)
+
+        self.assertEqual(result, (None, True))
+        self.assertEqual(rejected, [(u"毛巾", 232)])
+
     def test_scan_observation_point_accepts_code_during_fallback_turn(self):
         self.task.lock = threading.RLock()
         self.task.points = {52: (-1.75, 2.25), 262: (-2.50, 2.25)}
@@ -913,8 +983,8 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.qr_rotation_speed = 0.18
         self.task.used_qr_codes = set()
         self.task.navigate_coordinates = lambda *_args, **_kwargs: None
-        self.task.accepted_qr_after = lambda *_args: None
-        self.task.wait_for_fresh_qr = lambda *_args: None
+        self.task.accepted_qr_after = lambda *_args, **_kwargs: (None, False)
+        self.task.wait_for_fresh_qr = lambda *_args, **_kwargs: (None, False)
         self.task.rotate_full_revolution = (
             lambda *_args, **_kwargs: u"苹果")
 
@@ -1149,6 +1219,46 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.assertEqual(
             task["capture_requested_pose_map"], [1.0, 2.0, 0.5])
 
+    def test_alignment_ocr_keeps_publishing_turn_command_until_frame_returns(self):
+        class Publisher(object):
+            def __init__(self):
+                self.commands = []
+
+            def publish(self, message):
+                self.commands.append(message.angular.z)
+
+        task = {"done": threading.Event()}
+        publisher = Publisher()
+        original_rate = task_module.rospy.Rate
+
+        class FakeRate(object):
+            def __init__(self, _hz):
+                pass
+
+            def sleep(self):
+                task["done"].set()
+
+        try:
+            task_module.rospy.Rate = FakeRate
+            self.task.rotation_control_rate = 20.0
+            self.task.ocr_alignment_min_speed = 0.12
+            self.task.ocr_capture_timeout = 1.0
+            self.task.cmd_vel_pub = publisher
+            self.task.require_safe = lambda: None
+            self.task.start_async_motion_ocr = lambda _label: task
+            response = {"ok": True, "image_path": "moving.png"}
+            self.task.finish_async_motion_ocr = lambda _task: response
+
+            self.assertEqual(
+                self.task.capture_ocr_while_turning(
+                    0.05, "test", 2), response)
+        finally:
+            task_module.rospy.Rate = original_rate
+
+        # 0.05 rad/s is lifted over the chassis dead zone and no zero-speed
+        # command is sent until the caller decides the OCR alignment is done.
+        self.assertEqual(publisher.commands, [0.12, 0.12])
+
     def test_alignment_uses_measured_yaw_with_mirrored_ocr_bbox(self):
         calls = []
         self.task.ocr_alignment_max_speed = 0.22
@@ -1343,6 +1453,58 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         self.assertIn("real and simulation items must be different",
                       str(raised.exception))
 
+    def test_voice_item_inputs_store_requested_categories(self):
+        self.task.item_input_mode = "voice"
+        self.task.wait_for_voice_item_categories = (
+            lambda: (u"日用品", u"食品"))
+        real_category, sim_category = self.task.wait_for_item_inputs()
+        self.assertEqual((real_category, sim_category), (u"日用品", u"食品"))
+        self.assertEqual(self.task.requested_real_category, u"日用品")
+        self.assertEqual(self.task.requested_sim_category, u"食品")
+        # The actual item names are intentionally deferred until QR matching.
+        self.assertEqual(self.task.expected_real_item_text, u"")
+        self.assertEqual(self.task.expected_sim_item_text, u"")
+
+    def test_parse_voice_listener_message_accepts_complete_json_slots(self):
+        line = json.dumps({
+            "ok": True,
+            "slots": {u"取件类别": u"日用品", u"仿真类别": u"食品"},
+        }, ensure_ascii=True)
+        self.assertEqual(
+            self.task.parse_voice_listener_message(line),
+            (u"日用品", u"食品"))
+
+    def test_voice_qr_collection_resolves_category_to_actual_item(self):
+        self.task.qr_observation_numbers = [262, 232, 295]
+        detected_items = iter([u"牙刷", u"蛋糕"])
+        category_for_item = {u"牙刷": u"日用品", u"蛋糕": u"食品"}
+
+        def scan(observation_number, accept_text=None):
+            item = next(detected_items)
+            if accept_text is not None and not accept_text(item):
+                return None
+            return item
+
+        def classify(observation_number, item_text):
+            if isinstance(item_text, bytes):
+                item_text = item_text.decode("utf-8")
+            self.task.qr_classifications.append({
+                "observation": observation_number,
+                "qr_text": item_text,
+                "category": category_for_item[item_text],
+            })
+
+        self.task.scan_observation_point = scan
+        self.task.classify_qr_text = classify
+        collected = self.task.collect_target_qr_codes_by_category(
+            set([u"日用品", u"食品"]))
+        self.assertEqual(
+            collected,
+            {
+                u"日用品": {"item": u"牙刷", "observation": 262},
+                u"食品": {"item": u"蛋糕", "observation": 232},
+            })
+
     def test_qr_collection_filters_targets_and_takes_first_only(self):
         self.task.qr_observation_numbers = [262, 232, 295]
         faces = []
@@ -1414,7 +1576,7 @@ class ProductionTaskDualItemTest(unittest.TestCase):
             self.task.run_mission()
         self.assertIn("not all target QR codes", str(raised.exception))
 
-    def test_run_mission_cruises_two_rounds_and_posts_simulation(self):
+    def test_run_mission_records_simulation_first_but_announces_real_first(self):
         events = []
 
         class MoveBase(object):
@@ -1480,26 +1642,31 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         self.task.production_navigation_legs = [
             (52, 12), (12, 13), (13, 14)]
         self.task.production_observation_headings = [0.0, 0.0, 0.0]
+        self.task.fallback_navigation_legs = [(14, 12)]
+        self.task.fallback_production_observation_headings = [0.0]
         self.task.observations = []
 
         def navigate_target_and_scan(leg_index, start_number, end_number,
-                                     target_yaw, target_category=None):
+                                     target_yaw, target_category=None,
+                                     record_categories=None, **_kwargs):
             events.append((
                 "nav", leg_index, start_number, end_number,
-                target_category))
+                target_category, record_categories))
+            # The simulation workshop is seen first.  The route must record
+            # it, but cannot park there until after the real-item announcement.
+            if end_number == 12:
+                self.task.observations.append({
+                    "processing_category": u"电子产品",
+                    "wall_point_number": 200,
+                    "wall_point_coordinate": [1.0, 1.5],
+                    "forward_ray_wall_intersection_map": [1.0, 1.5],
+                })
             if end_number == 13:
                 self.task.observations.append({
                     "processing_category": u"日用品",
                     "wall_point_number": 100,
                     "wall_point_coordinate": [0.0, 1.5],
                     "forward_ray_wall_intersection_map": [0.0, 1.5],
-                })
-            if end_number == 14:
-                self.task.observations.append({
-                    "processing_category": u"电子产品",
-                    "wall_point_number": 200,
-                    "wall_point_coordinate": [1.0, 1.5],
-                    "forward_ray_wall_intersection_map": [1.0, 1.5],
                 })
 
         self.task.navigate_target_and_scan = navigate_target_and_scan
@@ -1539,13 +1706,13 @@ class ProductionTaskDualItemTest(unittest.TestCase):
 
         self.assertEqual(events, [
             "item_input",
+            ("announce", u"二维码识别完成，已获取苹果和手机"),
             ("announce", u"取得*苹果*属于*日用品*应放置在*日用品加工车间"),
             ("announce", u"仿真环境中取得*手机*属于*电子产品*应放置在*电子产品生产车间"),
-            ("nav", 1, 52, 12, u"日用品"),
-            ("nav", 2, 12, 13, u"日用品"),
+            ("nav", 1, 52, 12, u"日用品", set([u"日用品", u"电子产品"])),
+            ("nav", 2, 12, 13, u"日用品", set([u"日用品", u"电子产品"])),
             ("nav_coord", "processing stop point 100"),
             ("announce", u"已将苹果放入日用品"),
-            ("nav", 3, 13, 14, u"电子产品"),
             ("nav_coord", "processing stop point 200"),
             "ocr_stop",
             "camera_release",
@@ -1558,7 +1725,8 @@ class ProductionTaskDualItemTest(unittest.TestCase):
             "signal_shutdown",
         ])
 
-    def test_run_mission_aborts_when_real_item_stops_on_last_leg(self):
+    def test_run_mission_continues_to_destination_when_fallback_misses_sim(self):
+        events = []
         class MoveBase(object):
             def wait_for_server(self, _timeout):
                 return True
@@ -1582,8 +1750,12 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         self.task.qr_observation_numbers = [262]
         self.task.points = {
             52: (-1.75, 2.25), 262: (-2.50, 2.25),
-            12: (-1.75, 0.75), 13: (-1.75, 0.75),
+            12: (-1.75, 0.75), 13: (-1.25, 0.75), 14: (-0.75, 0.75),
+            170: (1.0, 0.0), 319: (1.0, 1.0),
         }
+        self.task.destination_midpoint_point_numbers = []
+        self.task.destination_point_number = 170
+        self.task.destination_heading_point_number = 319
         self.task.stop_motion = lambda: None
         self.task.wait_for_chassis_stop = lambda _context: None
         self.task.wait_for_qr_scanner = lambda: None
@@ -1602,6 +1774,8 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         self.task.production_route_numbers = [12, 13]
         self.task.production_navigation_legs = [(52, 12), (12, 13)]
         self.task.production_observation_headings = [0.0, 0.0]
+        self.task.fallback_navigation_legs = [(13, 14)]
+        self.task.fallback_production_observation_headings = [0.0]
         self.task.observations = []
 
         def classify_qr_text(observation_number, qr_text):
@@ -1620,7 +1794,10 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         self.task.classify_qr_text = classify_qr_text
 
         def navigate_target_and_scan(leg_index, start_number, end_number,
-                                     target_yaw, target_category=None):
+                                     target_yaw, target_category=None,
+                                     record_categories=None, **_kwargs):
+            events.append(("scan", start_number, end_number,
+                           target_category, record_categories))
             # The real item is found on the very last leg.
             if end_number == 13:
                 self.task.observations.append({
@@ -1631,14 +1808,32 @@ class ProductionTaskDualItemTest(unittest.TestCase):
                 })
 
         self.task.navigate_target_and_scan = navigate_target_and_scan
-        self.task.navigate_coordinates = lambda *_args, **_kwargs: True
+        self.task.navigate_coordinates = (
+            lambda _x, _y, _yaw, label, **_kwargs:
+            (events.append(("navigate", label)), True)[1])
         self.task.speak_wait = lambda text, timeout=None: None
-
-        with self.assertRaises(task_module.MissionAbort) as raised:
+        self.task.stop_native_ocr = lambda: events.append("ocr_stop")
+        self.task.ensure_ros_camera_released = (
+            lambda: events.append("camera_release"))
+        self.task.save_observation_summary = lambda: events.append("save")
+        self.task.publish_result = (
+            lambda success, reason: events.append(("result", success, reason)))
+        self.task.lane_handoff_enabled = False
+        original_signal_shutdown = task_module.rospy.signal_shutdown
+        task_module.rospy.signal_shutdown = (
+            lambda _reason: events.append("signal_shutdown"))
+        try:
             self.task.run_mission()
+        finally:
+            task_module.rospy.signal_shutdown = original_signal_shutdown
+
         self.assertIn(
-            "simulation item category was not found after the real item "
-            "stop", str(raised.exception))
+            ("scan", 13, 14, u"电子产品", set([u"电子产品"])), events)
+        self.assertIn(("navigate", "destination point 170"), events)
+        self.assertTrue(any(
+            event[0] == "result" and event[1] is True and
+            "production routes exhausted" in event[2]
+            for event in events))
 
     def test_speak_wait_timeout_terminates_helper_and_continues(self):
         calls = []

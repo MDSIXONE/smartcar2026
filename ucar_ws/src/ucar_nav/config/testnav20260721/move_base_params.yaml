@@ -2,7 +2,9 @@ shutdown_costmaps: false
 
 controller_frequency: 20.0
 controller_patience: 0.5
-planner_frequency: 3.0
+# 2026-08-11：3.0→5.0。中途障碍（如 431）出现时更快重规划绕行，
+# 配合 CymPlanner 降速降低碰撞概率；频率仍远低于 controller 20Hz。
+planner_frequency: 5.0
 planner_patience: 3.0
 oscillation_timeout: 5.0
 oscillation_distance: 0.01
