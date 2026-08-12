@@ -1,5 +1,13 @@
 # AI 变更记录
 
+## 2026-08-12｜仿真 bridge 纳入克隆仓库（改动完成）
+
+- **目标**：将真车—仿真 HTTP bridge 作为 `smartcar2026-simulation` 的受版本控制文件，使新电脑克隆仿真仓库即可获得它。
+- **涉及文件**：`../simulation/smartcar2026-simulation/bridge/`、仿真仓库 README，以及本仓库的新电脑运行指南。
+- **结果**：`bridge/sim_bridge.py` 和运行说明已纳入仿真仓库 `main`，新电脑克隆后直接运行 `python3 bridge/sim_bridge.py`；运行日志已排除版本控制；真车新电脑指南与 operations 已同步去除外部交付步骤。
+- **验证**：提交 `df3422140cb3367c1f8ff9b10bacb2dcca658019` 已推送并 fast-forward 到 WSL；bridge 的 Python 3 help/语法检查通过，无 ROS/Gazebo/bridge 残留。Noetic 全量构建被 WSL `p9_client_rpc` 文件系统阻塞，已中断本次构建进程树，待文件系统恢复后重跑。
+- **风险**：bridge 接入了局域网 HTTP 端口 11313；仍须使用可信 Wi-Fi 的 LocalSubnet 防火墙规则，并在仿真 11312 Master 已就绪后启动。
+
 ## 2026-08-11｜生产 OCR 巡航转速与车端部署（改动完成）
 
 - **目标**：将到点 OCR 整圈巡航角速度从 `0.25 rad/s` 提升为 `0.30 rad/s`，并将当前未上车的生产任务依赖同步至小车 Ubuntu 18.04 后完成车端构建与回归。

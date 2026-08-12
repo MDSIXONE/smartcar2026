@@ -8,6 +8,7 @@
 - 单测 mock / object.__new__ 新增属性：2026-08-11.md
 - 边界巡航 / middle target guard 适用范围：2026-08-11.md
 - 构建 / Catkin 测试目标层级：2026-08-11.md
+- WSL 文件系统 / p9_client_rpc 构建阻塞：2026-08-12.md
 
 ## 按日期
 
@@ -19,3 +20,7 @@
 - object.__new__ 单测缺少新增任务属性
 - 边界巡航 / middle target guard 适用范围不匹配
 - Catkin run_tests 子包目标被当作包名
+
+### 2026-08-12
+
+- WSL p9_client_rpc 阻塞 Noetic catkin_make

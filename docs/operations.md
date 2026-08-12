@@ -2319,15 +2319,25 @@ catkin_test_results --verbose build/test_results/ucar_2026
   输出中确认本次 PID 并 `kill -INT <PID>`（前台手工启动时可直接 Ctrl-C）。日志关键字 `HANDOFF_LANE_STARTED` /
   `HANDOFF_LANE_FAILED`、`HANDOFF_WAIT_2026_EXIT`、`HANDOFF_SERIAL_READY`。
 
-### 仿真桥接服务部署（本机 WSL，一次）
+### 仿真桥接服务（随仿真仓库克隆）
+
+`sim_bridge.py` 已纳入 `smartcar2026-simulation` 的 `bridge/` 目录；新电脑只要克隆并
+构建该仓库，不再需要从真车仓库、旧电脑或交付盘复制 bridge。仿真专用 Master 和 prepare
+已就绪后，在仿真工作区执行：
 
 ```bash
-# 从仓库复制 bridge 目录到 WSL（不能手写）
-mkdir -p /home/car/simulation_bridge
-cp /mnt/d/WORK/ALLCODE/smartcar2026/simulationforreal/simulation/bridge/sim_bridge.py \
-  /home/car/simulation_bridge/
-chmod 0755 /home/car/simulation_bridge/sim_bridge.py
+cd ~/smartcar2026-simulation
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_MASTER_URI=http://127.0.0.1:11312
+export ROS_IP=127.0.0.1
+python3 bridge/sim_bridge.py
 ```
+
+只有看到 `SIMULATION_BRIDGE_READY` 和 `state=waiting` 后，才可启动真车 mission。
+bridge 的接口、每轮重启要求和故障排查见仿真仓库 `bridge/README.md`；完整的新电脑顺序见
+`docs/new-computer-gui-simulation-mission.md`。
 
 Windows 防火墙放行端口 11313（管理员 PowerShell，只限局域网子网）：
 
@@ -2365,7 +2375,7 @@ New-NetFirewallRule -DisplayName 'SimBridge from UCar' -Direction Inbound \
    ```bash
    source /opt/ros/noetic/setup.bash && source devel/setup.bash && \
    export ROS_MASTER_URI=http://127.0.0.1:11312 && export ROS_IP=127.0.0.1 && \
-   python3 /home/car/simulation_bridge/sim_bridge.py
+   python3 bridge/sim_bridge.py
    # 看到 SIMULATION_BRIDGE_READY 后即进入 waiting 状态
    # （就绪判定轮询常驻的 /map 话题，不可用 /sim_task3/arm_initial_pose_ready：
    #  该话题由 set_arm_initial_pose 节点发布一次后即注销）

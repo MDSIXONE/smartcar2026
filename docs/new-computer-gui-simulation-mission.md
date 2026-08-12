@@ -77,16 +77,8 @@ test -f ~/smartcar2026-simulation/src/car3/models/vision/cube_yolov5_best.onnx &
 test -d ~/smartcar2026-simulation/src/car3/models/cube/meshes && echo MESH_OK
 ```
 
-bridge 是一个独立的本地交付物，当前不随 `smartcar2026-simulation.git` 克隆。新电脑在开始前
-必须从受控的旧电脑/交付盘取得**同版本** `simulation/bridge/sim_bridge.py`，放入 Windows 工作目录，
-例如 `D:\SmartCar\simulationforreal\simulation\bridge\sim_bridge.py`。先确认文件存在：
-
-```powershell
-Test-Path D:\SmartCar\simulationforreal\simulation\bridge\sim_bridge.py
-Get-FileHash D:\SmartCar\simulationforreal\simulation\bridge\sim_bridge.py -Algorithm SHA256
-```
-
-若该文件没有交付，不要尝试用手工简化版 HTTP 服务替代；向项目维护者索取对应版本的 bridge 后再继续。
+真车—仿真 HTTP bridge 已直接纳入 `smartcar2026-simulation.git` 的 `bridge/` 目录；完成第 1.2 节
+克隆后即已拥有 `bridge/sim_bridge.py`，不需要从旧电脑或交付盘另行取得，也不要用手工简化版替代。
 
 真车代码不用在新电脑编译；它只能在小车 Ubuntu 18.04 上构建。后文第 3 节会上传并在车端构建。
 
@@ -313,18 +305,7 @@ roslaunch car3 task3_prepare.launch gui:=true rviz:=true
 
 ### 终端 D：WSL bridge（11313）
 
-第一次从第 1.2 节已交付的 Windows 文件复制脚本；以后可跳过复制步骤。按实际 Windows 路径
-修改 `BRIDGE_SOURCE`，不能假定 bridge 位于仿真 Git 仓库内部：
-
-```bash
-export BRIDGE_SOURCE=/mnt/d/SmartCar/simulationforreal/simulation/bridge/sim_bridge.py
-test -f "$BRIDGE_SOURCE"
-mkdir -p ~/simulation_bridge
-cp "$BRIDGE_SOURCE" ~/simulation_bridge/sim_bridge.py
-chmod 0755 ~/simulation_bridge/sim_bridge.py
-```
-
-复制后执行：
+bridge 已随仓库克隆，直接在仿真工作区运行：
 
 ```bash
 cd ~/smartcar2026-simulation
@@ -333,7 +314,7 @@ source devel/setup.bash
 unset ROS_HOSTNAME
 export ROS_MASTER_URI=http://127.0.0.1:11312
 export ROS_IP=127.0.0.1
-python3 ~/simulation_bridge/sim_bridge.py
+python3 bridge/sim_bridge.py
 ```
 
 只在输出以下两行后，bridge 才可用：
