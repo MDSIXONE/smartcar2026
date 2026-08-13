@@ -69,14 +69,17 @@ if [[ -z "$ROS_IP" ]]; then
 fi
 export ROS_IP
 
-lane_template="$(rospack find lane_proto)/config/red_template_band.png"
+lane_template="$(rospack find lane_proto)/config/red_template_band2.png"
 echo "HANDOFF_LANE_STARTED master=$ROS_MASTER_URI ip=$ROS_IP template=$lane_template"
 # goal_y_lo: 横线识别条带位置（0.78=底部22%, 0.85=底部15%）。
 # 2026-08-11 调大到 0.85：终点横线需更贴近车底才触发检出，打点位置
 # 更靠近横线，最终停车（打点+0.50m 进给）多前进几厘米，补偿后轮过线。
-roslaunch lane_proto lane_proto.launch dry_run:=false linear_speed:=0.2 gain:=1.0 \
+# 2026-08-12 速度参数与手动调参命令对齐：linear_speed 0.2→0.35、
+# gain 1.0→1.2、rate 默认→20、dump_every 0→3、模板 band→band2、
+# align_offset 0.15→0.14、start_offset 0.25→0.23（手动实测可达 16Hz）。
+roslaunch lane_proto lane_proto.launch dry_run:=false linear_speed:=0.35 gain:=1.2 \
   "template:=$lane_template" is_fork:=yolo yellow_target:=0.90 \
-  align_offset:=0.15 start_offset:=0.25 goal_y_lo:=0.85 dump_every:=0
+  align_offset:=0.14 start_offset:=0.23 goal_y_lo:=0.85 rate:=20 dump_every:=3
 lane_status=$?
 if [[ "$lane_status" -ne 0 ]]; then
   echo "HANDOFF_LANE_FAILED exit=$lane_status" >&2
