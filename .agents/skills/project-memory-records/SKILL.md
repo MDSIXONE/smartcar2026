@@ -12,7 +12,7 @@ Maintain durable project learning records in `docs/ai-records/`. Create the fold
 At the start of every new conversation, read:
 
 1. `docs/ai-records/CHANGE_LOG.md` to understand work in progress and completed changes.
-2. `docs/ai-records/MISTAKE_LOG.md` to avoid repeating known mistakes.
+2. `docs/ai-records/MISTAKE_INDEX.md` to avoid repeating known mistakes, then read the relevant date file under `docs/ai-records/mistakes/`.
 
 Before proposing or selecting a new implementation approach, also read `docs/ai-records/FAILED_APPROACHES.md`.
 
@@ -20,13 +20,13 @@ Follow repository-level instructions such as `AGENTS.md` after reading the recor
 
 ## Change Log
 
-For every source-code change, update `CHANGE_LOG.md` twice when practical: create or mark the work unit `进行中` before implementation, then update it immediately after the change to `改动完成`. Use only those two status values. Record the date, goal, affected files, concise result, validation, and unresolved risks. Never add a third status such as “blocked” or “abandoned”; explain uncertainty in the notes instead.
+For every source-code change, update `CHANGE_LOG.md` twice when practical: create or mark the work unit `进行中` before implementation, then update it immediately after the change to `改动完成`. Use only those two status values. Record the date, goal, affected files, concise result, validation, and unresolved risks. Never add a third status such as "blocked" or "abandoned"; explain uncertainty in the notes instead.
 
 Do not add an entry for documentation-only changes unless the repository explicitly requires it.
 
 ## Mistake Log
 
-When an error, incorrect assumption, failed command, regression, or review finding produces a reusable lesson, append one concise entry to `MISTAKE_LOG.md`. Include the symptom, cause, prevention rule, and any related change-log entry. Record confirmed lessons, not routine experimentation or speculation.
+When an error, incorrect assumption, failed command, regression, or review finding produces a reusable lesson, append one concise entry to the date file `docs/ai-records/mistakes/YYYY-MM-DD.md` (create if absent) and register it in `docs/ai-records/MISTAKE_INDEX.md` under the closest topic row and the by-date list. Include the symptom, cause, prevention rule, and any related change-log entry. Record confirmed lessons, not routine experimentation or speculation.
 
 ## Failed Approaches
 
