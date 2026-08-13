@@ -1,6 +1,8 @@
 # 操作命令
 
-日常启动只需要查看 [quickstart.md](quickstart.md)；本文件保留部署、回滚和故障排查的完整命令。
+新电脑或日常主流程启动请查看
+[new-computer-gui-simulation-mission.md](new-computer-gui-simulation-mission.md)；本文件保留部署、
+回滚和故障排查的完整命令。
 
 ## WSL ROS Master 与 RViz
 
@@ -2302,12 +2304,14 @@ catkin_test_results --verbose build/test_results/ucar_2026
   （required=true 触发 2026.launch 整体关闭，释放底盘串口与相机）→ 脚本等待
   2026.launch 退出（30s）与 `/dev/ttyUSB0` 可打开（10s）后前台启动：
   ```bash
-  roslaunch lane_proto lane_proto.launch dry_run:=false linear_speed:=0.2 \
-    gain:=1.0 template:="$(rospack find lane_proto)/config/red_template_band.png" \
-    is_fork:=yolo yellow_target:=0.90 align_offset:=0.15 start_offset:=0.25
+  roslaunch lane_proto lane_proto.launch dry_run:=false linear_speed:=0.35 \
+    gain:=1.2 template:="$(rospack find lane_proto)/config/red_template_band2.png" \
+    is_fork:=yolo yellow_target:=0.90 align_offset:=0.14 start_offset:=0.23 \
+    goal_y_lo:=0.85 rate:=20 dump_every:=3
   ```
-  （yellow_target=0.90 黄线在画面下方 10%；align_offset=0.15 对准黄线后前进
-  0.15m 到规定位；start_offset=0.25 等绿灯后前进 0.25m 进三岔口中心）
+  （yellow_target=0.90 黄线在画面下方 10%；align_offset=0.14 对准黄线后前进
+  0.14m 到规定位；start_offset=0.23 等绿灯后前进 0.23m 进三岔口中心；
+  rate=20 控制循环 20Hz，实测可达 16Hz；2026-08-12 起与手动调参命令对齐）
 - **硬约束**：lane_proto.launch 自带 ucar_controller_simple 底盘驱动 + V4L2
   直连相机，与 2026.launch **不能同时跑**（同串口、相机被抢）——交接必须等
   2026.launch 完全退出，人工重跑时先 `stop_2026_task.sh` 再启动 lane_proto。
