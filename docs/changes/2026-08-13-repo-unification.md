@@ -1,7 +1,5 @@
 # 2026-08-13 统一仓库整合
 
-## 目的
-
 将仿真与小车源代码合并为单一统一仓库，定位为 https://github.com/MDSIXONE/smartcar2026 的 main 分支。
 
 ## 背景
@@ -33,3 +31,14 @@
 - 旧 main 分支历史（d23d198 及其祖先）仅保留在本地上级仓库 `D:\WORK\ALLCODE\smartcar2026\.git` 与 GitHub reflog 中，可通过 `git reflog` 恢复。
 - `simulation/tmp/` 下保留了克隆未跟踪的诊断日志/脚本（未提交），以及 bridge 外层备份目录。
 - 原 `simulation_real` 分支历史未并入统一仓库（用户选择"移除嵌套 .git 直接纳入"），远程分支 `simulation_real` 仍保留于 GitHub。
+
+## 跟进：技能文档融合（同日）
+
+统一仓库后，根 `.agents/skills/` 的四个技能引用的文档分散在 ucar 与仿真两侧，按用户指示融合到根：
+
+- **犯错档案融合**：`ucar_source_code/犯错档案/`（11 个日期文件 + 索引）与仿真侧 `simulation/犯错误案.md`（07-26/07-27/08-10/08-11）全部并入 `docs/ai-records/mistakes/`，格式统一为四段式（现象/原因/修复/预防），共 12 个日期文件、168 条记录；索引重建为"14 主题 + 按日期"结构。
+- **ai-records 融合**：ucar 的 `CHANGE_LOG.md`（7 条）、`FAILED_APPROACHES.md`（1 条）并入根同名文件；根原有 pgrep 条目保留。
+- **lingo 融合**：`ucar_source_code/docs/lingo.md` → 根 `docs/lingo.md`，权威来源路径改为 `ucar_source_code/docs/...`；删除冗余技能 `ucar_source_code/.opencode/skills/ucar-lingo/`（词条已并入，与根 `project-lingo` 重复）。
+- **规则更新**：`ucar_source_code/AGENTS.md` 删除犯错档案引用（由技能接管，避免冲突），WSLg 预检引用改指向 `docs/ai-records/mistakes/2026-08-10.md`；`simulation/AGENTS.md` 第 6 条改为指向技能维护的 `docs/ai-records/`。
+- **技能修正**：`project-memory-records/SKILL.md` 引用从 `MISTAKE_LOG.md` 更正为实际结构 `MISTAKE_INDEX.md + mistakes/YYYY-MM-DD.md`。
+- **提交**：`0c0563d` 已推送 main；`ucar_source_code/docs/changes/` 历史文档保留原文（含旧引用，作为历史记录不改写）。
