@@ -1,0 +1,480 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+from std_msgs.msg import String as ROSString
+import numpy as np
+import rospy
+import actionlib
+from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
+from geometry_msgs.msg import Twist
+from std_msgs.msg import String
+from std_msgs.msg import Int8,Int32
+from std_msgs.msg import Bool 
+from sensor_msgs.msg import Image
+import cv2
+import os
+import time
+from sensor_msgs.msg import Imu
+import math
+goods_class_str=['012','345','678']  
+sim_goods=[-1,-1,-1]        
+waypoints_dict = {   
+    "point1": (1.650, 0.430, 0.707, 0.707),  # 
+    "point2": (0.830, 0.630, 1.000, 0.000),  # 二维码识别点 
+    "point3": (0.200, 0.580, 1.000, 0.000),  # 
+    "point4": (1.750, 1.250, 0.000, 1.000),
+    "point5": (1.650, 1.670, 1.000, 0.000),
+    "point6": (0.500, 1.700, 1.000, 0.000),
+    "point7": (0.620, 3.050, 0.707, 0.707),  #识别货物点
+    "point8": (0.850, 3.700, 0.707, 0.707),
+    "point9": (2.4600, 4.300, 0.707, 0.707),
+    "point10":(2.900,4.100, 1.000, 0.000),
+    "point11":(2.4800, 3.600,-0.6088,0.7934),#路口1
+    "point12":(3.600,4.120,0.000,1.000),
+    "point13":(4.300,4.200,0.707,0.707),#路灯检测点2
+    "point14":(4.150,3.950,0.000,1.000),
+    "point15":(4.480,3.740,-0.7934,0.6088),
+}
+# point_line_1=(2.600,3.2800,-0.707,0.707)
+# point_traffic_2=(4.500,4.2500,0.707,0.707)
+# point_line_2=(4.550,3.250,-0.707,0.707)
+global points_list
+points_list=["none","point1","point2","point3","point4","point5","point6","point7","point8","point9","point10","point11","point12","point13","point14","point15"]
+goods=['苹果','香蕉','西瓜','辣椒','番茄','土豆','牛奶','蛋糕','可乐']
+goods_price=[4,2,5,2,5,2,5,10,3]
+goods_detect_result=[-1,-1,-1]
+goods_get=[-1,-1] #存放已取得的货物序号
+goods_index=-1
+task_start_flag=0     
+global index
+global points_num
+food_pos={}
+        
+def switch(case):
+    cases = waypoints_dict
+    return cases.get(case, 'default pose')
+
+
+def goal_pose(pose):
+    goal_pose = MoveBaseGoal()
+
+    goal_pose.target_pose.header.frame_id = 'map'
+    goal_pose.target_pose.pose.position.x = pose[0]
+    goal_pose.target_pose.pose.position.y = pose[1]
+    goal_pose.target_pose.pose.orientation.z = pose[2]
+    goal_pose.target_pose.pose.orientation.w = pose[3]
+
+    return goal_pose
+class task_control:
+    def __init__(self):
+        self.cmd_vel_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
+        self.tb = rospy.Subscriber("/teb_cmd_vel", Twist, self.vel_cb)
+        self.task_start_sub = rospy.Subscriber("/awake_flag", Int8 , self.callback_task_start)#开启语音唤醒
+        self.tts_pub = rospy.Publisher("/voice/xf_tts_topic", String, queue_size=100)#开启语音合成
+        self.yolo_start_pub = rospy.Publisher("/yolo_start_flag", Int8, queue_size=1)
+        self.yolo_start_pub_early = rospy.Publisher("/yolo_start_flag_early", Int8, queue_size=1)        
+        self.yolo_result_pub=rospy.Subscriber("/yolo_result",Int32,self.yolo_result_callbak)
+        self.yolo_all_callbak=rospy.Subscriber("/yolo_all",Int32,self.yolo_all_callbak)
+        self.qrcode_start_pub=rospy.Publisher("/qrcode_start_flag",Int8,queue_size=1)#二维码扫描开始发布标志位
+        self.qrcode_result_piub=rospy.Subscriber("/qr_result",String,self.qrcode_result_callback)#二维码扫描结果订阅
+        self.line_start_flag=rospy.Publisher("/line_start_flag",Int8,queue_size=1)#寻线开始标志
+        self.line_end_flag_pub=rospy.Subscriber("/line_end_flag",Int8,self.line_end_callback)
+        self.filter_setter = rospy.Publisher('/food_filter', ROSString, queue_size=10)#发布食物种类过滤器
+        
+        self.out_ex = rospy.Subscriber("/yolo_result_ex", ROSString,self.yolo_result_callbak_ex)
+        self.pub_neo = rospy.Subscriber("/yolo_found_and_acquired", Int32,self.yolo_found_and_acquired_cb)
+        self.traffic_start_pub=rospy.Publisher("/yolo_start_flag2",Int8,queue_size=1) #红绿灯识别yolo节点启动标志  
+        self.traffic_result=rospy.Subscriber("/yolo_result2",Int32,self.traffic_yolo_callback) 
+        self.sim_start_pub=rospy.Publisher("/sim_start",Int8,queue_size=1)  
+        self.sim_result_pub=rospy.Subscriber("/sim_done",Int32,self.sim_result_callback) 
+        self.go_around_island_pub=rospy.Publisher("/go_around_island",Int8, queue_size=1)
+        # self.rate1 = 150
+        # self.rate = rospy.Rate(self.rate1)
+        self.sub_yolo_try = rospy.Subscriber("/pub_yolo_try", Int32,self.yolo_try_cb)
+        self.traffic_result_pub=rospy.Publisher("/traffic_result",Int8,queue_size=1)
+        self.freeze=rospy.Publisher("/yolo_freeze",Int8, queue_size=1)
+        
+        self.task_start_flag = 0   #语音唤醒标志位
+        self.angular_turn_msg = 0.5
+        self.yolo_result=-1#yolo识别返回值，对应货物序号
+        self.yolo_result_pre=-1 #暂存yolo返回值
+        self.yolo_result_history_len=3
+        self.yolo_result_history=[-1] * self.yolo_result_history_len
+        self.qrcode_result=""
+        self.goods_class_index=0 #记录二维码扫描的货物种类 1：水果 2：蔬菜 3:甜品
+        self.detect_cnt=0 # 识别货物计数，计数到3时退出循环
+        self.rotate_cnt=0
+        self.rotate_angle=18
+        self.yolo_all=-1
+        self.yolo_found_and_acquired_value=-1
+        self.traffic_answer=-1
+        self.speed=1.0
+        self.sim_result=-1#仿真结果返回值
+        self.line_end_flag=-1
+        self.yolo_try_rotate=0
+    def yolo_try_cb(self,msg):
+        self.yolo_try_rotate=msg.data
+    
+    
+    def vel_cb(self,msg):
+        msg.linear.x*=self.speed
+        msg.linear.y*=self.speed
+        msg.linear.z*=self.speed
+        msg.angular.x*=self.speed
+        msg.angular.y*=self.speed
+        msg.angular.z*=self.speed
+        self.cmd_vel_pub.publish(msg)     
+    def yolo_found_and_acquired_cb(self,msg):
+        self.yolo_found_and_acquired_value=msg.data
+    def callback_task_start(self,msg):
+        self.task_start_flag = msg.data
+    
+    def get_task_start_flag(self):
+          return self.task_start_flag #调试导航暂时注释，关闭语音启动方式
+        # return True
+    def report_result(self,msg):
+        self.tts_pub.publish(msg)
+    def yolo_result_callbak(self,msg):
+        #self.yolo_result=msg.data    
+        return
+    def yolo_result_callbak_ex(self,msg):
+        global food_pos
+        a,b=msg.data.split(">")
+        
+        self.yolo_result=int(a)
+        if int(a)<0:
+            food_pos={}
+            return
+        for item in b.split('|'):
+            # 分割字符串获取各部分
+            parts = item.split(':')
+            
+            # 确保有足够的部分（至少4部分：name:id:conf:coords）
+            if len(parts) >= 4:
+                obj_id = int(parts[1])  # 提取ID
+                
+                # 处理坐标部分（最后一个部分）
+                coords_str = parts[-1].strip('()')
+                coords = [float(x) for x in coords_str.split(',')]
+                
+                food_pos[obj_id] = coords
+        
+        
+        
+            
+    def yolo_all_callbak(self,msg):
+        self.yolo_all=msg.data
+    def traffic_yolo_callback(self,msg):
+        self.traffic_answer=msg.data
+    def sim_result_callback(self,msg):
+        if not(self.sim_result==msg.data):
+            for ii in range(20):
+                print("收到仿真结果！！")
+                print(msg.data)
+        #print("sim over")
+        #print(msg.data)
+        self.sim_result=msg.data
+    def sim_result_select(self):
+       sim_goods[0]=self.sim_result%10
+       sim_goods[1]=(self.sim_result//10)%10
+       sim_goods[2]=self.sim_result//100
+       rooms=["C","B","A"]
+       for i in range(0,3):
+           x=sim_goods[i]
+           if(str(x) in goods_class_str[self.goods_class_index]):
+               goods_get[1]=x
+               print(x)
+               report2='目标货物位于{}房间'.format(rooms[i])
+               self.report_result(report2)
+               rospy.sleep(1.5)
+    # def rotate(self, angle):
+    #     cmd_vel_msg = Twist()
+    #     cmd_vel_msg.linear.x = 0   
+    #     if angle >= 0:
+    #         if angle <= 180:
+    #             cmd_vel_msg.angular.z = -self.angular_turn_msg
+    #         else:
+    #             angle = 360 - angle
+    #             cmd_vel_msg.angular.z = self.angular_turn_msg
+    #     else:
+    #         angle = -angle  # 将负值角度转换为正值
+    #         if angle <= 180:
+    #             cmd_vel_msg.angular.z = self.angular_turn_msg
+    #         else:
+    #             angle = 360 - angle
+    #             cmd_vel_msg.angular.z = -self.angular_turn_msg
+
+    #     angular_duration = angle / self.angular_turn_msg / 180.0 * 3.1415926
+    #     ticks = int(angular_duration * self.rate1)
+    #     rospy.loginfo(ticks)
+    
+    #     for i in range(ticks):
+    #         self.cmd_vel_pub.publish(cmd_vel_msg)
+    #         self.rate.sleep()
+
+    #     cmd_vel_msg.angular.z = 0
+    #     self.cmd_vel_pub.publish(Twist())
+    def qrcode_result_callback(self,msg):
+        self.qrcode_result=msg.data
+    def QRcode_detect(self):
+        self.qrcode_start_pub.publish(1)
+        while True:
+            if( self.qrcode_result=="Fruit"):
+                self.qrcode_start_pub.publish(0)
+                self.goods_class_index=0
+                self.report_result("本次采购任务为水果")
+                rospy.sleep(1)
+                break
+            elif( self.qrcode_result=="Vegetable"):
+                self.qrcode_start_pub.publish(0)
+                self.goods_class_index=1
+                self.report_result("本次采购任务为蔬菜")
+                rospy.sleep(1)
+                break
+            elif( self.qrcode_result=="Dessert"):
+                self.qrcode_start_pub.publish(0)
+                self.goods_class_index=2
+                self.report_result("本次采购任务为甜品")
+                rospy.sleep(1)
+                break
+        ros_string = String()
+        ros_string.data=goods_class_str[self.goods_class_index]
+        self.filter_setter.publish(ros_string)
+    # def goods_detect(self): 
+    #      self.yolo_start_pub.publish(1)
+    #      while(self.detect_cnt<3):
+    #         self.rotate(self.rotate_angle)
+    #         self.rotate_cnt=self.rotate_cnt+1
+    #         rospy.sleep(0.5)
+    #         if(self.rotate_cnt==10):
+    #             self.rotate(-100)
+    #             self.rotate_cnt=0
+    #         yolo_result_copy=self.yolo_result#复制一份 以免运行到一半 yolo_result收到topic被更改
+    #         if(yolo_result_copy<0):
+    #             if rospy.is_shutdown():
+    #                 exit()
+    #             rospy.sleep(0.5)
+    #             rospy.loginfo('detect nothing')
+    #             self.yolo_start_pub.publish(1)
+    #             continue
+    #         #if(yolo_result_copy!=self.yolo_result_pre):
+    #         #    self.yolo_result_pre=yolo_result_copy
+    #         #    print(self.yolo_result_pre)
+    #         #    continue
+    #         self.yolo_result_history=[yolo_result_copy] + self.yolo_result_history[:-1]#新数据存入第一位 其余部分往后移动一位 最后一位抛弃
+    #         rospy.loginfo(str(yolo_result_copy))
+    #         #yolo_result_history_len 设为2时与原逻辑一致
+    #         if (not all(x == self.yolo_result_history[0] for x in self.yolo_result_history)) and self.yolo_result_history[0]>=0:
+    #             continue #列表所有内容一致 继续 否则continue
+    #         if(yolo_result_copy not in goods_detect_result):
+    #             print(goods[yolo_result_copy])
+    #             goods_detect_result[self.detect_cnt]=yolo_result_copy#将yolo识别到3个存入
+    #             self.detect_cnt=self.detect_cnt+1
+    #      print(goods_detect_result)
+    #      self.yolo_start_pub.publish(0)
+
+    def goods_detect0(self): #新的检测
+         self.yolo_start_pub.publish(1)#启动food节点检测食物种类
+         try_different_pos=0
+         
+         while self.yolo_found_and_acquired_value<0 and (not rospy.is_shutdown()):
+             rospy.sleep(0.5)
+             if self.yolo_try_rotate>370:
+                 print("还没检测到！！！换个位置试试？")
+                 self.freeze.publish(1)
+                 try_different_pos=1
+                 break
+         if try_different_pos==1:
+             try_different_pos=0
+             print("临时换个点试试")
+             client.send_goal(goal_pose((1, 3.050, 0.707, 0.707)))
+             client.wait_for_result()
+             print("到了")
+             self.freeze.publish(0)
+             while self.yolo_found_and_acquired_value<0 and (not rospy.is_shutdown()):
+                 rospy.sleep(0.5)
+ 
+         
+         
+         
+
+         print("已经检测到啦！结果id为："+str(self.yolo_found_and_acquired_value))
+         report1='我已取到{}'.format(goods[self.yolo_found_and_acquired_value])
+         goods_get[0]=self.yolo_found_and_acquired_value
+         self.report_result(report1)
+         self.yolo_start_pub.publish(0)
+         rospy.sleep(1)
+    def line_fllow(self):
+        self.line_start_flag.publish(1)
+    def line_end_callback(self,msg):
+        self.line_end_flag=msg.data
+    def traffic_detect(self):
+        self.traffic_start_pub.publish(1)
+        global index
+        global points_num
+        while(True):
+            if(self.traffic_answer==0):
+                self.traffic_result_pub.publish(1)#左边
+                self.traffic_start_pub.publish(0)
+                index=12
+                rospy.sleep(1)
+                break 
+            elif(self.traffic_answer==1):
+                self.traffic_result_pub.publish(-1)#右边
+                self.report_result("路口一可通过")
+                self.traffic_start_pub.publish(0)
+                rospy.sleep(1.5)
+                break
+done=0
+def done_cb(state, result):#actionlib 回调
+
+    global done
+    print(result)
+    if state == actionlib.GoalStatus.SUCCEEDED:
+        done=1
+        rospy.loginfo("成功!")
+    elif state == actionlib.GoalStatus.ABORTED:
+        rospy.logerr("服务器异常中止!")
+    elif state == actionlib.GoalStatus.PREEMPTED:
+        rospy.logwarn("被新目标抢占")
+    else:
+        rospy.logdebug(f"其他状态: {actionlib.GoalStatus.to_string(state)}")                
+def number_toChinese(price):
+    price_table=["零","一","二","三","四","五","六","七","八","九","十","十一","十二","十三","十四","十五","十六","十七","十八","十九","二十"]
+    return price_table[price]
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+if __name__ == '__main__':
+    rospy.init_node("navigatiobn_test")
+    rospy.loginfo("Starting navigation_test node")
+    client=actionlib.SimpleActionClient('move_base',MoveBaseAction)#建立server导航actionlib客户端server
+    client.wait_for_server()
+
+    task=task_control()  #任务类task
+    rospy.loginfo('Task Start')
+    task.yolo_start_pub_early.publish(2)#2表示 加载模型 但是处理图像，这里的early表示它会绕过food.py
+    #task.goods_detect0()
+    #exit()
+    enableSim=0    
+    do_go_around=0
+    skip_voice=1
+    task.go_around_island_pub.publish(do_go_around) #0为初赛版本，无环岛，1为决赛版本，加入环岛
+    if do_go_around==0:
+        print("为初赛版本，无环岛")
+    if do_go_around==1:
+        print("环岛")
+    index=0
+    points_num=15 #导航点数
+    price=0
+    rospy.sleep(10)
+    #task.report_result("我有20元")
+    while True: 
+        if not task.get_task_start_flag():
+            rospy.sleep(0.1)
+            if skip_voice==0:
+                continue
+        if rospy.is_shutdown():
+            exit()
+
+        while index < points_num:
+            index=index+1
+            pose = switch(points_list[index])
+            goal=goal_pose(pose)
+            done=0
+            starttime=time.time()
+            client.send_goal(goal,done_cb=done_cb)
+            rospy.sleep(0.1)#丢点可能是因为这里！ 休眠20ms ，否则貌似wait_for_result会直接使用上一次的结果（已经到位）导致跳过某个点
+            print("waiting for point no."+str(index))
+            while done==0:
+                rospy.sleep(0.1)
+            
+            client.wait_for_result()  # <180 RIGHT
+            
+            print("耗时"+str(time.time()-starttime))
+            print("got there!"+str(index))
+            if(time.time()-starttime<0.65):
+                print("lost")
+                index=index-1
+                continue
+            if index==1:
+                pass
+                #task.qrcode_start_pub.publish(1)#提前启动二维码    
+            if index==2:
+                # 
+                rospy.sleep(2)#执行扫描二维码操作
+                rospy.loginfo('detect qr code')
+                task.QRcode_detect()
+                # task.report_result("本次采购任务为甜品")
+                # rospy.sleep(1)
+            elif index==7:
+                rospy.loginfo("detect goods")
+                task.goods_detect0()#新的
+                #task.goods_get()#换了新的方法 这个不用了
+                
+            elif index==8:
+                os.system("rosnode kill food_finder")
+                rospy.sleep(1.5)#执行仿真任务
+                if enableSim==0:
+                    task.sim_result=147
+                
+                while task.sim_result<0 and enableSim==1:
+                    task.sim_start_pub.publish(1)
+                task.sim_start_pub.publish(0)
+                task.sim_result_select()
+                task.report_result("仿真任务已完成")
+                task.traffic_start_pub.publish(2)#提前启动交通灯yolo，这里的2表示加载模型但是不处理图像
+                os.system("rosnode kill sim_server")
+                task.speed=0.8#降速
+            elif index==9:
+                rospy.sleep(1)
+                task.traffic_detect()
+                # index=11
+            elif index==11 or index==15:
+                #os.system("rosnode kill /move_base") 没有意义 因为move_base会自动重启（除非把respawn设为false）
+                rospy.sleep(1.5)
+                task.line_fllow()
+                while(task.line_end_flag==-1):
+                    rospy.sleep(0.1)
+                    continue
+                print(goods_get)
+                price=goods_price[goods_get[0]]+goods_price[goods_get[1]]
+                print('花费'+str(price))
+                task.report_result("我已完成货物采购任务")
+                rospy.sleep(2)
+                result3='本次采购货物为'+goods[goods_get[0]]+'和'+goods[goods_get[1]]
+                task.report_result(result3)
+                rospy.sleep(2)
+                task.report_result('总计花费'+number_toChinese(price)+'元')
+                rospy.sleep(2)
+                task.report_result('需找零'+number_toChinese(20-price)+'元')
+                rospy.sleep(2)
+                exit()
+                break
+            elif index==13:
+                rospy.sleep(1)
+                task.report_result("路口二可通过")
+          
+
+            rospy.loginfo(index)
+
+
+
+
+               
+    rospy.spin()

@@ -1,0 +1,122 @@
+# YOLOv5 visual pickup configuration.
+#
+# The recorded boxes below are from the arm-stationary bottom_center samples
+# captured at the previously verified graspable base poses.  Coordinates are
+# normalised by the 640x480 camera image.  Runtime never reads a cube's Gazebo
+# pose: it visits the left observation point, then searches upper and right by
+# two clockwise 90-degree turns at that same XY.  It recognises the requested
+# class and drives the detected box into the corresponding acceptance range.
+
+# Timing and navigation bounds.  Performance limits remain observable while
+# reliability retries stay active by default.
+task_wall_budget: 145.0
+# Recognition and grasp recovery are reliability loops, so the match-time
+# budget warns by default instead of terminating them.  Set true only for a
+# strict timed validation run.
+task_wall_budget_strict: false
+rtf_preflight_duration: 5.0
+rtf_minimum: 0.30
+# A five-second wall/sim clock ratio fluctuates by a few 1e-3 under WSLg.
+# Initialise the task with 0.30 as the current end-to-end performance target
+# and absorb sampling jitter.  Camera subscription and live YOLO annotation
+# remain active for the complete task.
+rtf_measurement_tolerance: 0.005
+# RTF is a performance diagnostic, not a functional prerequisite.  WSLg with
+# Gazebo GUI, RViz and YOLO can run correctly below 0.30, so warn by default
+# instead of killing the task node.  Set true only for strict timed validation.
+rtf_preflight_strict: false
+nav_timeout: 30.0
+nav_attempts: 2
+# The longest pickup-to-factory route cannot always finish inside the
+# observation-pose timeout.  Keep one continuous goal so a moving vehicle is
+# never cancelled and restarted at the 30-second boundary.
+destination_nav_timeout: 75.0
+destination_nav_attempts: 1
+observation_position_tolerance: 0.12
+# The three camera stations are close in XY but differ by roughly 90 degrees.
+# Do not accept an observation station until the camera faces that station.
+observation_yaw_tolerance: 0.12
+# Complete delivery only at the requested factory position and yaw.  These
+# match CymPlanner's final-pose tolerances, so entering the blue rectangle no
+# longer cancels the final approach or final turn.
+destination_position_tolerance: 0.05
+destination_yaw_tolerance: 0.10
+
+vision_class_names: [food, daily, electronics]
+vision_confidence_threshold: 0.20
+vision_nms_threshold: 0.45
+vision_input_size: 640
+vision_debug_rate: 5.0
+vision_scan_timeout: 15.0
+# At the observation pose, five consecutive frames from the retrained YOLO
+# model must keep the same high-confidence class.  The printed-face template is
+# deliberately reserved for the close-range verification below because it is
+# unreliable when the label occupies only a few distant pixels.
+vision_quick_classify_frames: 5
+vision_quick_classify_timeout: 1.5
+vision_quick_min_confidence: 0.90
+vision_classify_stable_frames: 7
+vision_classify_timeout: 5.0
+vision_template_min_score: 0.30
+vision_template_min_margin: 0.08
+vision_align_timeout: 25.0
+vision_lost_timeout: 2.5
+vision_align_stable_frames: 5
+# A failed full scan restarts at the left observation region.  A failed
+# physical pick restores the arm and then starts another full scan.
+recognition_retry_delay: 0.50
+grasp_retry_delay: 0.50
+arm_recovery_duration: 2.50
+vision_forward_gain: 0.45
+vision_lateral_gain: 0.45
+# The wheel/contact model has a measured static-friction deadzone.  Commands
+# below roughly 0.15 m/s reach /cmd_vel but do not move the base.  Keep forward
+# and lateral visual-servo motion above that floor with conservative caps.
+vision_min_forward_speed: 0.15
+vision_max_forward_speed: 0.25
+vision_min_lateral_speed: 0.15
+vision_max_lateral_speed: 0.25
+
+vision_search_regions:
+  - name: left
+    display_name: 左侧
+    observation_goal: [-1.510723, -0.445771, 3.141157]
+    fallback_observation_goal: [-1.510723, -0.445771, 3.141157]
+    recorded_image_size: [640, 480]
+    recorded_bbox_px: [291.60, 317.50, 355.40, 390.00]
+    # Move the desired centre 0.02 image heights downward from the recorded
+    # graspable frame so the vehicle finishes slightly closer to the cube.
+    grasp_target: [0.5043, 0.7573, 0.0842, 0.1462]
+    grasp_acceptance:
+      center_x: [0.470, 0.535]
+      center_y: [0.745, 0.790]
+      width: [0.065, 0.115]
+      height: [0.120, 0.175]
+
+  # If left is not the requested cube, rotate clockwise 90 degrees in place.
+  - name: upper
+    display_name: 上方
+    observation_goal: [-1.510723, -0.445771, 1.570361]
+    fallback_observation_goal: [-1.395771, -0.419277, 1.570361]
+    recorded_image_size: [640, 480]
+    recorded_bbox_px: [291.60, 317.55, 355.40, 388.60]
+    grasp_target: [0.5039, 0.7572, 0.0852, 0.1461]
+    grasp_acceptance:
+      center_x: [0.470, 0.535]
+      center_y: [0.745, 0.790]
+      width: [0.065, 0.115]
+      height: [0.120, 0.175]
+
+  # If upper is not the requested cube, rotate clockwise another 90 degrees.
+  - name: right
+    display_name: 右侧
+    observation_goal: [-1.510723, -0.445771, -0.000436]
+    fallback_observation_goal: [-1.359277, -0.524229, -0.000436]
+    recorded_image_size: [640, 480]
+    recorded_bbox_px: [291.60, 317.55, 355.40, 388.60]
+    grasp_target: [0.5040, 0.7572, 0.0852, 0.1464]
+    grasp_acceptance:
+      center_x: [0.470, 0.535]
+      center_y: [0.745, 0.790]
+      width: [0.065, 0.115]
+      height: [0.120, 0.175]

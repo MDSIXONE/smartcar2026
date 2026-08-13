@@ -1,0 +1,306 @@
+<launch>
+    <!-- 真机运行：use_sim_time 必须为 false。此处不再声明，
+         交由 ucar_bringup.launch 设为 false（避免 ROS 时间卡在 0 导致 TF/定位停摆）。 -->
+
+    <!--起始点（2026 warehouse 区，车头朝 +X）-->
+    <arg name="initial_pose_x" default="-0.25"/>
+    <arg name="initial_pose_y" default="2.75"/>
+    <arg name="initial_pose_a" default="0"/>
+    <!-- Disable this only when the full-task navigation_2026 node takes over
+         /scan_raw forwarding and production-phase obstacle freezing. -->
+    <arg name="scan_relay_enabled" default="true"/>
+    <!-- Explicit opt-in.  The normal launch remains navigation-only and never
+         moves the vehicle without task_enabled:=true. -->
+    <arg name="task_enabled" default="false"/>
+    <arg name="task_start_delay" default="2.0"/>
+    <!-- No RViz/camera workload by default. Set false only when a manual
+         session explicitly needs an immediately-live camera stream. -->
+    <arg name="camera_start_suspended" default="true"/>
+    <!-- RViz-only chassis model; it is a visual on the existing base_link and
+         does not create TF, collision geometry, or a control dependency. -->
+    <param name="robot_description" textfile="$(find ucar_2026)/urdf/ucar_2026_visual.urdf"/>
+
+    <!-- The driver keeps its fixed /scan_raw output.  navigation_scan_relay
+         restores /scan for localization and publishes a separately filtered
+         global-obstacle stream. -->
+    <group>
+        <remap from="scan" to="scan_raw"/>
+        <include file="$(find ucar_controller)/launch/ucar_bringup.launch"/>
+    </group>
+
+    <!-- Keep the camera node available without consuming capture bandwidth.
+         The automatic task starts/stops it around QR/OCR; a manual RViz
+         session may opt in with camera_start_suspended:=false. -->
+    <node name="usb_cam" pkg="usb_cam" type="usb_cam_node" output="screen"
+          respawn="$(eval arg('task_enabled') != 'true')" respawn_delay="2.0">
+        <param name="video_device" value="/dev/ucar_video"/>
+        <param name="image_width" value="640"/>
+        <param name="image_height" value="480"/>
+        <param name="pixel_format" value="yuyv"/>
+        <param name="camera_frame_id" value="usb_cam"/>
+        <param name="io_method" value="mmap"/>
+        <param name="framerate" value="30"/>
+        <param name="create_suspended" value="$(arg camera_start_suspended)"/>
+        <param name="camera_info_url" type="string"
+               value="file://$(find ucar_cam)/camera_calibration.yaml"/>
+    </node>
+
+    <!-- A transient Python/ROS registration failure must not leave lidar_loc
+         without /scan forever: retry the bridge before move_base is used. -->
+    <node if="$(arg scan_relay_enabled)"
+          pkg="ucar_2026" type="navigation_scan_relay.py"
+          name="navigation_scan_relay" output="screen" respawn="true"
+          respawn_delay="2.0"
+          launch-prefix="$(find ucar_2026)/scripts/run_melodic_python2.sh">
+        <param name="global_obstacle_filter_enabled" value="true"/>
+        <param name="global_static_filter_radius" value="0.22"/>
+        <param name="global_static_filter_threshold" value="65"/>
+        <!-- 2.4 covers the chassis odom/imu characteristic ~1.0-1.04 s
+             publish gap (MCU/serial behaviour seen on every run; same
+             reason EKF sensor_timeout is 3.0 and task odom/tf_timeout are
+             3.0).  Relaxed x2 on 2026-08-11 after 0.30 still dropped the
+             global scan (TF age 0.381 s) and aborted the target guard. -->
+        <param name="global_transform_max_age" value="2.4"/>
+    </node>
+
+    <!-- Use the field-wall map without middle vertices for real navigation. -->
+    <arg name="map_file" default="$(find ucar_nav)/maps/iflysse_field_walls_without_middle_vertices.yaml" />
+    <node name="map_server" pkg="map_server" type="map_server" args="$(arg map_file)" output="screen">
+        <param name="frame_id" value="map" />
+    </node>
+
+    <!-- The scan matcher is the sole publisher of map -> odom.  It derives
+         the correction from lidar and odom at the same scan timestamp. -->
+    <node pkg="jie_ware" type="lidar_loc" name="lidar_loc" output="screen" respawn="false">
+        <param name="base_frame" value="base_link"/>
+        <param name="odom_frame" value="odom"/>
+        <param name="laser_frame" value="laser_frame"/>
+        <param name="laser_topic" value="scan"/>
+        <param name="initial_pose_x" value="$(arg initial_pose_x)"/>
+        <param name="initial_pose_y" value="$(arg initial_pose_y)"/>
+        <param name="initial_pose_a" value="$(arg initial_pose_a)"/>
+        <param name="tf_publish_tolerance" value="0.15"/>
+    </node>
+
+    <!-- Reject isolated single-beam returns for the local obstacle layer.
+         lidar_loc remains on raw /scan so scan-to-map localization keeps the
+         separately verified Y-sign convention and all wall observations. -->
+    <node pkg="jie_ware" type="lidar_filter_node" name="lidar_filter_node" output="screen" respawn="false">
+        <param name="source_topic" value="/scan"/>
+        <param name="pub_topic" value="/scan_filtered"/>
+        <param name="outlier_threshold" value="0.10"/>
+    </node>
+
+    <!-- Same move_base/CymPlanner flow as the simulation.  The plugin writes
+         /cmd_vel directly to the chassis driver; RViz is the only goal source. -->
+    <include file="$(find ucar_nav)/launch/cym_move_base_omni_2026.launch"/>
+
+    <node name="robot_pose_publisher" pkg="robot_pose_publisher" type="robot_pose_publisher"/>
+
+    <group if="$(arg task_enabled)">
+        <!-- ucar_2026 already owns the camera.  Keep decoding disabled until
+             the mission explicitly enters its QR stage.  Real-field QR codes
+             carry a full URL whose host/path changes per competition; when
+             api_enabled, qrcode_scanner GETs the decoded URL directly and
+             publishes the JSON reply ({"code":200,"result":"<item>"}) on
+             /qr_api_result, which production_task_2026 matches by item name. -->
+        <include file="$(find yolo2025)/launch/qrcode.launch">
+            <arg name="start_camera" value="false"/>
+            <arg name="scan_enabled" value="false"/>
+            <arg name="api_enabled" value="true"/>
+        </include>
+
+        <node pkg="ucar_2026" type="production_task_2026.py"
+              name="production_task_2026" output="screen" required="true"
+              launch-prefix="$(find ucar_2026)/scripts/run_melodic_python2.sh">
+            <param name="grid_path"
+                   value="$(find ucar_2026)/config/production_full_grid_all_numbered.json"/>
+            <param name="start_delay" value="$(arg task_start_delay)"/>
+            <!-- Relaxed x2 (2026-08-11) so the chassis odom/imu characteristic
+                 ~1 s gap never trips a readiness/safety timeout. -->
+            <param name="move_base_ready_timeout" value="180"/>
+            <param name="safe_start_timeout" value="90"/>
+            <param name="plan_timeout" value="30"/>
+            <param name="goal_timeout" value="180"/>
+            <!-- 2026-08-11：0.10→0.15。CymPlanner 已降速（max_vel_x 0.35）
+                 减少撞障碍概率；放宽到点容差 5cm 省回终点对准/回旋时间。
+                 仍远小于点间距 0.5m，不影响生产停入精度。 -->
+            <param name="arrival_tolerance" value="0.15"/>
+            <param name="ocr_helper_ready_timeout" value="90"/>
+            <param name="ocr_capture_timeout" value="24"/>
+            <param name="staging_point_number" value="52"/>
+            <rosparam param="qr_observation_numbers">[262, 232, 295]</rosparam>
+            <!-- Each target is reached before one OCR search revolution.  A
+                 candidate is centred/ranged; once both requested categories
+                 are absent from this inner route, the perimeter fallback
+                 route below is scanned.  If either category remains absent
+                 after both routes, the task proceeds directly to point 441
+                 for the next lane-follow task. -->
+            <rosparam param="production_route_numbers">[12, 22, 13, 23, 14, 24, 15, 25, 16, 26, 17, 27, 18, 28, 19, 29]</rosparam>
+            <rosparam param="production_observation_headings_deg">[-45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45]</rosparam>
+            <!-- Perimeter fallback: 1-10, 20, 30, 40, 39-31, 21, 11.
+                 Each heading starts its 360-degree OCR scan facing inward. -->
+            <rosparam param="fallback_production_route_numbers">[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 21, 11]</rosparam>
+            <rosparam param="fallback_production_observation_headings_deg">[-90, -90, -90, -90, -90, -90, -90, -90, -90, -90, 180, 180, 180, 90, 90, 90, 90, 90, 90, 90, 90, 90, 0, 0]</rosparam>
+            <param name="destination_point_number" value="441"/>
+            <!-- Destination: point 441 (0.0, 0.0), facing the heading point
+                 170 (0.0, -0.5) so the lane-follow handoff sees the yellow
+                 line.  Midpoint mode is disabled. -->
+            <param name="destination_midpoint_point_numbers" value=""/>
+            <param name="destination_heading_point_number" value="170"/>
+            <!-- Dwell at the processing-area stop point has been replaced by
+                 the synchronous stop announcement (speak_wait); the parameter
+                 is kept with its default 3.0 for launch compatibility and is
+                 no longer used by the task code. -->
+            <param name="processing_dwell_seconds" value="3.0"/>
+            <!-- Local simulation (host PC) coordination: only after the
+                 real item has been parked and its completion announcement
+                 has finished does the task park/start the simulation item.
+                 simulation_host empty derives the host from ROS_MASTER_URI. -->
+            <param name="simulation_port" value="11313"/>
+            <param name="simulation_host" value=""/>
+            <param name="simulation_start_timeout" value="60"/>
+            <param name="simulation_start_retries" value="3"/>
+            <param name="simulation_done_timeout" value="150"/>
+            <param name="simulation_poll_period" value="2.0"/>
+            <!-- Synchronous announcement budget; a timeout terminates the
+                 TTS helper and continues the mission. -->
+            <param name="speak_wait_timeout" value="120"/>
+            <!-- After SUCCEEDED, hand off to the lane-follow launch
+                 (lane_proto owns the chassis serial and camera, so
+                 2026.launch must fully exit first; the handoff script waits
+                 for that, then starts lane_proto.launch).  Set false to keep
+                 the old post-success spin behaviour. -->
+            <param name="lane_handoff_enabled" value="true"/>
+            <param name="lane_handoff_script"
+                   value="$(find ucar_2026)/scripts/handoff_lane.sh"/>
+            <param name="lane_handoff_delay" value="0.3"/>
+            <!-- Retry window (s) for a scan stamp briefly outrunning the TF
+                 clock (~9 ms jitter seen on the real vehicle); the lookup
+                 stays fatal after the window. -->
+            <param name="tf_lookup_retry_seconds" value="1.0"/>
+            <!-- Voice announcements via the vehicle-local tts_say.py helper
+                 (asynchronous, failures never abort the mission). -->
+            <param name="tts_enabled" value="true"/>
+            <param name="tts_python" value="/usr/bin/python3"/>
+            <param name="tts_helper_path" value="/home/ucar/wake/tts_say.py"/>
+            <!-- At mission start use the mic-array listener in loop/ASR/JSON
+                 mode.  Its fixed command says the real and simulation
+                 production categories; production_task_2026 then resolves
+                 them to actual QR item names before moving.  Set stdin only
+                 for terminal-based development without the microphone. -->
+            <param name="item_input_mode" value="voice"/>
+            <param name="voice_listener_python" value="/usr/bin/python3"/>
+            <param name="voice_listener_path"
+                   value="/home/ucar/wake/micarray/wake_listen.py"/>
+            <param name="voice_wake_word" value="小飞小飞"/>
+            <!-- 0 waits until a valid command; no chassis motion occurs
+                 during this state.  Set a positive value for a bounded test. -->
+            <param name="voice_input_timeout" value="0"/>
+            <!-- Drive to this waypoint after the QR phase (no OCR rotation),
+                 then start the production route.  0 disables it. -->
+            <param name="post_qr_waypoint_number" value="3"/>
+            <!-- Heading the waypoint must face after arrival; 0 keeps the
+                 current yaw (no rotation). -->
+            <param name="post_qr_waypoint_heading_point_number" value="13"/>
+            <!-- Timeout only: a fresh QR event advances immediately. -->
+            <param name="qr_search_timeout" value="8.0"/>
+            <param name="qr_rotation_speed" value="0.18"/>
+            <param name="post_turn_recenter_trigger" value="0.06"/>
+            <param name="post_turn_recenter_attempts" value="2"/>
+            <param name="require_distinct_qr_codes" value="true"/>
+            <!-- Spark Xunfei QR-text category classification.  The password
+                 file (first line = APIPassword) must live on the vehicle and
+                 is never committed; leave blank to run local-map fallback
+                 only, or set spark_classify_enabled=false to disable. -->
+            <param name="spark_classify_enabled" value="true"/>
+            <param name="spark_python" value="/usr/bin/python3"/>
+            <param name="spark_helper_path"
+                   value="$(find ucar_2026)/scripts/production_qr_classifier.py"/>
+            <param name="spark_model" value="spark-x"/>
+            <param name="spark_api_base_url"
+                   value="https://spark-api-open.xf-yun.com/x2/chat/completions"/>
+            <param name="spark_thinking" value="disabled"/>
+            <param name="spark_password_file"
+                   value="/home/ucar/.ucar/spark_password"/>
+            <param name="spark_retries" value="2"/>
+            <param name="spark_timeout" value="60.0"/>
+            <param name="spark_helper_ready_timeout" value="60.0"/>
+            <!-- Before the first move_base goal, production_task_2026 pins
+                 CymPlanner to front-lookahead point mode for every task leg. -->
+            <param name="navigation_mode_connect_timeout" value="10.0"/>
+            <param name="camera_node_name" value="/usb_cam"/>
+            <param name="camera_starts_suspended"
+                   value="$(arg camera_start_suspended)"/>
+            <param name="camera_start_service" value="/usb_cam/start_capture"/>
+            <param name="camera_stop_service" value="/usb_cam/stop_capture"/>
+            <param name="camera_service_timeout" value="10.0"/>
+            <param name="use_ros_camera_for_ocr" value="true"/>
+            <param name="camera_image_topic" value="/usb_cam/image_raw"/>
+            <param name="video_device" value="/dev/ucar_video"/>
+            <param name="camera_width" value="640"/>
+            <param name="camera_height" value="480"/>
+            <param name="ocr_python" value="/usr/bin/python3"/>
+            <param name="ocr_helper_path"
+                   value="$(find ucar_2026)/scripts/production_camera_ocr.py"/>
+            <param name="live_ppocr_path"
+                   value="/home/ucar/ocr3/ppocr_trt/python/live_ppocr.py"/>
+            <param name="ppocr_root" value="/home/ucar/ocr3/ppocr_trt"/>
+            <param name="ocr_side" value="640"/>
+            <param name="camera_mirror" value="true"/>
+            <param name="ocr_min_confidence" value="0.30"/>
+            <param name="ocr_scan_rotation_speed" value="0.30"/>
+            <!-- The earlier 0.25 rad/s command measured about 0.14 rad/s;
+                 confirm 0.30 on vehicle and retain a generous 360deg budget. -->
+            <param name="rotation_timeout_scale" value="3.5"/>
+            <param name="ocr_scan_poll_period" value="0.20"/>
+            <param name="ocr_scan_candidate_confidence" value="60.0"/>
+            <param name="goal_cancel_timeout" value="10.0"/>
+            <!-- Cancelling a goal while the chassis is mid-motion leaves
+                 inertia + move_base residual speed; 2.0 s was too tight for
+                 guard-triggered cancels (observed abort), 4.0 s gives the
+                 odom samples time to settle below the stop epsilon. -->
+            <param name="stop_confirmation_timeout" value="8.0"/>
+            <!-- The chassis odom/imu briefly goes silent for ~1.0-1.04 s on
+                 every run (MCU/serial characteristic, 5 runs in a row).  The
+                 default 0.35 s freshness threshold made every mission abort;
+                 1.5 s tolerates the normal gap while still failing on real
+                 odom loss.  3.0 s doubles the margin (2026-08-11).
+                 4.0 s (2026-08-11 18:45): 2026-08-11 18:43 实车中止时
+                 /odom_raw 断流 3.009 s，仅超出 3.0 门限 9 ms；放宽到 4.0
+                 给换电池后的串口恢复留出余量，仍远小于真掉线。 -->
+            <param name="odom_timeout" value="4.0"/>
+            <!-- The same ~1.0-1.04 s odom/imu gap also freezes the odom ->
+                 base_link TF chain; match odom_timeout so the brief gap does
+                 not trip the TF freshness check (default 0.50 s). -->
+            <param name="tf_timeout" value="4.0"/>
+            <param name="stopped_odom_speed_epsilon" value="0.02"/>
+            <param name="stopped_odom_samples" value="3"/>
+            <param name="ocr_alignment_tolerance_px" value="20.0"/>
+            <param name="ocr_alignment_kp" value="0.0025"/>
+            <param name="ocr_alignment_kd" value="0.00035"/>
+            <param name="ocr_alignment_max_speed" value="0.22"/>
+            <param name="ocr_alignment_step_seconds" value="0.30"/>
+            <param name="ocr_alignment_yaw_tolerance_rad" value="0.01"/>
+            <param name="ocr_alignment_turn_timeout" value="5.0"/>
+            <!-- Lift PD-computed speeds below the chassis MCU rotation dead
+                 zone so protected alignment actually turns (0.073 rad/s
+                 stalled at 0.004 rad in 2.5 s on 2026-08-06). -->
+            <param name="ocr_alignment_min_speed" value="0.12"/>
+            <param name="front_scan_half_angle_deg" value="3.0"/>
+            <param name="lidar_forward_offset_m" value="0.0"/>
+            <!-- Front range must agree with the geometric wall-ray distance. -->
+            <param name="ray_range_agreement_m" value="0.30"/>
+            <param name="wall_match_max_error_m" value="0.18"/>
+            <!-- Dynamic-only pre-arrival guard.  The scan is the same source
+                 used by the global obstacle layer, with static walls masked. -->
+            <param name="target_guard_scan_topic" value="/scan_global_obstacles"/>
+            <param name="target_guard_match_radius_m" value="0.12"/>
+            <param name="target_guard_confirmation_scans" value="2"/>
+            <param name="target_guard_precheck_timeout" value="1.0"/>
+            <param name="target_guard_scan_max_age" value="1.0"/>
+            <param name="result_directory"
+                   value="$(env HOME)/.ros/ucar_2026_observations"/>
+        </node>
+    </group>
+</launch>

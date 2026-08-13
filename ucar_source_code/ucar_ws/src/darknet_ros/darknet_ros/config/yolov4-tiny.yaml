@@ -1,0 +1,18 @@
+yolo_model:
+
+  config_file:
+    name: yolov4-tiny-xf_726.cfg
+  weight_file:
+    # name: yolov4-tiny-xf_final_726.weights
+    name: yolov4-tiny-xf_final_729.weights
+  threshold:
+    value: 0.75
+  detection_classes:
+    names:
+      - rice
+      - wheat
+      - maize
+      - cucumberStem
+      - cucumberAndStem
+      - matureWheat
+     

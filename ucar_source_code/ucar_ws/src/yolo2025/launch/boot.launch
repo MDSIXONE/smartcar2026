@@ -1,0 +1,10 @@
+<launch>
+    <param name="use_sim_time" value="true"/>
+
+
+    <include file="$(find xf_mic_asr_offline)/launch/mic_init.launch" />   
+    <!-- 开启语音合成-->
+    <include file="$(find xf_tts_offline)/launch/xf_tts.launch" />
+
+      
+    </launch>

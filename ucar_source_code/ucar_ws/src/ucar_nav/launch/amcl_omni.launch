@@ -1,0 +1,69 @@
+<launch>
+  <arg name="use_map_topic"   default="true"/>
+  <arg name="scan_topic"      default="scan"/> 
+  <arg name="initial_pose_x"  default="0.0"/>
+  <arg name="initial_pose_y"  default="0.0"/>
+  <arg name="initial_pose_a"  default="0.0"/>
+  <arg name="odom_frame_id"   default="odom"/>
+  <!-- <arg name="base_frame_id"   default="base_footprint"/> -->
+  <arg name="base_frame_id"   default="base_link"/>
+  <arg name="global_frame_id" default="map"/>
+
+  <node pkg="amcl" type="amcl" name="amcl" respawn="false">
+    <param name="use_map_topic"             value="$(arg use_map_topic)"/>
+    <!-- Publish scans from best pose at a max of 10 Hz -->
+    <param name="odom_model_type"           value="omni-corrected"/>
+    <param name="gui_publish_rate"          value="10.0"/>
+    <param name="laser_max_beams"             value="180"/>
+<!-- ##############-->
+    <param name="laser_max_range"           value="-1.0"/>
+<!-- ##############-->
+    <param name="laser_min_range"           value="-1.0"/>
+  <!--粒子################-->
+    <param name="min_particles"             value="300"/>
+  <!--粒子################-->
+    <param name="max_particles"             value="800"/>
+    <param name="kld_err"                   value="0.01"/>
+    <param name="kld_z"                     value="0.99"/>
+      <!-- alpha1 有旋转运动时，出现扇形噪声粒子源############## -->
+    <param name="odom_alpha1"               value="0.005"/>
+    <!-- alpha2 有平移运动时，出现扇形噪声粒子源 #############-->
+    <param name="odom_alpha2"               value="0.005"/>
+    <!-- alpha3 纵向分量运动噪声，沿着机器人前进方向分布##############-->
+    <param name="odom_alpha3"               value="0.010"/>
+      <!-- alpha4 斜角方向的运动噪声################-->
+    <param name="odom_alpha4"               value="0.005"/>
+    <param name="odom_alpha5"               value="0.003"/>
+    <param name="laser_z_hit"               value="0.9"/>
+    <param name="laser_z_short"             value="0.05"/>
+    <param name="laser_z_max"               value="0.05"/>
+    <param name="laser_z_rand"              value="0.1"/>
+    <param name="laser_sigma_hit"           value="0.05"/>
+    <param name="laser_lambda_short"        value="0.1"/>
+    <param name="laser_model_type"          value="likelihood_field"/>
+    <!-- <param name="laser_model_type" value="beam"/> -->
+    <param name="laser_likelihood_max_dist" value="2.0"/>
+    <!-- ##############-->
+    <param name="update_min_d"              value="0.25"/>
+    <!-- ##############-->
+    <param name="update_min_a"              value="0.20"/>
+    <param name="odom_frame_id"             value="$(arg odom_frame_id)"/> 
+    <param name="base_frame_id"             value="$(arg base_frame_id)"/> 
+    <param name="global_frame_id"           value="$(arg global_frame_id)"/>
+    <!--在重采样前需要等待的滤波次数，默认2，越大，重采样频率越低 ##############-->
+    <param name="resample_interval"         value="0.5"/>
+    <!-- Increase tolerance because the computer can get quite busy -->
+    <param name="transform_tolerance"       value="3.0"/>
+      <!--慢速的平均权重滤波的指数衰减频率，用作决定什么时候通过增加随机位姿来recover################-->
+    <param name="recovery_alpha_slow"       value="0.001"/>
+     <!--快速的平均权重滤波的指数衰减频率，用作决定什么时候通过增加随机位姿来recover################-->
+    <param name="recovery_alpha_fast"       value="0.1"/>
+    <param name="initial_pose_x"            value="$(arg initial_pose_x)"/>
+    <param name="initial_pose_y"            value="$(arg initial_pose_y)"/>
+    <param name="initial_pose_a"            value="$(arg initial_pose_a)"/>
+    <param name="initial_cov_xx"            value="0.5*0.5"/>
+    <param name="initial_cov_yy"            value="0.5*0.5"/>
+    <param name="initial_cov_aa"            value="(π/12)*(π/12)"/>
+    <remap from="scan"                      to="$(arg scan_topic)"/>
+  </node>
+</launch>

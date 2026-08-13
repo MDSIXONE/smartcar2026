@@ -1,0 +1,101 @@
+TebLocalPlannerROS:
+
+ odom_topic: odom                                  # 里程计话题消息
+ #odom_topic: /robot_pose_ekf/odom_combined
+ # Must match local_costmap/global_frame for trajectory feasibility checks.
+ map_frame: map
+ #map_frame: /odom_combined
+
+ # Trajectory
+
+ teb_autosize: True
+ dt_ref: 0.24 #0.24
+ dt_hysteresis: 0.1
+ max_samples: 500
+ global_plan_overwrite_orientation: True #True
+ allow_init_with_backwards_motion: False
+ max_global_plan_lookahead_dist: 2.0 #3.0
+ global_plan_viapoint_sep: -1
+ global_plan_prune_distance: 1
+ exact_arc_length: False
+ feasibility_check_no_poses: 2 #2
+ publish_feedback: False
+
+ # Robot
+ enable_homing: false
+ # Match the proven CymPlanner production limits for the first TEB run.
+ max_vel_x: 0.25
+ max_vel_y: 0.1
+ max_vel_x_backwards: 0.25
+ max_vel_theta: 1.0
+ acc_lim_x: 0.2          #1.3         # 机器人 X 轴最大线加速度
+ acc_lim_y: 0.2                      # 机器人 Y轴最大线加速度               差速导航注释掉此行
+ acc_lim_theta: 0.5
+ min_turning_radius: 0.0                  # 机器人最小转弯半径
+ wheelbase: 0.0
+ footprint_model:
+    type: "polygon"
+    vertices: [[0.171, -0.128], [0.171, 0.128],[-0.171, 0.128], [-0.171, -0.128]]
+
+
+ # GoalTolerance
+
+ xy_goal_tolerance: 0.05
+ yaw_goal_tolerance: 0.1 #0.17 #0.5  0.17弧度刚好是10度
+ free_goal_vel: False #False
+
+ # Obstacles
+
+ min_obstacle_dist: 0.03
+ include_costmap_obstacles: True #enable_homotopy_class_planning enable_dynamic_obstacles
+ costmap_obstacles_behind_robot_dist: 0.5
+ obstacle_poses_affected: 15
+ costmap_converter_plugin: ""
+ costmap_converter_spin_thread: True
+ costmap_converter_rate: 5
+ 
+ inflation_dist:  0.05 #0.1 0.15
+ dynamic_obstacles_inflation_dist: 0.3  #0.6
+ include_dynamic_obstacles: False
+
+ # Optimization weight_set
+
+ no_inner_iterations: 4 #4
+ no_outer_iterations: 3 #3
+ optimization_activate: True  
+ optimization_verbose: False
+ penalty_epsilon: 0.05
+ weight_max_vel_x: 0.5 #50 #0.045
+ weight_max_vel_y: 0.3     #1.0           #差速导航注释掉此行
+ weight_max_vel_theta: 0.5  #0.15
+ weight_acc_lim_x: 0.05     #0.075
+ weight_acc_lim_y: 0.05     #0.25            #差速导航注释掉此行
+ weight_acc_lim_theta: 0.05 #0.03
+ weight_kinematics_nh: 0            #差速导航将此值改为1000
+ weight_kinematics_forward_drive: 0.5 #差速导航将此值改为60
+ weight_kinematics_turning_radius: 0.5
+ weight_optimaltime: 4 #3.5 #3 #2.5
+ weight_shortest_path: 0
+ weight_obstacle: 10 #10     #30
+ weight_inflation: 0.1 #0.15
+ weight_dynamic_obstacle: 10 #26 # not in use yet  #动态障碍物权重
+ weight_dynamic_obstacle_inflation: 0.08 #0.1  #膨胀带权重
+ weight_viapoint: 0
+ weight_adapt_factor: 4
+ selection_alternative_time_cost: False # not in use yet
+ obstacle_cost_exponent: 1 #1
+
+ # Homotopy Class Planner
+
+ # Use one deterministic local trajectory for the narrow grid baseline.
+ enable_homotopy_class_planning: False
+ enable_multithreading: False
+ simple_exploration: False
+ max_number_classes: 4 #4   ##---------
+ roadmap_graph_no_samples: 15
+ roadmap_graph_area_width: 6 #5
+ h_signature_prescaler: 1
+ h_signature_threshold: 0.2 #0.1
+ obstacle_keypoint_offset: 0.1
+ obstacle_heading_threshold: 0.45 #0.45
+ visualize_hc_graph: False

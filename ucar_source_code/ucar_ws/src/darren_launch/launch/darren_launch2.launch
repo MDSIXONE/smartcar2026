@@ -1,0 +1,45 @@
+<launch>
+    <param name="use_sim_time" value="true"/>
+
+    <!--起始点-->
+    <arg name="initial_pose_x" default="-0.15"/>
+	<arg name="initial_pose_y" default="-0.15"/>
+	<arg name="initial_pose_a" default="1.57"/>
+
+    <!--开启导航-->
+        <!-- 启动底盘及激光雷达驱动包 -->
+    <include file="$(find ucar_controller)/launch/ucar_bringup.launch" />
+        <!-- 启动USB摄像头驱动包 -->
+    <!--include file="$(find ucar_cam)/launch/ucar_cam.launch" /-->
+        <!-- 启动Map server功能包，发布地图 -->
+    <arg name="map_file" default="$(find ucar_nav)/maps/map1.yaml" />
+    <node name="map_server" pkg="map_server" type="map_server" args="$(arg map_file)" output="screen">
+        <param name="frame_id" value="map" />
+    </node>
+        <!-- 启动AMCL 自适应蒙特卡洛定位算法包 -->
+    <include file="$(find ucar_nav)/launch/amcl_omni.launch">
+        <arg name="initial_pose_x" value="$(arg initial_pose_x)"/>
+        <arg name="initial_pose_y" value="$(arg initial_pose_y)"/>
+        <arg name="initial_pose_a" value="$(arg initial_pose_a)"/>
+    </include>
+    <include file="$(find ucar_nav)/launch/teb_move_base_omni_test20220805.launch"/>
+
+    <node name="robot_pose_publisher" pkg="robot_pose_publisher" type="robot_pose_publisher"/>
+    <!--node name="darren_launch" pkg="darren_launch" type="lax_controller.py" output="screen"/-->
+
+    <!--开启麦克风唤醒词-->
+    <include file="$(find xf_mic_asr_offline)/launch/mic_init.launch" />
+    <!--语音控制-->
+    <include file="$(find xf_mic_asr_offline)/launch/voice_control.launch" />
+    <!--开启语音合成-->
+    <include file="$(find xf_tts_offline)/launch/xf_tts.launch" />
+
+    <node pkg="darren_launch" name="task_control" type="task_control2.py" output="screen" respawn="false" />
+
+    <!--node pkg="darren_launch" name="dynamic_reconfigure" type="dynamic_reconfigure.py" output="screen" respawn="false" /-->
+
+    <!--node pkg="ucar_yolo" name="ucar_yolo" type="darknet_ucar.py" output="screen" respawn="false" /-->
+
+    <!--node pkg="darren_launch" name="lax_aruco" type="lax_aruco.py" output="screen" respawn="false" /-->
+
+</launch>

@@ -1,0 +1,25 @@
+<launch>
+    <param name="use_sim_time" value="true"/>
+
+
+    <include file="$(find ucar_controller)/launch/ucar_bringup.launch" />
+        <!-- 启动USB摄像头驱动包 -->
+    <include file="$(find ucar_cam)/launch/ucar_cam.launch" />
+    
+    <!-- <include file="$(find darknet_ros)/launch/darknet_ros_xf.launch" /> -->
+
+    <node pkg="darren_launch" name="task_control" type="19ifly_task_control.py" output="screen" respawn="false" />
+
+    <!-- <node pkg="darknet_ros" name="darknet_ros_video" type="darknet_sub" output="screen" respawn="false" /> -->
+
+    <node pkg="ucar_yolo" name="ucar_yolo_kongbufenzi" type="19kongbufenzi_detect.py" output="screen" respawn="false" />
+
+    <!--node pkg="ucar_yolo" name="ucar_yolo_fruits" type="pz_fruits_darknet_ucar_yolo.py" output="screen" respawn="false" /-->
+
+    <!-- <node pkg="usb_cam" name="usb_cam_image" type="image_sub" output="screen" respawn="false" /> -->
+
+    <!-- <node pkg="darren_launch" name="imu_flag" type="imu" output="screen" respawn="false" /> -->
+
+    <!-- <node pkg="darren_launch" name="lax_aruco" type="lax_aruco.py" output="screen" respawn="false" /> -->
+
+</launch>

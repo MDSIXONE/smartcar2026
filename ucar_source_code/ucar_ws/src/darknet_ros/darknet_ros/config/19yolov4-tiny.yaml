@@ -1,0 +1,19 @@
+yolo_model:
+
+  config_file:
+    name: v4-tiny-19race.cfg
+  weight_file:
+    # name: yolov4-tiny-xf_final_726.weights
+    name: 5.weights
+  threshold:
+    value: 0.75
+  detection_classes:
+    names:
+      - fangdanyi
+      - jijiubao
+      - jinggun
+      - kongbufenzi1
+      - kongbufenzi2
+      - kongbufenzi3
+      - cuileiwasi
+

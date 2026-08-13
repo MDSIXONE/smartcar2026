@@ -1,0 +1,27 @@
+<launch>
+  <arg name="start_camera" default="true" />
+  <arg name="image_topic" default="/usb_cam/image_raw" />
+  <arg name="scan_enabled" default="true" />
+  <arg name="api_enabled" default="false" />
+
+  <!-- Do not include ucar_cam.launch: its optional cv_bridge flip node is
+       Python-2-only on this car and is not required for QR scanning. -->
+  <group if="$(arg start_camera)">
+    <node name="usb_cam" pkg="usb_cam" type="usb_cam_node" output="screen">
+      <param name="video_device" value="/dev/ucar_video" />
+      <param name="image_width" value="640" />
+      <param name="image_height" value="480" />
+      <param name="pixel_format" value="yuyv" />
+      <param name="camera_frame_id" value="usb_cam" />
+      <param name="io_method" value="mmap" />
+      <param name="framerate" value="30" />
+      <param name="camera_info_url" type="string" value="file://$(find ucar_cam)/camera_calibration.yaml" />
+    </node>
+  </group>
+
+  <node pkg="yolo2025" name="qrcode_scanner" type="qrcode_scanner.py" output="screen" respawn="false">
+    <param name="image_topic" value="$(arg image_topic)" />
+    <param name="scan_enabled" value="$(arg scan_enabled)" />
+    <param name="api_enabled" value="$(arg api_enabled)" />
+  </node>
+</launch>

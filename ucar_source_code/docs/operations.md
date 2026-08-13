@@ -1,0 +1,2413 @@
+# 操作命令
+
+新电脑或日常主流程启动请查看
+[new-computer-gui-simulation-mission.md](new-computer-gui-simulation-mission.md)；本文件保留部署、
+回滚和故障排查的完整命令。
+
+## WSL ROS Master 与 RViz
+
+> **网络配置以 [rosmaster/NETWORK_CONFIGURATION.md](../rosmaster/NETWORK_CONFIGURATION.md) 为准。** WSL Ubuntu 20.04 是唯一 ROS Master；小车端不得启动 `roscore`。所有 `source` 完成后必须设置当前 `ROS_MASTER_URI`，小车 `ROS_IP` 由到 Master 的路由动态推导或显式配置。
+
+本机 WSL 的 Ubuntu 20.04 使用 ROS Noetic，只作为局域网 ROS Master 和 RViz 客户端。
+在 WSL 终端先清除旧网络变量，再由网络脚本选择当前局域网地址并启动 Master：
+
+```bash
+unset ROS_IP ROS_HOSTNAME ROS_MASTER_URI
+~/start_ros_master.sh
+```
+
+输出必须是电脑当前局域网地址；若显示 `localhost` 或 `127.0.0.1`，立即按 `Ctrl-C`
+停止。不要让小车连接回环地址。
+
+输出还必须包含 `XML-RPC=HTTP/1.0`。小车使用 Linux 4.9 内核；在当前 WSL 镜像网络
+中，Noetic Master 的 HTTP/1.1 XML-RPC 响应会间歇性无法到达小车，使
+`roslaunch` 卡在 `load_parameters starting ...`。仓库提供的启动脚本只对 Master
+进程树启用 HTTP/1.0 兼容层，不修改系统 ROS，不改变 TCPROS 话题传输。首次部署或
+兼容层更新后执行：
+
+```bash
+mkdir -p ~/.config/smartcar/python_http10_compat
+cp /mnt/d/WORK/ALLCODE/smartcar2026/simulationforreal/ucar_source_code/rosmaster/start_ros_master.sh \
+  ~/start_ros_master.sh
+cp /mnt/d/WORK/ALLCODE/smartcar2026/simulationforreal/ucar_source_code/rosmaster/python_http10_compat/sitecustomize.py \
+  ~/.config/smartcar/python_http10_compat/sitecustomize.py
+chmod 0755 ~/start_ros_master.sh
+```
+
+部署后先停止旧 Master，再重新运行 `~/start_ros_master.sh`。可在小车上执行以下
+零运动回归检查；连续 20 次均须成功：
+
+```bash
+for attempt in $(seq 1 20); do
+  timeout 2 python2 -c \
+    "import xmlrpclib; print(xmlrpclib.ServerProxy('${ROS_MASTER_URI}').system.multicall([]))" \
+    >/dev/null || exit 1
+done
+echo "XML-RPC multicall: 20/20 passed"
+```
+
+WSL 的 ROS 环境已设置 DISABLE_ROS1_EOL_WARNINGS=1，因此不会再显示 ROS 1
+Noetic 生命周期结束的提示窗口。
+
+必须以当前工作区的 `RVIZ_CONFIG` 覆盖 `~/start_rviz.sh` 的历史默认值：
+
+    export RVIZ_CONFIG=/mnt/d/WORK/ALLCODE/smartcar2026/simulationforreal/ucar_source_code/ucar_ws/src/ucar_2026/rviz/navigation_2026.rviz
+
+该配置已启用 `/map`、全局/局部代价地图、`/scan` 激光点云、`base_link` 朝向箭头和
+`/usb_cam/image_raw` 相机画面。点云轨迹与朝向 TF 的失效时间均为 `0.3 s`，因此不会把
+断流后的旧朝向继续显示为实时数据。
+
+首次使用前，必须在 Windows 的管理员 PowerShell 放行当前本地子网的入站 TCPROS：
+
+    Get-NetFirewallRule -DisplayName 'ROS TCPROS from UCar to WSL' | Get-NetFirewallAddressFilter | Set-NetFirewallAddressFilter -RemoteAddress LocalSubnet
+    Get-NetFirewallHyperVRule -DisplayName 'ROS TCPROS from UCar to WSL' | Set-NetFirewallHyperVRule -RemoteAddresses LocalSubnet
+
+规则限制在受信任的当前本地子网；ROS 话题使用动态 TCPROS 端口，不能只开放 11311。
+
+另开一个 WSL 终端即可运行：
+
+    RVIZ_CONFIG=/mnt/d/WORK/ALLCODE/smartcar2026/simulationforreal/ucar_source_code/ucar_ws/src/ucar_2026/rviz/navigation_2026.rviz ~/start_rviz.sh
+
+若 Windows 任务栏只有 RViz 图标、无法显示主窗口，说明 WSLg 远程应用会话卡住。在
+Windows PowerShell 执行以下命令重建图形会话，再运行上述 Master 和 RViz 启动命令：
+
+    wsl --shutdown
+
+小车端推荐只运行以下脚本；它会提示输入 WSL Master 地址，并自动完成所有 `source`、
+动态小车 IP 计算和 Master 连通检查：
+
+```bash
+bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh
+```
+
+不要在小车端执行 `roscore`，初学者不要再手工复制多行 `export`/`awk` 命令。
+
+若只验证小车到 WSL 的数据链路、绝不发送默认导航目标，小车端使用同一个默认
+`manual` 模式：
+
+```bash
+bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh
+```
+
+小车的唯一 ROS Master 是本机 WSL Ubuntu 20.04。因此以上两条 `export` 必须在所有
+`source` 命令**之后**执行；同时先 `unset ROS_HOSTNAME`，避免其与 `ROS_IP` 冲突。
+不得使用或启动小车本机 `roscore`，也不要只单独执行最后一条 `roslaunch`。
+
+随后在 WSL 终端检查；下列命令只读取数据，不会移动小车：
+
+```bash
+rostopic echo -n 1 /map
+rostopic echo -n 1 /scan
+rostopic echo -n 1 /move_base/global_costmap/costmap
+rostopic echo -n 1 /move_base/local_costmap/costmap
+rosrun tf tf_echo map base_link
+```
+
+## 当前 2026 RViz 定点导航（CymPlanner）
+
+本节是当前唯一的真机导航入口，取代本文后续历史的 TEB、二维码、语音、默认目标和
+生产路线说明。正式入口 `ucar_2026/launch/2026.launch` 只启动如下链路：
+
+推荐命令为 `roslaunch ucar_2026 2026.launch`。`roslaunch yolo2025 2026.launch` 仅由
+兼容 wrapper 转发，暂时保留给旧自动化，不再作为正式入口或资源位置。
+
+```text
+base_driver + YDLidar (/scan_raw)
+  -> navigation_scan_relay (/scan, /scan_global_obstacles)
+  -> lidar_loc (map -> odom) + lidar_filter_node (/scan_filtered)
+  -> move_base (GlobalPlanner + CymPlanner) -> /cmd_vel -> base_driver
+usb_cam (/dev/ucar_video) -> /usb_cam/image_raw -> RViz Image panel
+```
+
+`navigation_scan_relay` 仅转发激光并从全局障碍物输入中删除已存在于静态地图的墙体回波；
+它优先使用激光时间戳的 `map <- laser_frame` TF，若该查询只因数毫秒发布延迟失败，则可使用
+不超过 `0.20 s` 的最新公共 TF。地图掩码或这两种 TF 都未就绪时，它发布全 `inf` 的全局扫描，
+避免把错误坐标系的点写入全局代价地图。定位始终使用未滤波的 `/scan`，局部避障使用
+`/scan_filtered`，全局重规划使用 `/scan_global_obstacles`。
+
+relay 配置为 `respawn=true` 与 `2.0 s` 重试延迟：若其在启动阶段短暂退出，ROS 会先恢复
+`/scan_raw -> /scan`，而不是让 `lidar_loc` 长期失去激光输入。重试期间不得发送导航目标。
+相机也以相同的 2 秒重试策略运行；它只供 RViz 显示，未连接任何二维码、语音、任务或
+`/cmd_vel` 控制逻辑。
+
+真机仍必须使用真实尺寸 `0.342 m × 0.256 m` 的足迹、`map` / `base_link` 坐标系和
+`lidar_loc` 的 `map -> odom`。不得照搬仿真的 Gazebo、`base_footprint` 或 `odom`
+接口。`testnav20260721` 是当前生效的导航配置档；其
+`global_costmap_common.yaml` 与 `local_costmap_common.yaml` 分别承载仿真的
+全局/局部层参数：全局使用 `3/5 Hz`、`0.01185 m`、`3.0/4.0 m`、`0.205 m/0.05`；局部
+使用 `8/3 Hz`、`1.0 m × 1.0 m`、`0.03 m`、`3.0/4.0 m`、`0.07 m/4.0`。全局仍消费
+静态墙体已掩除的 `/scan_global_obstacles`，局部仍消费 `/scan_filtered`，这是为真实
+雷达与地图的小对齐误差保留的安全适配。
+
+当前真机默认地图为
+`ucar_nav/maps/iflysse_field_walls_without_middle_vertices.yaml`，即场地中间不含顶点的
+版本。不要将它与旧的 `iflysse_2026_direct.yaml` 混用。
+
+同步当前代价地图和新的正式 2026 包、但保持任务停止时，在控制电脑工作区执行。将
+`<小车当前主机名或IP>` 替换为当前可达地址：
+
+```powershell
+$CAR_HOST = '<小车当前主机名或IP>'
+ssh "ucar@$CAR_HOST" 'mkdir -p ~/ucar_ws/src/ucar_nav/config/testnav20260721'
+scp -r ucar_ws/src/ucar_2026 "ucar@${CAR_HOST}:~/ucar_ws/src/"
+scp ucar_ws/src/ucar_nav/config/testnav20260721/global_costmap_common.yaml "ucar@${CAR_HOST}:~/ucar_ws/src/ucar_nav/config/testnav20260721/"
+scp ucar_ws/src/ucar_nav/config/testnav20260721/local_costmap_common.yaml "ucar@${CAR_HOST}:~/ucar_ws/src/ucar_nav/config/testnav20260721/"
+scp ucar_ws/src/ucar_nav/config/testnav20260721/global_costmap_params.yaml "ucar@${CAR_HOST}:~/ucar_ws/src/ucar_nav/config/testnav20260721/"
+scp ucar_ws/src/ucar_nav/config/testnav20260721/local_costmap_params.yaml "ucar@${CAR_HOST}:~/ucar_ws/src/ucar_nav/config/testnav20260721/"
+scp ucar_ws/src/ucar_nav/config/testnav20260721/global_planner_params.yaml "ucar@${CAR_HOST}:~/ucar_ws/src/ucar_nav/config/testnav20260721/"
+scp ucar_ws/src/ucar_nav/config/testnav20260721/move_base_params.yaml "ucar@${CAR_HOST}:~/ucar_ws/src/ucar_nav/config/testnav20260721/"
+scp ucar_ws/src/ucar_nav/launch/cym_move_base_omni_2026.launch "ucar@${CAR_HOST}:~/ucar_ws/src/ucar_nav/launch/"
+scp ucar_ws/src/ucar_nav/maps/iflysse_field_walls_without_middle_vertices.yaml "ucar@${CAR_HOST}:~/ucar_ws/src/ucar_nav/maps/"
+scp ucar_ws/src/ucar_nav/maps/iflysse_field_walls_without_middle_vertices.pgm "ucar@${CAR_HOST}:~/ucar_ws/src/ucar_nav/maps/"
+```
+
+`ucar_2026` 是正式入口包，需要构建；其余 YAML/launch/map 文件不需要重新编译。构建后可在
+小车端完成静态解析（不会启动节点或移动）：
+
+```bash
+source /opt/ros/melodic/setup.bash
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+read -r -p '请输入 WSL Master 当前地址: ' MASTER_IP
+export ROS_MASTER_URI="http://${MASTER_IP}:11311"
+export ROS_IP="$(ip -4 route get "$MASTER_IP" | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+roslaunch --nodes ucar_2026 2026.launch
+```
+
+在 Ubuntu 18.04 / ROS Melodic 环境重新构建后，所有 `source` 完成后显式恢复唯一的
+WSL Master：
+
+```bash
+source /opt/ros/melodic/setup.bash
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+read -r -p '请输入 WSL Master 当前地址: ' MASTER_IP
+export ROS_MASTER_URI="http://${MASTER_IP}:11311"
+export ROS_IP="$(ip -4 route get "$MASTER_IP" | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+cd ~/ucar_ws
+catkin_make --pkg cym_planner ucar_2026
+source devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_MASTER_URI="http://${MASTER_IP}:11311"
+export ROS_IP="$(ip -4 route get "$MASTER_IP" | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+python2 /opt/ros/melodic/bin/roslaunch ucar_2026 2026.launch
+```
+
+默认入口不会发布自动目标。只在 `/odom_raw` 为有限值、
+`odom -> base_link` 与 `map -> base_link` 均可用，且 `/cmd_vel` 只有预期的
+`/move_base` 发布者时，才可在控制电脑的 RViz 使用 **2D Nav Goal**。
+
+```bash
+rostopic echo -n 1 /odom_raw
+rosrun tf tf_echo odom base_link
+rosrun tf tf_echo map base_link
+rostopic info /cmd_vel
+rosparam get /move_base/base_local_planner
+rosparam get /move_base/local_costmap/inflation_layer/inflation_radius
+```
+
+预期本地规划器为 `cym_planner/CymPlanner`，局部膨胀半径为 `0.07`。RViz 的
+**CymPlanner CV Map** 和 **CymPlanner CV Plan** 分别订阅
+`/move_base/cym_planner/CymPlanner/debug_map` 与
+`/move_base/cym_planner/CymPlanner/debug_plan`；只有 move_base 收到目标并开始调用
+局部规划器后才会刷新。
+
+若底盘日志出现 `device disconnected`、`Odom sensor not active` 或
+`Imu sensor not active`，先发布零速度并停止整个 2026 launch，再检查内核 USB
+事件，不得继续读取一帧临时恢复的数据后发送目标：
+
+```bash
+dmesg | grep -E \
+  'usb 1-2: (USB disconnect|new high-speed USB device)|ttyUSB0|cp210x' | tail -n 80
+lsusb -t
+cat /sys/bus/usb/devices/1-2/power/control
+cat /sys/bus/usb/devices/1-2.2/power/control
+```
+
+若 `usb 1-2` Hub 与多个子设备同时消失再枚举，故障不属于单个 ROS 节点。
+在断电状态检查 Hub 供电、上游接插件和线缆，恢复后先运行无目标模式并持续观察，
+时间必须覆盖此前出现断开的窗口；稳定期间不得出现新的 Hub disconnect、sensor
+inactive、CRC 或 TF 停滞。2026-07-28 的隔离回归中，物理拔除新增 USB 扬声器后，
+`base_driver` 仍在约 11 秒内使同一 Hub 再次掉线，因此不能把扬声器视为唯一原因，
+还必须继续检查 Hub 本体、上游线缆和公共供电。
+
+若把 CP2102 完全绕过外置 Hub、直接接入主机 USB 口，先用下列只读命令确认拓扑，
+不要仅凭物理插接位置判断：
+
+```bash
+lsusb -t
+dmesg | grep -E \
+  'usb .*disconnect|new .*USB device|cp210|ttyUSB|over-current|reset .*USB' | tail -n 80
+```
+
+直连的 CP2102 应直接显示在主机 `root_hub` 下，而不是 Terminus Hub 的子端口下。
+2026-07-28 的直连复测中，CP2102 显示为根 Hub `1-2` 的 12 Mbit/s 设备，内核没有
+新的 disconnect/reset，但仍出现 AHRS CRC、帧长错误以及约 3 秒的
+`odom -> base_link` 停滞。这说明原 Hub 不是唯一故障点；下一轮必须在断电状态下
+依次只替换一个变量：CP2102 模块、短 USB 线、CP2102 到底盘 MCU 的串口线束，
+并检查接插件、公共地、控制板供电和实际固件波特率。不得只改单侧波特率。每轮先只
+启动 `base_driver` 静态观察至少 10 分钟；任何 CRC、`head_len`、sensor inactive
+或 TF 停滞均判定失败并立即整链停止。
+
+### 只测试 mini 集成 IMU
+
+上游 `WXyuany/iFLYtek` 的说明明确区分两种车型：mini 的 IMU 数据与底盘数据复用
+`ucar_controller/base_driver` 的 CP2102 串口，晓版本才用
+`fdilink_ahrs` 独立读取 IMU。mini 日常验证先只启动底盘驱动，不得同时启动两个节点
+抢占同一个串口：
+
+```bash
+# 先在 WSL 启动唯一 Master；小车端 source 后重新设置动态网络变量。
+roslaunch ucar_controller base_driver.launch
+
+# 另一个已连接同一 Master 的终端只读采样。
+rostopic info /imu
+timeout 22 rostopic hz -w 200 /imu
+rostopic echo -n 3 /imu
+rostopic hz -w 100 /odom
+```
+
+测试期间不发送运动命令；启动前和停止前均发布零速度。`/imu` 的四元数、角速度和
+线加速度必须全部有限，静止时四元数模长应接近 1、加速度模长应接近重力加速度。
+观察时间至少覆盖 10 分钟；出现 CRC、`head_len`、NaN 或频率停滞立即判定失败并
+停止。
+
+需要把底盘帧解析与 IMU 帧解析分开对照时，先停止 `base_driver` 并确认串口已释放，
+然后可临时让仓库已有、与上游源码一致的独立节点读取同一个 CP2102：
+
+```bash
+rosrun fdilink_ahrs ahrs_driver \
+  _port:=/dev/ttyUSB0 _baud:=921600 _debug:=false \
+  _imu_topic:=/imu _imu_frame:=imu _device_type:=1
+```
+
+该命令只用于静态诊断，不能与 `base_driver` 并行运行，也不是 mini 的正式启动方式。
+2026-07-28 对照中，集成驱动约 4 分钟、独立驱动约 2 分钟均维持约 50 Hz 的有限
+IMU 数据，未复现 CRC；测试时 CP2102 已重新位于外置 Hub 的 `1-2.3`，并非先前的
+根 Hub 直连，所以结果只证明当次间歇故障没有发生，不能宣告硬件修复。
+
+### 底盘串口短读重同步与静态验证
+
+`base_driver` 的每一次串口字段读取必须读满指定字节数才会参与帧校验；零字节或短读会
+清空当前缓冲、丢弃该帧并回到帧头搜索。它不会重发旧里程计、不会放宽任务的
+`/odom_raw` 新鲜度门限，也不会因诊断日志自动恢复运动。为防止“持续少量字节”让读取
+无限延长，每个字段总预算为 `serial_timeout`（默认 `50 ms`），再加最多一次底层读超时；
+`serial_gap_warn`（默认
+`0.35 s`）只控制 `BASE_*_PUBLISH_GAP` / `BASE_SERIAL_SLOW_READ` 的诊断阈值。
+
+先按当次网络发现的小车地址同步；这一步只部署文件，不启动 ROS、不发布速度：
+
+```powershell
+$VEHICLE_HOST = 'ucar@<按 rosmaster/NETWORK_CONFIGURATION.md 发现的小车地址>'
+
+ssh $VEHICLE_HOST 'mkdir -p ~/ucar_ws/src/ucar_controller/test'
+scp ucar_ws/src/ucar_controller/src/base_driver.cpp `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_controller/src/"
+scp ucar_ws/src/ucar_controller/include/ucar_controller/base_driver.h `
+  ucar_ws/src/ucar_controller/include/ucar_controller/serial_read_exact.h `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_controller/include/ucar_controller/"
+scp ucar_ws/src/ucar_controller/config/driver_params_mini.yaml `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_controller/config/"
+scp ucar_ws/src/ucar_controller/CMakeLists.txt `
+  ucar_ws/src/ucar_controller/package.xml `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_controller/"
+scp ucar_ws/src/ucar_controller/test/test_serial_read_exact.cpp `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_controller/test/"
+```
+
+随后只在小车 Ubuntu 18.04 上构建和运行单元测试。每个 `source` 后重新设定当次
+WSL Master 地址；这不启动或要求小车端 `roscore`：
+
+```bash
+cd ~/ucar_ws
+source /opt/ros/melodic/setup.bash
+unset ROS_HOSTNAME
+export ROS_MASTER_URI="http://<MASTER_IP>:11311"
+export ROS_IP="$(ip -4 route get <MASTER_IP> | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+catkin_make --pkg ucar_controller -DCATKIN_ENABLE_TESTING=ON
+source devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_MASTER_URI="http://<MASTER_IP>:11311"
+export ROS_IP="$(ip -4 route get <MASTER_IP> | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+catkin_make run_tests_ucar_controller
+catkin_test_results --verbose build/test_results/ucar_controller
+```
+
+若车端 `CMakeCache.txt` 已有不含 `ucar_controller` 的
+`CATKIN_WHITELIST_PACKAGES`，上面的包级构建仍会提示缺少
+`ucar_controller/all`。此时仅临时切换白名单，测试后恢复本机原有列表；不要删除整个
+`build` 或 `devel` 目录：
+
+```bash
+# 先从 CMakeCache 记录原有列表，再将下面 ORIGINAL_WHITELIST 替换为该值。
+grep '^CATKIN_WHITELIST_PACKAGES:' build/CMakeCache.txt
+ORIGINAL_WHITELIST='cym_planner;jie_ware;yolo2025;ucar_2026'
+catkin_make --force-cmake -DCATKIN_ENABLE_TESTING=ON \
+  "-DCATKIN_WHITELIST_PACKAGES=ucar_controller"
+catkin_make run_tests_ucar_controller
+catkin_test_results --verbose build/test_results/ucar_controller
+catkin_make --force-cmake -DCATKIN_ENABLE_TESTING=ON \
+  "-DCATKIN_WHITELIST_PACKAGES=${ORIGINAL_WHITELIST}"
+```
+
+静态链路验证时，WSL 仍是唯一 Master。先由安全终端发布一次零速度，之后只启动
+`base_driver` 并观察至少 10 分钟；不得发送导航目标：
+
+```bash
+rostopic pub -1 /cmd_vel geometry_msgs/Twist '{}'
+roslaunch ucar_controller base_driver.launch 2>&1 | tee /tmp/base_driver_serial.log
+
+# 另一已连接同一 Master 的终端：
+rostopic info /odom
+timeout 620 rostopic hz -w 300 /odom
+timeout 620 rostopic hz -w 300 /imu
+grep -E 'BASE_SERIAL_(RESYNC_SHORT_READ|SLOW_READ)|BASE_(odom|imu)_PUBLISH_GAP' \
+  /tmp/base_driver_serial.log
+```
+
+任何 `BASE_SERIAL_RESYNC_SHORT_READ`、`BASE_*_PUBLISH_GAP`、CRC、NaN、
+`TF_NAN_INPUT` 或 sensor inactive 都要求立即零速并停止导航/底盘链路。短读日志
+说明实际字节流仍不完整，软件会安全丢帧但不能修复 CP2102、串口线、接地、供电或 MCU
+发帧；应转入物理链路排查。静态通过也只证明该观察窗口内稳定，完整实车任务仍须用户
+重新确认起点后单独执行。
+
+### 无 RViz 的 yolo2025 自动目标差分
+
+为判断 RViz 的跨机话题流量是否会放大串口问题，必须保持 WSL 为唯一 Master，先用
+同一套完整 launch 关闭自动目标完成静态安全门；不得直接让冷启动节点运动：
+
+```bash
+roslaunch yolo2025 2026.launch startup_goal_enabled:=false
+
+# 运动前必须全部通过。
+rostopic hz -w 100 /odom_raw
+rostopic hz -w 200 /imu
+rostopic hz -w 100 /scan
+rostopic echo -n 10 /odom_raw
+rosrun tf tf_echo odom base_link
+rosrun tf tf_echo map base_link
+rosnode list | grep rviz
+```
+
+确认 `/odom_raw` 全部有限、两段 TF 连续可读、无 CRC/USB 新事件且没有 RViz 节点后，
+发布零速度并停止无目标 launch，再重启自动目标：
+
+```bash
+roslaunch yolo2025 2026.launch startup_goal_enabled:=true
+```
+
+2026-07-28 的 GitHub `main` 对照中，启动目标实际发出并到达；采样到线速度约
+`0.20～0.32 m/s`、角速度最高 `1.0 rad/s`，随后完成三个二维码朝向停靠，识别到
+2/3 个不同二维码，因数量不足而没有进入生产路线。无 RViz 时运动阶段没有 CRC，
+但二维码流程结束约 44 秒、里程计已经为零后仍出现一次
+`check crc16 faild(ahrs)`。测试没有新增内核 USB disconnect/reset，故 RViz 负载
+可能提高复现概率，但不是 CRC 的必要条件。出现 CRC 后必须立即发布零速度并停止
+完整 launch，不得因为自动目标已经完成就继续留机观察。
+
+### 部署 GitHub main 的 yolo2025 做静态对照
+
+此流程只替换小车的 `~/ucar_ws/src/yolo2025`，不切换或覆盖本地当前工作树。车端不留
+旧包备份；需要恢复时重新从目标 Git 分支部署。先在 Windows PowerShell 从已确认的
+`origin/main` 生成归档并上传：
+
+```powershell
+$CAR_HOST = '<小车当前主机名或IP>'
+$ARCHIVE = Join-Path $env:TEMP 'smartcar-yolo2025-main.tar'
+git archive --format=tar --output=$ARCHIVE origin/main ucar_ws/src/yolo2025
+scp $ARCHIVE "ucar@${CAR_HOST}:/tmp/smartcar-yolo2025-main.tar"
+```
+
+在小车上把归档解到 `/tmp`，完成依赖入口检查后精确替换包目录。Windows 生成的归档
+可能带 CRLF，因此部署后必须规范化文本并检查 Python 2 shebang；不得直接启动：
+
+```bash
+rm -rf /tmp/smartcar-yolo2025-main-stage
+mkdir -p /tmp/smartcar-yolo2025-main-stage
+tar -xf /tmp/smartcar-yolo2025-main.tar -C /tmp/smartcar-yolo2025-main-stage
+test "$(readlink -f ~/ucar_ws/src/yolo2025)" = \
+  "/home/ucar/ucar_ws/src/yolo2025"
+rm -rf ~/ucar_ws/src/yolo2025
+mv /tmp/smartcar-yolo2025-main-stage/ucar_ws/src/yolo2025 ~/ucar_ws/src/yolo2025
+find ~/ucar_ws/src/yolo2025 -type f \
+  \( -name '*.py' -o -name '*.sh' -o -name '*.launch' -o -name '*.xml' \
+     -o -name '*.json' -o -name '*.rviz' -o -name '*.urdf' \
+     -o -name 'CMakeLists.txt' \) \
+  -exec sed -i 's/\r$//' {} +
+find ~/ucar_ws/src/yolo2025/scripts -maxdepth 1 -type f \
+  \( -name '*.py' -o -name '*.sh' \) -exec chmod 0755 {} +
+rm -rf /tmp/smartcar-yolo2025-main-stage
+rm -f /tmp/smartcar-yolo2025-main.tar
+od -An -tx1 -N32 ~/ucar_ws/src/yolo2025/scripts/2026.py
+```
+
+重新构建只能在小车 Ubuntu 18.04 上进行。所有 `source` 后仍须恢复当前 WSL Master：
+
+```bash
+source /opt/ros/melodic/setup.bash
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+read -r -p '请输入 WSL Master 当前地址: ' MASTER_IP
+export ROS_MASTER_URI="http://${MASTER_IP}:11311"
+export ROS_IP="$(ip -4 route get "$MASTER_IP" | awk \
+  '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+cd ~/ucar_ws
+catkin_make --pkg yolo2025 -DPYTHON_EXECUTABLE=/usr/bin/python2
+```
+
+`main` 的 `2026.launch` 默认会发送启动目标，静态对照必须显式关闭：
+
+```bash
+source /opt/ros/melodic/setup.bash
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_MASTER_URI="http://${MASTER_IP}:11311"
+export ROS_IP="$(ip -4 route get "$MASTER_IP" | awk \
+  '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+~/ucar_ws/src/ucar_2026/scripts/run_melodic_python2.sh \
+  /opt/ros/melodic/bin/roslaunch yolo2025 2026.launch \
+  startup_goal_enabled:=false
+```
+
+2026-07-28 对照中，`main` 已成功启动且确认
+`/navigation_2026/startup_goal_enabled=false`，但 45 秒内仍出现 IMU 与 AHRS CRC
+错误，因此当前底盘串口问题不由 `simulation_real` 的 yolo2025 改动引起。
+
+### `map` TF 等待与 scan relay 异常退出
+
+若 move_base 重复报告 `Timed out waiting for transform from base_link to map`，不要把它
+当作代价地图数值错误。`map_server` 仅发布 `/map`，实际的 `map -> odom` 由 `lidar_loc`
+在同时取得 `/scan` 和有效里程计后发布。当前链路中 `/scan` 又完全依赖
+`navigation_scan_relay` 将 `/scan_raw` 转发出来。
+
+先保持无导航目标，并在小车端执行以下只读检查；所有 `source` 完成后必须恢复 WSL Master：
+
+```bash
+source /opt/ros/melodic/setup.bash
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+read -r -p '请输入 WSL Master 当前地址: ' MASTER_IP
+export ROS_MASTER_URI="http://${MASTER_IP}:11311"
+export ROS_IP="$(ip -4 route get "$MASTER_IP" | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+rosnode list | grep -E '^/(navigation_scan_relay|lidar_loc|move_base)$'
+rostopic info /scan
+rostopic echo -n 1 /odom_raw
+timeout 5 rosrun tf tf_echo map base_link
+```
+
+2026-07-21 曾发生 relay 在完整 launch 开始约两秒后以 exit code 1 退出：随后没有 `/scan`，
+`lidar_loc` 不会发布 `map -> odom`，上述代价地图警告随之出现。该次异常的启动前 stderr
+没有写进 ROS 日志；relay 文件本身的 Python 2 编译、ROS 依赖、可执行权限和 LF shebang 均已
+验证正常，且它可以单独保持运行。若复现，保留并记录终端中
+`[navigation_scan_relay-8] process has died` 前后的完整输出；不要在 `/odom_raw` 为 `NaN`
+或 `map -> base_link` 缺失时发送 RViz 目标。若出现 `NaN`，先发布零速度并重启导航/底盘
+里程计链路，再继续检查。
+
+本次变更已按用户指示同步到小车进行静态验证；不要创建小车端备份、不要提交或推送 GitHub。
+
+## ROS Melodic 终端恢复
+
+小车的 ROS Melodic 工具必须由 Python 2 运行，而系统 `/usr/bin/python` 当前为 Python 3。`.bashrc` 已将 `roslaunch` 定义为调用 `python2 /opt/ros/melodic/bin/roslaunch` 的 shell 函数，并且每个 ROS overlay 只加载一次。
+
+若终端出现 `Argument list too long`，当前 shell 的环境变量已膨胀，不能继续 source 或启动命令。关闭该终端并新开一个终端，然后验证：
+
+```bash
+type roslaunch
+```
+
+预期输出应包含 `roslaunch is a function`。如需绕过 shell 函数，可显式使用：
+
+```bash
+python2 /opt/ros/melodic/bin/roslaunch ucar_2026 2026.launch
+```
+
+### 2026.launch 异常终端关闭后的停止
+
+正常停止始终优先在启动终端按 `Ctrl-C`。若终端已被关闭但真机任务仍在运行，不要使用
+宽泛的 `pkill -f roslaunch` 或 `rosnode kill -a`。在小车的新终端提供当前 WSL Master
+地址后运行专用脚本：
+
+```bash
+read -r -p '请输入 WSL Master 当前地址: ' MASTER_IP
+export MASTER_IP
+bash ~/ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh
+```
+
+脚本会在所有 `source` 后显式恢复 WSL Master，先向 `/cmd_vel` 发布零速度，暂停精确匹配
+的 `ucar_2026 2026.launch` 父进程以阻止 `move_base` 重生，关闭其直接子进程，最后清理该
+launch 父进程。它不启动或停止 WSL Master，也不匹配其他 launch。
+
+若关停后 Master 仍列出不可达的旧节点，先检查：
+
+```bash
+rosnode info /navigation_2026
+```
+
+只有显示 `connection refused`，并且 `rosnode cleanup` 提示的节点全是旧 2026 任务节点时，
+才执行：
+
+```bash
+rosnode cleanup
+```
+
+在提示时输入 `y`。新的 `2026.launch` 会重新注册同名节点，无需重启 WSL Master。
+
+### Odometry NaN safety gate
+
+Before sending a navigation goal or any manual rotation, verify that the
+wheel odometry is finite and that both transform links exist:
+
+```bash
+rostopic echo -n 1 /odom_raw
+rosrun tf tf_echo odom base_link
+rosrun tf tf_echo map base_link
+```
+
+> **历史任务记录（当前不要执行）：** 以下 TEB、默认目标、二维码和生产路线章节记录的是旧
+> `yolo2025/scripts/2026.py` 任务链路；该脚本本次未迁移，也不属于正式
+> `ucar_2026/launch/2026.launch`。正式 launch 不发送默认目标、不执行二维码或生产路线任务，
+> 当前操作请以本文前部“当前 2026 RViz 定点导航（CymPlanner）”为准。
+
+## 2026 TEB 试运行
+
+当前 2026 入口使用
+`ucar_nav/launch/teb_move_base_omni_2026.launch`，通过
+`teb_move_base_params_2026.yaml` 选择已经安装在小车 Melodic 中的
+`teb_local_planner/TebLocalPlannerROS`。TEB 直接发布 `/cmd_vel`，不要套用旧
+的 `/teb_cmd_vel` 重映射；当前没有启动对应 relay。
+
+TEB 首次完整路线按已经验证的 CymPlanner 生产参数做保守基线：前进/后退
+`0.25 m/s`、横移 `0.10 m/s`、角速度 `1.0 rad/s`、到点距离 `0.05 m`、
+最终朝向误差 `0.10 rad`、车体外硬净距 `0.03 m`。为避免窄路口在多个拓扑间
+切换，首次基线关闭 homotopy class；不强制绑定每个全局路径 viapoint，避免
+局部地图把路径判为不可行。TEB 分支的局部 costmap 膨胀半径也设为 `0.03 m`，
+避免与 TEB 自身 `0.03 m` 硬净距重复叠加成过大的通道收缩。TEB 的
+`map_frame` 必须是 `map`，与局部 costmap 的 `global_frame` 一致。
+
+本地 WSL Noetic 没有安装 TEB 插件，不能在本地运行时加载该 planner。小车
+端先同步以下文件，再进行静态解析和构建检查：
+
+```bash
+scp ucar_ws/src/ucar_nav/launch/teb_move_base_omni_2026.launch \
+  ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/launch/
+scp ucar_ws/src/ucar_nav/config/omni_test20250620/teb_move_base_params_2026.yaml \
+  ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/config/omni_test20250620/
+scp ucar_ws/src/ucar_nav/config/omni_test20250620/teb_local_planner_params.yaml \
+  ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/config/omni_test20250620/
+scp ucar_ws/src/ucar_nav/config/omni_test20250620/local_costmap_params.yaml \
+  ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/config/omni_test20250620/
+scp ucar_ws/src/yolo2025/launch/2026.launch \
+  ucar@192.168.8.231:~/ucar_ws/src/yolo2025/launch/
+scp ucar_ws/src/yolo2025/scripts/2026.py \
+  ucar@192.168.8.231:~/ucar_ws/src/yolo2025/scripts/
+```
+
+小车端验证 TEB 已安装、launch 可解析；每次 `source` 后显式恢复 WSL
+Master，不启动小车本机 `roscore`：
+
+```bash
+source /opt/ros/melodic/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_IP=192.168.8.231
+export ROS_MASTER_URI=http://192.168.8.197:11311
+rospack find teb_local_planner
+# 历史命令，仅记录，当前不要执行。
+roslaunch --nodes yolo2025 2026.launch startup_goal_enabled:=false
+```
+
+第一次真正启动时先停止旧任务，并保持无自动目标：
+
+```bash
+source /opt/ros/melodic/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_IP=192.168.8.231
+export ROS_MASTER_URI=http://192.168.8.197:11311
+# 历史命令，仅记录，当前不要执行。
+bash ~/ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh
+python2 /opt/ros/melodic/bin/roslaunch yolo2025 2026.launch \
+  startup_goal_enabled:=false
+```
+
+启动日志必须显示 TEB 使用 polygon 车体模型，不应再出现
+`No robot footprint model specified`。以下两条应分别输出 `polygon` 和 `0.03`：
+
+```bash
+rosparam get /move_base/TebLocalPlannerROS/footprint_model/type
+rosparam get /move_base/TebLocalPlannerROS/min_obstacle_dist
+```
+
+`0.03 m` 是 TEB 在车体 polygon 外额外要求的硬障碍净距，不是把车体缩成 3 cm；
+车体仍为 `0.342 m × 0.256 m`。局部 costmap 的 `0.03 m/pix` 是栅格分辨率，含义不同。
+
+确认 `/odom_raw` 为有限值、`odom -> base_link` 和 `map -> base_link` TF 正常、
+且 `/cmd_vel` 没有多个非预期发布者后，再由 RViz 发送一个手动目标。回滚
+时把 `2026.launch` 的 include 改回
+`cym_move_base_omni_2026.launch`，然后按同样的停止/启动流程重启。
+
+## CymPlanner 终点 180° 震荡修复：构建与验证
+
+该修复属于 `cym_planner` C++ 代码变更。仅调整 YAML 参数不能解决
+`+pi/-pi` 分界导致的正反角速度翻转；部署后必须重新编译
+`cym_planner` 并重启 `move_base/2026.launch`。
+
+本地 WSL Ubuntu 20.04 使用独立临时 catkin 工作区验证，避免仓库中其他
+ROS 包的缺失依赖干扰。所有 `source` 后必须立即恢复唯一 ROS Master：
+
+```bash
+source /opt/ros/noetic/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+
+build_root=$(mktemp -d /tmp/cym-planner-build.XXXXXX)
+mkdir -p "$build_root/src"
+ln -s /mnt/d/WORK/ALLCODE/smartcar2026/ucar_ws/src/cym_planner \
+  "$build_root/src/cym_planner"
+cd "$build_root/src"
+catkin_init_workspace
+cd "$build_root"
+catkin_make -DCATKIN_ENABLE_TESTING=ON
+catkin_make run_tests_cym_planner
+catkin_test_results
+```
+
+验证完成后只清理上面由 `mktemp` 创建且已确认位于 `/tmp/` 的目录。
+
+同步到小车后，在小车端编译时仍只使用 WSL 的 ROS Master，禁止启动小车
+本机 `roscore`：
+
+```bash
+source /opt/ros/melodic/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+cd ~/ucar_ws
+catkin_make --pkg cym_planner
+source devel/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+```
+
+重启导航前先确认旧任务已经停止。启动后先做静态安全检查；只有
+`/odom_raw` 全部为有限值，且 `odom -> base_link`、`map -> base_link` TF
+均正常时，才允许发送目标验证终点朝向：
+
+```bash
+rostopic echo -n 1 /odom_raw
+rosrun tf tf_echo odom base_link
+rosrun tf tf_echo map base_link
+```
+
+### 无 RViz 向正式 ucar_2026 发送单个目标
+
+正式 `ucar_2026/launch/2026.launch` 不包含自动目标节点；无 RViz 测试时，在
+静态安全门通过后直接向 move_base 的标准 `/move_base_simple/goal` 输入发布
+`PoseStamped`。以下命令发送与 2026 起点对照测试相同的目标
+`map (-1.734, 2.305, yaw=90°)`：
+
+```bash
+source /opt/ros/melodic/setup.bash
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+read -r -p '请输入 WSL Master 当前地址: ' MASTER_IP
+export ROS_MASTER_URI="http://${MASTER_IP}:11311"
+export ROS_IP="$(ip -4 route get "$MASTER_IP" | awk \
+  '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+
+rostopic pub -1 /move_base_simple/goal geometry_msgs/PoseStamped \
+  "header: {frame_id: 'map'}
+pose:
+  position: {x: -1.734, y: 2.305, z: 0.0}
+  orientation: {x: 0.0, y: 0.0, z: 0.70710678, w: 0.70710678}"
+```
+
+发送前还应确认 `rostopic info /cmd_vel` 只有 `/move_base` 发布、
+`/base_driver` 订阅，且 `rosnode list` 中没有 RViz。完成后检查：
+
+```bash
+rostopic echo -n 1 /move_base/status
+rostopic echo -n 1 /odom_raw
+```
+
+成功结果应包含 `status: 3` 与 `Goal reached.`，随后里程计线速度和角速度均为
+有限的 `0.0`。若出现 NaN、`TF_NAN_INPUT`、AHRS/IMU CRC、`head_len` 或传感器
+掉线，立即取消目标、发布零速度并停止完整导航链路。单次 `NO PATH` 后若目标仍为
+active 且重新规划恢复，可继续观察；连续失败或状态转为 aborted 时必须停车。
+
+### ucar_2026 正式生产任务：52 扫码、原生相机 OCR 和墙点匹配
+
+`task_enabled` 默认是 `false`，所以普通
+`roslaunch ucar_2026 2026.launch` 永远不会自动移动。正式任务的固定流程是：
+
+1. 使用点模式导航到中心点 52 `(-1.75, 2.25)`。
+2. 车辆保持在 52，依次面向墙边观察点
+   262 `(-2.50, 2.25)`、232 `(-1.75, 3.00)`、
+   295 `(-1.75, 1.50)` 扫码。观察点只决定车头方向，车辆不得导航到墙边。
+3. 每个观察方向收到新且去重后的二维码后，若物品与输入目标匹配则记录并前往下一方向；
+   若收到但物品不匹配，也直接前往下一固定观察方向，**不得**转圈。只有该面完全没有新的
+   二维码事件时，才以 `0.18 rad/s` 最多正转一整圈；整圈没有新结果则停车并终止任务。
+4. 二维码结束后关闭扫码与相机采集，启动 Python 3 OCR helper；生产阶段的相机只在每一个
+   已到达目标时重新开启，转圈扫描、复拍、测距结束后立即再次暂停。
+5. 任务在安全门通过、**任何** `move_base` 目标之前锁存连续发布三次
+   `/ucar/navigation_mode = point`。因此 52、二维码朝向、生产路线和 OCR 复拍的所有导航
+   目标均使用 CymPlanner 前视路径点模式；自动任务不会发布 `body_projection`。
+6. 生产目标路线固定为 `12 → 22 → 13 → 23 → 14 → 24 → 15 → 25 → 16 → 26 → 17 → 27
+   → 18 → 28 → 19 → 29`（16 点，各点交替航向 -45°/45°）。每到一个目标才进行最多一整圈的
+   异步 OCR 搜索；一整圈无候选只记录结果并前往下一目标，不会在行驶途中 OCR。一旦收集到
+   3 个不同类别（`PRODUCTION_CATEGORIES_COMPLETE early_stop_at_route_point=...`），
+   立即停止前往后续目标，导航到终点点 `170 (0.0,-0.5)`、航向朝向点 `319 (0.0,-0.75)`
+   （正南 -90°），到达后任务 SUCCEEDED。
+7. 每个生产目标发送前和导航监督期间，都以 `/scan_global_obstacles` 检查该目标的四个中间
+   区端点。固定映射为 `12: 419/420/428/429`、`23: 429/430/438/439`、
+   `14: 421/422/430/431`、`25: 431/432/440/441`、`16: 423/424/432/433`。该扫描流是
+   全局障碍层的动态输入，静态地图墙回波已被 relay 掩除；不能以包含静态层和膨胀层的 raw
+   global costmap 代替。相同端点在连续两帧、投影误差不超过 `0.12 m` 时才成立，单帧噪声、
+   旧帧、全 `inf`、超时帧或缺 TF 都不会触发。没有能够以 `map ← laser` 投影的有效新扫描时，
+   `0.50 s` 预检超时会安全中止任务，绝不把扫描断流或 TF 故障当作无障碍。目标已经发出后，
+   同样持续看门狗最后一帧可投影扫描；断流/TF 持续失败超过该时限会先取消目标、零速并确认
+   停车，再中止任务。两帧的源时间戳间隔也不得超过该时限。
+8. 守卫命中时，若尚未发目标就保持零速并确认底盘停止；若正在导航则按
+   `cancel_goal → 零速 → action 取消确认 → stopped odom` 执行，再记录
+   `target_guard_events` 并直接规划下一个目标。被跳过的目标不启动相机、OCR 或 360° 转圈；
+   即使跳过 12，去 23 也从车辆的实际当前位置重新规划。16 被跳过时不会伪造“到达 16”。
+9. 首个 OCR 候选会先零速并经过新鲜低速里程计停车门；若推理返回时车辆已经多转，任务
+   先回到候选帧朝向，再以任务节点连续发布角速度完成像素居中。仅在对准后再次停车确认，
+   才进行前方雷达测距、TF 投影和墙点匹配。
+10. 雷达处理使用正前方 ±3° 的有限距离中位数和同一时间的 `map ← laser` TF；最近点只在
+   JSON 的 `wall_reference_point_numbers` 中查询，误差大于 `0.18 m` 不计入正式结果。
+11. 每次运行把 `target_guard_events`、`target_scan_events` 和有效 `observations` 写入
+   `~/.ros/ucar_2026_observations/run_*/observations.json`；结束时仍需得到 3 个不同的有效
+   墙点及 OCR 内容，否则保存部分结果并将任务标为失败。
+
+从本地仓库同步本次任务文件；不要在小车端创建备份目录或压缩包：
+
+```bash
+scp ucar_ws/src/ucar_2026/scripts/production_task_2026.py \
+  ucar_ws/src/ucar_2026/scripts/production_task_geometry.py \
+  ucar_ws/src/ucar_2026/scripts/production_task_perception.py \
+  ucar_ws/src/ucar_2026/scripts/production_camera_ocr.py \
+  ucar_ws/src/ucar_2026/scripts/production_qr_classifier.py \
+  ucar@<CAR_HOST>:~/ucar_ws/src/ucar_2026/scripts/
+scp ucar_ws/src/ucar_2026/config/production_full_grid_all_numbered.json \
+  ucar@<CAR_HOST>:~/ucar_ws/src/ucar_2026/config/
+scp ucar_ws/src/ucar_2026/launch/2026.launch \
+  ucar@<CAR_HOST>:~/ucar_ws/src/ucar_2026/launch/2026.launch
+scp ucar_ws/src/ucar_2026/CMakeLists.txt \
+  ucar_ws/src/ucar_2026/package.xml \
+  ucar@<CAR_HOST>:~/ucar_ws/src/ucar_2026/
+scp ucar_ws/src/ucar_2026/test/test_production_task_geometry.py \
+  ucar_ws/src/ucar_2026/test/test_production_task_perception.py \
+  ucar_ws/src/ucar_2026/test/test_production_camera_ocr.py \
+  ucar@<CAR_HOST>:~/ucar_ws/src/ucar_2026/test/
+```
+
+部署后只能在小车 Ubuntu 18.04 构建和测试。OCR 使用小车已有的
+`live_ppocr.py`、CUDA plan 和 Python 3 OpenCV，不安装 Tesseract：
+
+```bash
+source /opt/ros/melodic/setup.bash
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+read -r -p '请输入 WSL Master 当前地址: ' MASTER_IP
+export ROS_MASTER_URI="http://${MASTER_IP}:11311"
+export ROS_IP="$(ip -4 route get "$MASTER_IP" | awk \
+  '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+cd ~/ucar_ws
+test -f /home/ucar/ocr3/ppocr_trt/python/live_ppocr.py
+test -f /home/ucar/ocr3/ppocr_trt/out/det.plan
+test -f /home/ucar/ocr3/ppocr_trt/out/rec.plan
+test -f /home/ucar/ocr3/ppocr_trt/out/keys.txt
+python3 -c 'import cv2, numpy; print(cv2.__version__)'
+python2 -m py_compile \
+  src/ucar_2026/scripts/production_task_geometry.py \
+  src/ucar_2026/scripts/production_task_perception.py \
+  src/ucar_2026/scripts/production_task_2026.py
+python3 -m py_compile src/ucar_2026/scripts/production_camera_ocr.py
+python3 src/ucar_2026/test/test_production_camera_ocr.py
+python2 -m unittest discover -s src/ucar_2026/test -p 'test_*.py' -v
+catkin_make -DCATKIN_ENABLE_TESTING=ON \
+  -DCATKIN_WHITELIST_PACKAGES="cym_planner;jie_ware;yolo2025;ucar_2026" \
+  -j2
+(cd build && ctest -R production_camera_ocr_py3 --output-on-failure)
+catkin_make run_tests_cym_planner -j2
+catkin_test_results build/test_results/cym_planner
+```
+
+第一次实车运行前，先使用默认 `manual` 模式完成静态门禁；停止该 launch 后，再运行：
+
+```bash
+read -r -p '请输入 WSL Master 当前地址: ' MASTER_IP
+bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh "$MASTER_IP" mission
+```
+
+`start_2026.sh` 的 `mission` 模式启动前会询问「是否已把车放回起点」，输入 `yes`
+才继续，其他输入直接取消启动。因为 `lidar_loc` 的启动初值固定为起点
+`(-0.25, 2.75, 0)`；若任务中途终止且已经离开起点，停止完整 launch 后必须先把
+实车放回起点，才能再次启动 mission。不得在车辆仍位于 52 或生产区其他点时直接
+重启整条定位链路；固定初值会造成地图位姿与实车位置不一致。
+
+任务节点启动后（`WAITING_FOR_ITEM` 状态）会等待**一条语音双类别指令**（2026-08-11
+起），不再从启动终端读取两个物品名。听到提示后先说唤醒词“**小飞小飞**”，再完整说：
+
+```text
+前往物品领取区，取得日用品，放置在对应仓库，并领取仿真环境中需要的食品放置在对应仓库
+```
+
+其中“日用品”和“食品”可替换为 `食品`、`日用品`、`电子产品` 中两个**不同**的类别。
+`wake_listen.py --loop --asr --set-wake 小飞小飞 --json` 槽位缺失、ASR 失败、未知类别或
+重复类别时会继续等待下一次唤醒，车辆保持静止。二维码阶段再按所说类别扫描并分类，取得
+现场二维码的实际物品名；后续播报与仿真桥接仍使用该实际物品名。无麦克风的开发测试可在
+`2026.launch` 临时传入 `item_input_mode:=stdin`，恢复旧的“现实物品名、仿真物品名”两行终端输入。
+语音类别模式必须执行二维码阶段来解析实际物品名，故不能与 `resume_production_only:=true` 组合。
+
+语音播报（USB 音箱，`/home/ucar/wake/tts_say.py`，失败不影响任务）：初始化完成
+（安全等待 + 点模式就绪）播放「初始化完成，准备开始任务」；扫码且星火分类返回后
+播放「已取得*<现实物品名>」；现实物品停入加工区后**同步播报**「已将*<物品名>*放入
+*<类别>」（播报完成才继续找仿真物品）；仿真任务完成后**同步播报**「仿真任务已
+完成，已将*<物品名>*放入*<类别>」。
+
+该模式不需要也不启动 RViz。运行时可在连接同一 Master 的诊断终端观察：
+
+```bash
+rostopic echo /ucar_2026/task_state
+rostopic echo /ucar_2026/task_result
+rostopic echo /qr_result
+ls -1dt ~/.ros/ucar_2026_observations/run_* | head -n 1
+```
+
+任务节点持续检查 `/odom_raw` 有限性和新鲜度、`odom -> base_link`、
+`map -> base_link`、move_base action 结果，以及 `crc16`、`head_len`、
+`sensor not active`、`TF_NAN_INPUT` 日志。任一安全门失败时会取消目标、关闭扫码并
+连续发布零速度。生产 OCR 阶段 `/usb_cam` 应继续存在，图像话题应维持约 30 Hz；
+Python 3 helper 只读取任务节点保存的图片，不直接持有 `/dev/ucar_video`。视觉居中期间 `/cmd_vel` 的
+预期发布者为 `/move_base` 和 `/production_task_2026`；后者只在 move_base 目标已经
+结束或取消后发布纯角速度。
+回中阶段状态为 `PRODUCTION_RECENTER_<点号>_<次数>`，此时重新由 `/move_base`
+发布速度；日志 `PRODUCTION_TASK_RECENTER_NOT_NEEDED` 表示转后误差未超过
+`0.06 m`，无需产生额外运动。`PRODUCTION_TASK_RECENTER_WARNING`、
+`PRODUCTION_TASK_NAVIGATION_WARNING` 或 `PRODUCTION_TASK_POSITION_WARNING`
+表示回中未达到预期，但任务会继续。NaN、TF 失效、传感器掉线等硬安全故障仍会停车。
+
+以下 2026-07-28 冷启动实车结果属于被本次 OCR 路线替代的历史任务，不代表新路线已验收：
+
+- 52 到达误差 `0.031 m`，识别到三个不同二维码 `…/a`、`…/d`、`…/i`；
+- 修正后的 body projection 成功通过原先被局部 253 误挡的位置；
+- 12、24、16、28、19 均到达并各完成一圈，转后位置误差最大 `0.055 m`；
+- 170 到达误差 `0.018 m`，朝向 319 校验通过；
+- 最终 `/ucar_2026/task_state=SUCCEEDED`，结果 `success: true`；
+- 全程没有 CRC、`head_len`、NaN、TF_NAN 或串口掉线。少量瞬时
+  `NO PATH`/TF 外推警告均自行恢复，move_base action 未中止。
+
+紧急停止时在运行 launch 的终端按 `Ctrl-C`；若终端丢失，先恢复本次 Master 网络变量，
+再执行：
+
+```bash
+bash ~/ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh
+```
+
+## 真机 RViz 车体模型
+
+`navigation_2026.rviz` 的 **UCar 2026 Visual Model** 显示
+`ucar_2026/urdf/ucar_2026_visual.urdf` 中的简化蓝色车体。它以已存在的 `base_link`
+为根，尺寸与全局、局部代价地图足迹一致（`0.342 m × 0.256 m`）；不发布 TF、不参与碰撞检测，
+也不改变底盘控制。红黄足迹 Marker 仍用于观察足迹和 5 cm 安全边界。
+
+部署可视车模或足迹 Marker 修复时，同步 `ucar_2026` 的 URDF 与 launch；不在小车端创建备份：
+
+```bash
+scp ucar_ws/src/ucar_2026/urdf/ucar_2026_visual.urdf \
+  ucar@<CAR_HOST>:~/ucar_ws/src/ucar_2026/urdf/
+scp ucar_ws/src/ucar_2026/launch/2026.launch \
+  ucar@<CAR_HOST>:~/ucar_ws/src/ucar_2026/launch/
+```
+
+停止旧的 `2026.launch` 后，在小车端使用正式入口重启，使其加载
+`/robot_description`；然后在 WSL 重启 `~/start_rviz.sh`：
+
+```bash
+source /opt/ros/melodic/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_IP=192.168.8.231
+export ROS_MASTER_URI=http://192.168.8.197:11311
+python2 /opt/ros/melodic/bin/roslaunch ucar_2026 2026.launch
+```
+
+If `/odom_raw` contains `x: nan` or `y: nan`, or the terminal reports
+`TF_NAN_INPUT` for `wheelodom`, publish zero velocity and restart the
+navigation/odometry chain before continuing.  Do not run a localization or
+costmap test against that state:
+
+```bash
+rostopic pub -1 /cmd_vel geometry_msgs/Twist \
+  '{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}'
+pkill -INT -f 'roslaunch ucar_2026 2026.launch' || true
+
+# In a clean terminal, then start the no-goal launch again.
+source /opt/ros/melodic/setup.bash
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_IP=192.168.8.231
+export ROS_MASTER_URI=http://192.168.8.197:11311
+python2 /opt/ros/melodic/bin/roslaunch ucar_2026 2026.launch
+```
+
+不要在同一终端重复执行 `source ~/ucar_ws/devel/setup.bash`；新的终端已由 `.bashrc`
+加载工作区。`navigation_scan_relay.py` 和历史 `yolo2025/scripts/2026.py` 必须使用
+ROS Melodic 的 Python 2。两个 launch 都通过
+`ucar_2026/scripts/run_melodic_python2.sh` 剔除 Python 3 模块目录并固定调用
+`/usr/bin/python2`。
+
+### Python 2 环境重建
+
+若日志出现以下错误，说明 Python 2 进程错误加载了 Python 3 的 `tf2` 二进制：
+
+```text
+ImportError: dynamic module does not define init function (init_tf2)
+```
+
+先停止导航并确认目标目录，再只删除工作空间中无效的 Python 3 构建产物；不得删除
+`src/`，也不得在小车保留备份目录：
+
+```bash
+pkill -INT -f 'roslaunch .*2026.launch' || true
+cd /home/ucar/ucar_ws
+test "$(readlink -f /home/ucar/ucar_ws/devel/lib/python3)" = \
+  "/home/ucar/ucar_ws/devel/lib/python3"
+catkin_make clean \
+  -DPYTHON_EXECUTABLE=/usr/bin/python2 \
+  -DCATKIN_WHITELIST_PACKAGES="cym_planner;jie_ware;yolo2025;ucar_2026"
+rm -rf /home/ucar/ucar_ws/devel/lib/python3
+catkin_make --force-cmake \
+  -DPYTHON_EXECUTABLE=/usr/bin/python2 \
+  -DCATKIN_WHITELIST_PACKAGES="cym_planner;jie_ware;yolo2025;ucar_2026"
+```
+
+重建后必须通过以下检查，输出路径只能是 `python2.7/dist-packages`：
+
+```bash
+source /opt/ros/melodic/setup.bash
+source /home/ucar/ucar_ws/devel/setup.bash
+/home/ucar/ucar_ws/src/ucar_2026/scripts/run_melodic_python2.sh -c \
+  'import rospy; import tf; from sensor_msgs.msg import LaserScan; print(tf.__file__)'
+find /home/ucar/ucar_ws/devel/lib -maxdepth 1 -type d -name 'python3*' -print
+```
+
+第二条 `find` 不应输出任何路径。之后只使用
+`bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh` 启动。
+
+## CymPlanner 真机构建与启动
+
+在小车上确认没有已有导航 launch 正在运行后执行：
+
+```bash
+cd ~/ucar_ws
+# 新开终端的 .bashrc 已加载 ROS 和工作区；不要在这里重复 source setup.bash。
+# 保留当前仍需构建的历史包，并把正式入口 ucar_2026 加入构建图。
+catkin_make -DCATKIN_WHITELIST_PACKAGES="cym_planner;jie_ware;yolo2025;ucar_2026"
+unset ROS_HOSTNAME
+read -r -p '请输入 WSL Master 当前地址: ' MASTER_IP
+export ROS_MASTER_URI="http://${MASTER_IP}:11311"
+export ROS_IP="$(ip -4 route get "$MASTER_IP" | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+roslaunch ucar_2026 2026.launch
+```
+
+当 CymPlanner 有变更时，先从本机同步源码、头文件、依赖声明和参数，再在小车端执行
+上面的 `catkin_make`。小车地址按当前网络提供，不写死旧 Wi-Fi IP：
+
+```powershell
+$CAR_HOST = '<小车当前主机名或IP>'
+git ls-files --eol `
+  ucar_ws/src/ucar_2026/scripts/navigation_scan_relay.py `
+  ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh
+scp ucar_ws/src/cym_planner/src/cym_planner.cpp \
+  "ucar@${CAR_HOST}:~/ucar_ws/src/cym_planner/src/"
+scp ucar_ws/src/cym_planner/include/cym_planner.h \
+  "ucar@${CAR_HOST}:~/ucar_ws/src/cym_planner/include/"
+scp ucar_ws/src/cym_planner/CMakeLists.txt \
+  ucar_ws/src/cym_planner/package.xml \
+  "ucar@${CAR_HOST}:~/ucar_ws/src/cym_planner/"
+scp ucar_ws/src/cym_planner/config/ucar_cym_planner_params.yaml \
+  "ucar@${CAR_HOST}:~/ucar_ws/src/cym_planner/config/"
+scp ucar_ws/src/ucar_2026/package.xml \
+  "ucar@${CAR_HOST}:~/ucar_ws/src/ucar_2026/"
+scp ucar_ws/src/ucar_2026/scripts/navigation_scan_relay.py \
+  ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh \
+  "ucar@${CAR_HOST}:~/ucar_ws/src/ucar_2026/scripts/"
+ssh "ucar@$CAR_HOST" 'chmod 755 \
+  ~/ucar_ws/src/ucar_2026/scripts/navigation_scan_relay.py \
+  ~/ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh; \
+  head -n 1 ~/ucar_ws/src/ucar_2026/scripts/navigation_scan_relay.py | od -An -tx1'
+```
+
+从 Windows 文件系统执行 `scp` 后必须显式复核脚本权限；本仓库当前索引中的这两个文件为
+普通文件模式，不能假定上传后自动保留 Linux 可执行位。`git ls-files --eol` 的工作树列
+必须为 `w/lf`，车端首行十六进制必须以 `0a` 结束且不能出现 `0d 0a`；否则
+`#!/usr/bin/env python2` 会被解释成不存在的 `python2\r`。
+
+校验上传文件时，若待校验路径以 `ucar_ws/` 开头，远程命令必须从小车家目录执行：
+
+```powershell
+ssh "ucar@$CAR_HOST" 'cd ~ && sha256sum ucar_ws/src/cym_planner/src/cym_planner.cpp ucar_ws/src/ucar_2026/package.xml'
+```
+
+不要先 `cd ~/ucar_ws` 后再使用 `ucar_ws/src/...`，否则会错误查询
+`~/ucar_ws/ucar_ws/src/...`。从 PowerShell 通过 SSH 执行包含 Bash `$()` 的命令时，应让
+远程脚本整体使用单引号，或先取得本次明确的 `ROS_IP` 后直接传值；PowerShell 中的反斜杠
+不能阻止 `$()` 被本地解释。
+
+构建只写入新的库文件，不会替换已运行进程内存中的插件。请在当前 launch 终端按 `Ctrl-C` 后，使用以下正式入口手动启动；该入口不会自动发送目标：
+
+```bash
+cd ~/ucar_ws
+source /opt/ros/melodic/setup.bash
+source devel/setup.bash
+unset ROS_HOSTNAME
+read -r -p '请输入 WSL Master 当前地址: ' MASTER_IP
+export ROS_MASTER_URI="http://${MASTER_IP}:11311"
+export ROS_IP="$(ip -4 route get "$MASTER_IP" | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+roslaunch ucar_2026 2026.launch
+```
+
+小车主机名当前只解析到无作用域的 IPv6 link-local 地址；启动前必须设置上述 `ROS_IP`，否则 roslaunch 的 XML-RPC 服务可能无法自检并导致无法启动。
+
+RViz 在控制电脑上启动，通过 ROS Master 连接小车；不要在小车端的 `2026.launch` 中启动 RViz。控制电脑的 RViz 预设文件为 `ucar_ws/src/ucar_2026/rviz/navigation_2026.rviz`。
+
+在运行 RViz 的电脑终端设置 ROS 网络环境后加载预设（将 `<控制电脑IP>` 替换为该电脑在小车同一网段的 IP）：
+
+```bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+export ROS_IP=<控制电脑IP>
+rviz -d /path/to/navigation_2026.rviz
+```
+
+也可在已打开的 RViz 中选择 **File → Open Config**，打开上述预设文件。
+
+启动后在 RViz 中将 Fixed Frame 设为 `map`，按以下顺序操作：
+
+1. 等待 `map -> odom` TF 稳定；节点会使用 launch 中配置的初始位姿。
+2. 如实际位置与初始位姿有偏差，使用 **2D Pose Estimate** 重新定位。
+
+局部膨胀半径更新为 `0.05 m`、全局膨胀半径更新为 `0.40 m` 后，必须重启小车端 `roslaunch ucar_2026 2026.launch`，使 move_base 重新加载代价地图参数。
+3. 使用 **2D Nav Goal** 发送导航目标。
+
+当 `move_base` 返回 `Goal reached.` 后，再使用 `rostopic echo -n 1 /odom` 确认线速度和角速度均为 `0.0`；这表示该目标已经结束且底盘没有继续接收运动速度。
+
+2026 任务使用 `lidar_loc` 发布 `map -> odom`；初始位姿由 `2026.launch` 的
+`initial_pose_x/y/a` 控制，默认值为 `(-0.25, 2.75, 0)`。它以 `/scan` 匹配静态地图，
+并使用同一帧激光时间戳的 `odom -> base_link` 计算 `map -> odom`，避免旋转时将新里程计
+和旧激光位姿混用。RViz 的 **2D Pose Estimate** 可在实际摆放位置存在偏差时重新定位。
+
+部署激光定位与局部 TF 修复时上传源码和两个 launch 文件，在小车端构建 `jie_ware` 后，
+再用无自动目标模式重启：
+
+```bash
+scp ucar_ws/src/ucar_2026/launch/2026.launch \
+  ucar@<CAR_HOST>:~/ucar_ws/src/ucar_2026/launch/
+scp ucar_ws/src/jie_ware/src/lidar_loc.cpp \
+  ucar@192.168.8.231:~/ucar_ws/src/jie_ware/src/
+scp ucar_ws/src/ucar_nav/launch/cym_move_base_omni_2026.launch \
+  ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/launch/
+
+ssh ucar@192.168.8.231 'source /opt/ros/melodic/setup.bash && cd ~/ucar_ws && catkin_make -DCATKIN_WHITELIST_PACKAGES="jie_ware" --pkg jie_ware'
+
+# 在小车上
+source /opt/ros/melodic/setup.bash
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_IP=192.168.8.231
+export ROS_MASTER_URI=http://192.168.8.197:11311
+python2 /opt/ros/melodic/bin/roslaunch ucar_2026 2026.launch
+```
+
+建图和导航发布的 `/scan` 仍遵循 ROS 标准 `LaserScan` 约定（`+X` 前、`+Y` 左）。但当前 YDLidar 任务地图与 `lidar_loc` 内部的 OpenCV 图像行坐标相配，`lidar_loc.cpp` 必须保留 `y_laser = -range*sin(angle)` 的内部镜像；不要仅依据通用 ROS 约定把它改成正号。更改该符号前必须以静态墙体重合率验证。
+
+当前 CymPlanner 只有一套原始真车直接巡线控制：沿全局路径选择
+`0.20 m` 外的第一个目标点，使用直线 `P=1.5、D=0.5` 和角度 `P=2.5、D=0.4`，
+不使用航向余弦降速，进入 `0.05 m` 位置容差后执行终点对正。真车命令上限仍为线速度
+`0.5 m/s`、行进和末端角速度 `1.0 rad/s`。默认 `point` 模式沿路径前视 `0.25 m`
+检查局部代价地图 `cost >= 253`。
+
+CymPlanner 只加载 `$(find cym_planner)/config/ucar_cym_planner_params.yaml`，参数根键为
+`cym_planner/CymPlanner`，运行参数位于
+`/move_base/cym_planner/CymPlanner/*`。通过 `/ucar/navigation_mode` 切换为
+`body_projection` 后，规划器把同一批前视路径点扩大为真实车体 footprint，并投影到
+同一控制周期的 local Costmap2D 快照。原始 253 是内切膨胀区，不算实际接触；
+254 是致命障碍，255 未知区继续安全拒绝。footprint 尺寸仍读取 local costmap 的
+统一车体配置；local map 同时包含 `/map` StaticLayer 和 `/scan_filtered`
+ObstacleLayer。`point` 与 `body_projection` 的控制增益和速度已经拆为
+`mode1_point`、`mode2_body_projection` 两组；兼容别名 `main_legacy` 等同
+`point`，`laser_avoidance` 等同 `body_projection`。修改 C++、头文件或依赖声明后
+必须重新构建插件并重启 launch；只修改 YAML 时无需编译，但同样必须重启。
+
+启动后必须同时核对参数与插件日志，避免 YAML 因命名空间错误而被忽略：
+
+```bash
+rosparam get /move_base/cym_planner/CymPlanner/linear_x_kd
+rosparam get /move_base/cym_planner/CymPlanner/angular_kd
+rosparam get /move_base/cym_planner/CymPlanner/obstacle_lookahead_distance
+rostopic info /move_base/cym_planner/CymPlanner/debug_map
+rostopic info /move_base/cym_planner/CymPlanner/debug_plan
+# 插件日志必须包含：initialized in point mode
+# 三个参数预期依次为：0.5、0.4、0.25
+```
+
+部署后先运行不启动车轮的构建与测试：
+
+```bash
+cd ~/ucar_ws
+source /opt/ros/melodic/setup.bash
+unset ROS_HOSTNAME
+read -r -p '请输入 WSL Master 当前地址: ' MASTER_IP
+export ROS_MASTER_URI="http://${MASTER_IP}:11311"
+export ROS_IP="$(ip -4 route get "$MASTER_IP" | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+catkin_make -DCATKIN_ENABLE_TESTING=ON \
+  -DCATKIN_WHITELIST_PACKAGES="cym_planner;jie_ware;yolo2025;ucar_2026"
+catkin_make run_tests_cym_planner
+catkin_test_results build/test_results/cym_planner
+```
+
+重新启动前设置唯一 ROS Master，并禁用自动目标：
+
+```bash
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+read -r -p '请输入 WSL Master 当前地址: ' MASTER_IP
+export ROS_MASTER_URI="http://${MASTER_IP}:11311"
+export ROS_IP="$(ip -4 route get "$MASTER_IP" | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+python2 /opt/ros/melodic/bin/roslaunch ucar_2026 2026.launch
+```
+
+确认 `/odom_raw` 全部为有限值、`odom -> base_link` 与 `map -> base_link` TF 可用后，
+才允许发送首个低风险 RViz 目标。
+
+当前 2026 导航的局部代价地图与全局代价地图使用同一足迹 `0.342 m × 0.256 m`（`±0.171 m`、`±0.128 m`），使全局路径、局部碰撞检查和 RViz 车体模型一致。局部滚动窗口为 `1.0 m × 1.0 m`、分辨率 `0.03 m`、更新/发布频率 `8/3 Hz`；全局更新/发布频率为 `3/5 Hz`；障碍物/清除范围 `3.0/4.0 m`、`inflation_radius: 0.07 m`、`cost_scaling_factor: 4.0`。真机必须保留 `map` / `base_link` 坐标系和 `/scan_filtered` 局部观测，否则会破坏 `lidar_loc` 定位与离群点过滤。body_projection 的弹性带同步限制为 `0.25 m`，避免完整 footprint 越出 1 m 局部图边界。全局代价地图 `inflation_radius` 为 `0.205 m`，全局插件顺序为 `static_layer → obstacle_layer → inflation_layer`。`body_projection` 已改为使用同一控制周期的局部代价地图快照，不再依赖全局代价地图发布；`global_costmap/always_send_full_costmap` 可按本文后续性能优化章节设为 `false`。修改代价地图或 CymPlanner 参数后，必须停止并重新执行上述 `roslaunch` 命令，运行中的 `move_base` 不会自动重新加载 YAML。
+
+当前激光数据经 `/scan_raw → navigation_scan_relay → /scan` 中继，距离保持原值；
+`lidar_loc` 始终订阅原始 `/scan`。`jie_ware/lidar_filter_node` 以 `0.10 m` 的近邻差阈值
+删除单束离群回波并发布 `/scan_filtered`；局部代价地图订阅该过滤话题，CymPlanner
+只读取局部代价地图，不再直接订阅激光。全局代价地图继续使用
+`/scan_global_obstacles`，不得把定位或全局静态墙过滤改接为 `/scan_filtered`。
+
+修改该滤波链路时，上传 `2026.launch` 和 `costmap_common_params.yaml` 并重启导航；`lidar_filter_node` 已是 `jie_ware` 的构建目标。若小车端尚未构建过该包，先执行 `catkin_make --pkg jie_ware`。无目标启动后先确认滤波话题正常，再进行导航：
+
+```bash
+rostopic hz /scan
+rostopic hz /scan_filtered
+```
+
+`/scan_filtered` 的频率应与 `/scan` 相近；它只会将孤立回波改为 `inf`，不会改变有效束的角度、时间戳或距离。若需要在 RViz 检查效果，请保留原始 `/scan` 显示并额外添加 `/scan_filtered`，不要用滤波话题替换 `lidar_loc` 输入。
+部分 YDLidar 驱动会复用 `LaserScan.header.seq`，即使时间戳不同；验证时不得把该序号当作唯一帧键，应比较话题频率与多帧有效回波统计。
+
+`ucar_bringup.launch` 中 `base_link -> laser_frame` 的静态外参为平移
+`(-0.11, 0.0, 0.165) m`、yaw `0.0 rad`。该 yaw 必须反映雷达相对车体的实际安装角；之前的 `-0.07 rad` 会令 RViz 中每帧激光相对静态地图恒定顺时针偏转约 `4°`。修改外参后无需重新编译，但必须同步 launch 并完整重启导航/底盘链路，旧 TF 发布进程不会热更新：
+
+```bash
+scp ucar_ws/src/ucar_controller/launch/ucar_bringup.launch \
+  ucar@192.168.8.231:~/ucar_ws/src/ucar_controller/launch/
+
+# 停止旧的 2026.launch 后，在小车端以无目标模式重新启动。
+source /opt/ros/melodic/setup.bash
+cd ~/ucar_ws
+source devel/setup.bash
+export ROS_IP=192.168.8.231
+export ROS_MASTER_URI=http://192.168.8.197:11311
+python2 /opt/ros/melodic/bin/roslaunch ucar_2026 2026.launch
+```
+
+重启后保持车静止，先检查 `base_link -> laser_frame` 的 yaw 为 `0`，再在 RViz 对照 `/scan` 和 `/map`。若仍存在恒定角差，只能按实测安装角重新标定该单个 yaw；不得改回定位内部的 `-sin(angle)` 或通过旋转地图掩盖问题。
+
+当前 `navigation_scan_relay.py` 只负责 `/scan_raw → /scan` 转发和全局静态墙过滤；
+`lidar_loc` 由正式 `2026.launch` 直接启动，并且是 `map -> odom` 的唯一发布者。默认目标、
+二维码扫描和生产路线属于未迁移的历史 `yolo2025/scripts/2026.py`，不属于正式入口。
+RViz 的 **2D Nav Goal** 直接发送给 `move_base`。
+
+历史 `yolo2025/scripts/2026.py` 曾在 move_base 就绪后发送一次启动测试目标：
+`map (-1.734, 2.305, yaw 1.570796 rad)`，并继续执行二维码定向扫描。以下仅保留当时的
+禁用自动目标命令供追溯，当前兼容 wrapper 已不再承载该任务逻辑，**不要执行**：
+
+```bash
+roslaunch yolo2025 2026.launch startup_goal_enabled:=false
+```
+
+## 取消导航速度中继的部署与验证
+
+以下为历史任务部署记录，当前不要执行。在本机完成备份后，当时会将任务脚本及相关文件
+同步到小车；`yolo2025/scripts/2026.py` 未迁移、未删除：
+
+```bash
+scp ucar_ws/src/ucar_nav/launch/cym_move_base_omni_2026.launch \
+  ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/launch/
+scp ucar_ws/src/yolo2025/scripts/2026.py \
+  ucar@192.168.8.231:~/ucar_ws/src/yolo2025/scripts/
+scp ucar_ws/src/cym_planner/config/ucar_cym_planner_params.yaml \
+  ucar@192.168.8.231:~/ucar_ws/src/cym_planner/config/
+scp ucar_ws/src/yolo2025/scripts/2026.py \
+  ucar@192.168.8.231:~/ucar_ws/src/yolo2025/scripts/
+scp ucar_ws/src/yolo2025/launch/2026.launch \
+  ucar@192.168.8.231:~/ucar_ws/src/yolo2025/launch/
+scp ucar_ws/src/jie_ware/src/lidar_loc.cpp \
+  ucar@192.168.8.231:~/ucar_ws/src/jie_ware/src/
+scp ucar_ws/src/ucar_controller/config/driver_params_mini.yaml \
+  ucar@192.168.8.231:~/ucar_ws/src/ucar_controller/config/
+```
+
+在小车端验证 Python 语法和 launch 图，再停止旧导航进程并重启。启动时禁用默认测试目标，待确认话题图正确后再从 RViz 发目标：
+
+```bash
+cd ~/ucar_ws
+python3 -m py_compile src/yolo2025/scripts/2026.py
+roslaunch --nodes yolo2025 2026.launch
+pkill -f 'roslaunch yolo2025 2026.launch' || true
+export ROS_IP=192.168.8.231
+export ROS_MASTER_URI=http://192.168.8.197:11311
+roslaunch yolo2025 2026.launch startup_goal_enabled:=false
+```
+
+运行后，`rostopic info /cmd_vel` 应显示发布者为 `/move_base`、订阅者为 `/base_driver`，且不应存在 `/teb_cmd_vel`。以下命令应分别得到 `1.0`、`1.0`、`1.0`、`3.0` 与 `3.14`；同时，启动日志应出现 `cym_planner initialized` 且两个速度均为 `1.00`：
+
+```bash
+rosparam get /move_base/cym_planner/CymPlanner/max_vel_x
+rosparam get /move_base/cym_planner/CymPlanner/max_vel_theta
+rosparam get /move_base/cym_planner/CymPlanner/final_yaw_max_vel
+rosparam get /base_driver/linear_speed_max
+rosparam get /base_driver/angular_speed_max
+```
+
+回滚时，从本机 `back/2026-07-14-speed-x5-gain-x6-before-deploy/` 中已校验的两个配置文件重新执行对应 `scp` 命令，再重启上述 launch；不得在小车端保存备份。
+
+历史任务完成静态检查、确认路径清空且急停可用后，曾使用以下命令重启并发送旧
+`2026.py` 的默认目标 `map (-1.734, 2.305, yaw -1.570796)`；当前不要执行：
+
+```bash
+pkill -INT -f 'roslaunch yolo2025 2026.launch' || true
+cd ~/ucar_ws
+export ROS_IP=192.168.8.231
+export ROS_MASTER_URI=http://192.168.8.197:11311
+roslaunch yolo2025 2026.launch startup_goal_enabled:=true
+```
+
+测试结束后，使用 `rostopic echo -n 1 /move_base/status` 检查结果中是否出现 `status: 3` 和 `Goal reached.`；再检查 `/odom` 的线速度、角速度均为 `0.0`。
+
+## 备份策略
+
+现有完整备份可用于需要时的回滚；常规修改和部署不再额外创建备份。若未来明确需要新备份，只能存放在本地 `D:\WORK\ALLCODE\smartcar2026\back\`；小车端不创建或保留备份目录、压缩包或副本。若发现小车端历史备份，先迁移并校验到本地 `back/`，再从小车端清理。
+
+## 检查插件是否可发现
+
+```bash
+rospack plugins --attrib=plugin nav_core | grep cym_planner
+```
+
+## QR Code 扫描
+
+二维码序列正常完成并识别至少 `3` 个不同二维码后，任务在 `0.1 s` 后进入中部生产网格。它保留普通 `move_base` 全局路径规划，且在向每一个格心发送目标前调用 `/move_base/make_plan`；无有效路径则零速度停止，不会直线穿墙。网格路线严格读取 `production_square_centers.json`，当前编号顺序为 `2 → 12 → 22 → 32 → 31 → 21 → 11 → 1`，所有停靠点均为 JSON 中的格心。
+
+每个请求的对角路线会先补成格心折线，再逐个交给 `move_base`：规则为先横向、后纵向，因此 `1 → 26` 自动变为 `1 → 6 → 26`（6 与 1 同行、与 26 同列）。每段平移都由 `move_base` 规划到下一格心，并以该段的**到达方向**结束；到达格心后，任务再以 `linear.x=0`、最大 `0.5 rad/s` 的限时原地对准下一段方向，完成后才发送下一段规划目标。这样转向只发生在已指定的格心；若 `8 s` 内仍不能对准即零速度停止，不会在 31 号点无限转向。CymPlanner 始终使用普通模式，任务速度通过 `task_max_vel` 限为 `0.25 m/s`，不发送横向速度。CymPlanner 实际以 `0.05 m` 完成目标；由于 `lidar_loc` 可在 action 回调前后刷新几毫米，回调复核容差为 `0.08 m`，超过该值才零速度停止。
+
+### Dynamic obstacle propagation
+
+启动、默认导航和二维码扫描期间，局部障碍层消费 `/scan_filtered`，全局障碍层消费 `/scan_global_obstacles`。扫码完成、进入中部生产网格时，`navigation_2026` 仅通过 dynamic-reconfigure 禁用**局部**障碍层；全局障碍层保持启用且不清图，因而原有全局代价始终保留。任务停止向 `/scan_global_obstacles` 发布新的扫描，冻结全局障碍层的新增标记和清除射线；定位 `/scan` 不受影响。阶段完成、故障停车或节点退出时，恢复局部障碍层和全局扫描发布，不调用 `/move_base/clear_costmaps`。
+
+### RViz 碰墙判定
+
+`2026.launch` 现在加载仅用于 RViz 的 `robot_description`，因此预设会显示固定于 `base_link` 的蓝色简化车体模型。`navigation_2026` 仍会在 `/navigation_2026/footprint` 发布两个带单位四元数姿态的 Marker：红框为与全局/局部代价地图一致的足迹 `[[0.171, -0.128], [0.171, 0.128], [-0.171, 0.128], [-0.171, -0.128]]`，黄框为其外扩 `0.05 m` 的安全边界。若 `/scan` 的红色点进入黄框，应视为碰墙风险并停车检查；进入红框则视为已接触或定位/激光异常。模型与 Marker 都只用于可视化，不改变代价地图或碰撞控制。
+
+The global scan filter is fail-closed: if the static-map mask is not ready or the
+`map <- laser_frame` transform is unavailable at a scan timestamp, historical `2026.py`
+publishes an all-infinite scan instead of forwarding vehicle-frame points into
+the map-frame global obstacle layer. `observation_persistence` is `0.0`, so a
+stale transformed frame is not retained while the vehicle rotates. The local
+costmap continues to consume raw `/scan` for immediate collision avoidance, but
+its local observation persistence is also `0.0` and its TF tolerance is `0.30 s`;
+this prevents old scan poses from leaving a rotating obstacle trail.
+
+The local `plugins` list must be nested under `local_costmap` and contain only
+`ObstacleLayer` plus `InflationLayer`. Do not add the static map to this rolling
+window: the global layer already owns static walls, while the local layer must
+only reflect live collision observations. Its `global_frame` is `map`, matching
+the localization output and RViz fixed frame; do not change it back to `odom`
+while `lidar_loc` is responsible for localization.
+
+以下是中部生产网格历史任务部署记录，当前不要执行；该能力来自未迁移的
+`yolo2025/scripts/2026.py`，不属于正式 `ucar_2026` launch：
+
+```bash
+ssh ucar@192.168.8.231 'mkdir -p ~/ucar_ws/src/yolo2025/config'
+scp ucar_ws/src/yolo2025/scripts/2026.py ucar@192.168.8.231:~/ucar_ws/src/yolo2025/scripts/
+scp ucar_ws/src/yolo2025/launch/2026.launch ucar@192.168.8.231:~/ucar_ws/src/yolo2025/launch/
+scp ucar_ws/src/yolo2025/config/production_square_centers.json ucar@192.168.8.231:~/ucar_ws/src/yolo2025/config/
+scp ucar_ws/src/yolo2025/CMakeLists.txt ucar@192.168.8.231:~/ucar_ws/src/yolo2025/
+scp ucar_ws/src/yolo2025/package.xml ucar@192.168.8.231:~/ucar_ws/src/yolo2025/
+
+cd ~/ucar_ws
+source /opt/ros/melodic/setup.bash
+chmod +x src/yolo2025/scripts/2026.py
+catkin_make -DCATKIN_WHITELIST_PACKAGES="jie_ware;yolo2025"
+source devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_IP=192.168.8.231
+export ROS_MASTER_URI=http://192.168.8.197:11311
+roslaunch yolo2025 2026.launch
+```
+
+### Task-map global route check
+
+The current task map has a narrow doorway and a slight laser/static-map offset.
+Keep the global plugin order as `static_layer`, `obstacle_layer`, then
+`inflation_layer`; the global obstacle source must be `/scan_global_obstacles`,
+and the global inflation radius must remain `0.215 m`（2026-08-10 起，原 0.205；
+配置文件 `config/testnav20260721/global_costmap_common.yaml`）。After deploying
+`global_costmap_params.yaml`, restart the launch and use the no-motion probe
+below before running the automatic task:
+
+```bash
+# 历史命令，仅记录，当前不要执行。
+pkill -INT -f 'roslaunch yolo2025 2026.launch' || true
+roslaunch yolo2025 2026.launch startup_goal_enabled:=false
+rosservice call /move_base/make_plan "start: {header: {frame_id: map}, pose: {position: {x: -0.25, y: 2.75, z: 0.0}, orientation: {w: 1.0}}} goal: {header: {frame_id: map}, pose: {position: {x: -1.734, y: 2.305, z: 0.0}, orientation: {z: 0.707107, w: 0.707107}}} tolerance: 0.0"
+```
+
+The response must contain a nonempty `plan.poses` list. Stop the probe with
+`pkill -INT -f 'roslaunch yolo2025 2026.launch'`, then start the historical normal task
+(record only; do not execute now):
+
+```bash
+roslaunch yolo2025 2026.launch
+```
+
+Confirm that the filtered global scan is live before the task is started:
+
+```bash
+rostopic hz /scan_global_obstacles
+```
+
+It should publish while `/scan` continues to feed `lidar_loc` and the
+local costmap. The filtered topic intentionally has fewer valid returns because
+mapped static walls are removed from global obstacle marking. Until the static
+wall mask is ready at launch, this topic intentionally contains no valid
+returns; the global static layer remains active throughout that short interval.
+
+The normal launch waits 15 seconds before it begins the startup readiness
+check, then requires three seconds of stable `map -> base_link` translation and
+five consecutive nonempty global plans. Do not shorten this delay while the
+laser localization is still settling after power-on.
+
+### QR 服务器（192.168.8.1）
+
+二维码接口服务器运行在局域网网关 `192.168.8.1`（端口 `3663`）。通过 SSH 登录该
+服务器后手动启动 HTTP 服务；服务器侧不依赖 ROS，也不是小车 ROS Master：
+
+```bash
+ssh -l root 192.168.8.1
+# 密码：051520zyfZYF
+python3 /root/server.py
+```
+
+启动后小车端即可查询 `http://192.168.8.1:3663/<字母>` 获取二维码内容对应的 JSON
+结果。若服务器未启动或端口不可达，二维码识别仍可通过 `/qr_result` 正常发布，
+只是 `/qr_api_result` 查询失败。
+
+二维码扫描节点使用 `/usb_cam/image_raw`，原始识别文本发布到 `/qr_result`。单独使用摄像头和扫描器：
+
+首次部署或修改二维码脚本后，在小车端构建该包。工作区已有 CymPlanner 构建白名单时，保留原包并加入 `yolo2025`：
+
+```bash
+source /opt/ros/melodic/setup.bash
+cd ~/ucar_ws
+catkin_make -DCATKIN_WHITELIST_PACKAGES="cym_planner;jie_ware;yolo2025" --pkg yolo2025
+```
+
+```bash
+cd ~/ucar_ws
+roslaunch yolo2025 qrcode.launch
+rostopic echo /qr_result
+```
+
+若摄像头已由其他 launch 启动，避免重复占用设备：
+
+```bash
+roslaunch yolo2025 qrcode.launch start_camera:=false
+```
+
+二维码内容为 `a` 至 `i`（或 URL 路径最后一段为该字母）时，启用接口查询并查看 JSON 结果：
+
+```bash
+roslaunch yolo2025 qrcode.launch api_enabled:=true
+rostopic echo /qr_api_result
+```
+
+接口查询目标默认为 `http://192.168.8.1:3663`。扫描开关兼容旧任务话题：
+
+```bash
+rostopic pub -1 /qrcode_start_flag std_msgs/Int8 "data: 1"
+rostopic pub -1 /qrcode_start_flag std_msgs/Int8 "data: 0"
+```
+
+历史 `roslaunch yolo2025 2026.launch` 配合 `yolo2025/scripts/2026.py` 时，默认导航目标为顺时针 `270°`（二维码 `d`）。到点后每个朝向静止 `3.5 s` 扫描，再由 move_base/CymPlanner 向当前 `map -> base_link` 位置依次发送 `yaw=π` 扫描 `a`、`yaw=-π/2` 扫描 `i`；最终停在顺时针 `90°`（ROS `yaw=-π/2`）。3.5 秒来自实车扫码器约 `2~3.4 s` 的稳定解码延迟。二维码在整个扫描阶段均计入结果。每个定向目标最多等待 `6 s`，超时后任务取消该旋转并扫描当前朝向，避免持续原地旋转。终端输出 `QR_SCAN_RESULT`、`QR_SCAN_GOAL_TIMEOUT` 与 `QR_SCAN_FINISHED`。此段仅为历史记录，当前不要执行；正式 `ucar_2026` launch 不启动该任务。
+
+当二维码序列正常完成且已识别至少 `3` 个不同二维码时，任务禁用局部动态激光障碍层，并冻结全局障碍扫描输入（保留已有全局代价），仍通过 `move_base` 逐个规划生产格心路线 `2 → 12 → 22 → 32 → 31 → 21 → 11 → 1`。若请求中的相邻点不同行也不同列，先自动加入“起点行 + 终点列”的格心，例如 `1 → 26` 变为 `1 → 6 → 26`，再依序发送这些目标。每次到达格心后先执行有限时的原地朝向对准，再发送下一目标；它始终将 `/move_base/cym_planner/CymPlanner/holonomic_mode` 设为 `false`，并以 `0.25 m/s` 限制任务速度。二维码不足、扫描超时、任一全局计划/目标失败、到点复核失败、朝向 `8 s` 未收敛、局部层开关失败或无法读取 `map -> base_link` 时，立即清零速度并停止。
+
+本地修改 CymPlanner 后，小车部署前需重新构建该包：
+
+```bash
+source /opt/ros/melodic/setup.bash
+cd ~/ucar_ws
+catkin_make --pkg cym_planner
+source devel/setup.bash
+```
+
+二维码扫描依赖 `odom -> base_link` TF 计量实际旋转角度。若该 TF 连续 5 次不可用，任务会立即发布零速度并以 `QR_SCAN_FINISHED reason=odom transform unavailable` 停止扫描；先排除里程计 `NaN` 后再重试。
+
+预期输出包含 `cym_planner_plugin.xml`。
+
+## 手动建图、键盘遥控与替换任务地图
+
+此模式用于实物赛道与静态任务地图不一致时重建地图。它只启动底盘、激光、
+原始激光转发和 `gmapping`，不启动 `map_server`、`lidar_loc`、`move_base`、相机或自动任务；
+因此启动前必须先在正在运行 `2026.launch` 的终端按 `Ctrl-C`。
+
+部署新脚本和启动文件后，在小车端构建一次 `yolo2025`：
+
+```bash
+source /opt/ros/melodic/setup.bash
+cd ~/ucar_ws
+catkin_make --pkg yolo2025
+source devel/setup.bash
+```
+
+第一个终端启动 SLAM 建图（默认移动速度为 `0.12 m/s`、转速为 `0.45 rad/s`）：
+
+```bash
+cd ~/ucar_ws
+source /opt/ros/melodic/setup.bash
+source devel/setup.bash
+export ROS_IP=192.168.8.231
+export ROS_MASTER_URI=http://192.168.8.197:11311
+roslaunch yolo2025 mapping.launch
+```
+
+确认终端显示 `slam_gmapping` 已启动后，在**第二个终端**设置相同 ROS 环境并运行：
+
+```bash
+cd ~/ucar_ws
+source /opt/ros/melodic/setup.bash
+source devel/setup.bash
+export ROS_IP=192.168.8.231
+export ROS_MASTER_URI=http://192.168.8.197:11311
+rosrun yolo2025 mapping_keyboard.py
+```
+
+建图 launch 还应显示 `mapping_scan_relay: /scan_raw -> /scan is ready`；这是为了让
+`gmapping` 接收底盘激光驱动固定发布的 `/scan_raw`。若 `s` 后持续显示
+`Waiting for the map`，先不要按 `t`，检查第一个终端是否有这条日志。
+
+键盘程序需要直接占用第二个终端：`W`/上箭头前进，`X`/下箭头后退，`A`/左箭头左转，
+`D`/右箭头右转，空格立即停车。松开按键约 `0.35 s` 后也会自动发布零速度。
+默认线速度为 `0.12 m/s`、转速为 `0.45 rad/s`。运行中按 `+` 或 `=` 每次把线速度加
+`0.02 m/s`，按 `-` 每次减 `0.02 m/s`（范围 `0.02~0.50 m/s`）；按 `]` 或 `[` 每次把
+转速加或减 `0.05 rad/s`（范围 `0.10~1.50 rad/s`）。按 `v` 显示当前两个值。
+按 `s` 将当前 `/map` 暂存到 `/tmp`；按 `t` 仅在本次会话已成功保存后，将该地图直接替换
+`ucar_nav/maps/iflysse_2026_direct.pgm` 和 `.yaml`，并删除临时地图，不在小车端保留备份。
+按 `q` 停车并退出。替换完成后，在两个终端分别退出建图和键盘程序，再重新启动
+`roslaunch ucar_2026 2026.launch`，新地图才会被 `map_server` 和导航代价地图加载。
+
+### 从 `ros_map.zip` 恢复任务地图
+
+`ros_map.zip` 的 `ros_map/iflysse_2026_direct.pgm` 和 `.yaml` 是 5 m × 6 m 的任务地图。
+恢复时直接替换本地 `ucar_nav/maps/iflysse_2026_direct.*`，不创建新备份。同步到小车后必须
+重启导航，运行中的 `map_server` 不会自动读取替换后的文件：
+
+当前归档的 SHA-256 为
+`333760de3ca64de36906833f7cea895a52ae9979694dfeb3b45c6a4e0ec1d01a`；其中主地图
+PGM 的 SHA-256 为
+`2308ab7d197720ec1e50701727ed5a72a1d9ba551c4bf5371126257d867f9f9b`，YAML 为
+`1cdad0e7008f827ee37f246722dc79e9a2336a39faaff2a68f7a94458db627eb`。归档还包含
+同名的 metadata 和 preview，供本地核验；小车端的 `map_server` 只读取 PGM 和 YAML。
+
+```bash
+scp ucar_ws/src/ucar_nav/maps/iflysse_2026_direct.pgm \
+  ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/maps/
+scp ucar_ws/src/ucar_nav/maps/iflysse_2026_direct.yaml \
+  ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/maps/
+
+# 在小车上；先停止旧 launch
+source /opt/ros/melodic/setup.bash
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_IP=192.168.8.231
+export ROS_MASTER_URI=http://192.168.8.197:11311
+python2 /opt/ros/melodic/bin/roslaunch ucar_2026 2026.launch
+```
+
+## Git 与 GitHub 私有仓库
+
+首次将本工作区发布到 GitHub 前，先确认忽略规则没有遗漏本地归档、模型权重或设备配置：
+
+```bash
+git status --short
+git check-ignore -v ucar_ws_source.tar.gz \
+  simulation/ \
+  ucar_ws/src/ucar_yolo/scripts/yolov4.weights \
+  ucar_ws/src/xf_mic_asr_offline/config/appid_params.yaml
+```
+
+初始化根仓库并完成首次提交后，使用已登录的 GitHub CLI 创建私有仓库并推送：
+
+```bash
+git init -b main
+git config core.autocrlf false
+git add -A
+git commit -m "chore: prepare SmartCar 2026 workspace"
+gh repo create smartcar2026 --private --source . --remote origin
+git push -u origin main
+```
+
+后续同步前应先检查变更和忽略项，再提交并推送：
+
+```bash
+git status --short
+git add <changed-files>
+git commit -m "<summary>"
+git push
+```
+
+仓库默认私有。不要用 `--public` 发布设备地址、地图、模型、厂商资源或任何本机凭据；模型权重和 `appid_params.yaml` 保持为本地配置。
+
+### `simulation_real` 真机发布分支
+
+`simulation_real` 只发布真机导航所需的源码、地图、配置和文档。根目录
+`simulation/` 是本地仿真工作区，不得加入该分支；当前分支通过 `.gitignore` 忽略它，
+且 `HEAD` 中没有这个目录。发布或复核前执行：
+
+```bash
+git switch simulation_real
+git status --short
+git check-ignore -v --no-index simulation/
+git ls-tree -d --name-only HEAD simulation
+git push
+```
+
+`git check-ignore` 应显示根 `.gitignore` 的 `/simulation/` 规则；最后一条
+`git ls-tree` 不应有输出。不要删除或改写 `size-cymplanner` 等既有远端分支。
+
+## 本机 Simulation 部署（WSL Ubuntu 20.04）
+
+将 Windows 工作区同步到 WSL 的 Linux 文件系统后构建，避免在 `/mnt/d` 上运行
+Gazebo/CMake 时出现 9P 文件系统阻塞。以下命令仅用于本机仿真：
+
+```bash
+sudo apt-get update
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  g++ dos2unix libopencv-dev \
+  ros-noetic-gazebo-ros ros-noetic-gazebo-plugins \
+  ros-noetic-gazebo-ros-control ros-noetic-navigation \
+  ros-noetic-map-server ros-noetic-robot-state-publisher \
+  ros-noetic-joint-state-publisher-gui ros-noetic-joint-state-controller \
+  ros-noetic-joint-trajectory-controller ros-noetic-position-controllers \
+  ros-noetic-control-toolbox
+
+mkdir -p ~/smartcar2026-simulation
+rsync -a --exclude build --exclude devel --exclude install \
+  /mnt/d/WORK/ALLCODE/smartcar2026/simulation/ \
+  ~/smartcar2026-simulation/
+find ~/smartcar2026-simulation/src -type f -name '*.py' -exec dos2unix {} \;
+find ~/smartcar2026-simulation/src/car3/scripts -type f -name '*.py' -exec chmod +x {} \;
+chmod +x ~/smartcar2026-simulation/start_v3_clean.sh
+
+cd ~/smartcar2026-simulation
+source /opt/ros/noetic/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+export ROS_IP=192.168.8.197
+export DISABLE_ROS1_EOL_WARNINGS=1
+catkin_make -j2
+```
+
+若 Windows/WSL 当前没有分配 `192.168.8.197`（例如未接入小车局域网），只为
+本机仿真可在 WSL 回环接口临时添加该地址。不要在控制电脑已持有该实体地址时重复
+添加，也不要把这个回环地址用于小车通信：
+
+```bash
+sudo ip address add 192.168.8.197/32 dev lo
+~/start_ros_master.sh
+```
+
+在另一个已设置相同 ROS 环境的终端中启动准备阶段。它不执行取放任务，也不发送
+导航目标；`gui:=false rviz:=false` 适合无界面验证：
+
+```bash
+cd ~/smartcar2026-simulation
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+export ROS_IP=192.168.8.197
+export DISABLE_ROS1_EOL_WARNINGS=1
+roslaunch car3 task3_prepare.launch gui:=false rviz:=false
+```
+
+使用 `gui:=true rviz:=true` 打开 Gazebo 和 RViz。验证时只读检查 ROS Master、节点、
+控制器及核心话题：
+
+```bash
+rosparam list
+rosnode list
+rosservice call /controller_manager/list_controllers
+rostopic list
+```
+
+### Simulation CymPlanner 前视 footprint 验收
+
+该改动增加了 `visualization_msgs` 依赖并修改了 `cym_planner` C++ 源码；首次
+同步后必须重新构建该包。以下命令仅用于本机 WSL 仿真，不会启动小车本机
+`roscore`。每个 `source` 之后都显式恢复唯一的 WSL ROS Master：
+
+```bash
+cd ~/smartcar2026-simulation
+source /opt/ros/noetic/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+export ROS_IP=192.168.8.197
+catkin_make --pkg cym_planner
+source devel/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+export ROS_IP=192.168.8.197
+roslaunch car3 task3_prepare.launch gui:=false rviz:=false
+```
+
+在另一个已加载相同 ROS 环境的 WSL 终端中，以下只读检查应显示 `0.3`，并在
+规划器收到路径后显示 latched Marker：
+
+```bash
+cd ~/smartcar2026-simulation
+source /opt/ros/noetic/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+source devel/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+export ROS_IP=192.168.8.197
+rosparam get /move_base/CymPlanner/obstacle_lookahead_distance
+rostopic echo -n 1 /move_base/CymPlanner/lookahead_footprint
+```
+
+`task3_prepare.launch` 不发送导航目标。若需要发送会导致运动的目标以验证 Marker
+位置，先检查 `/odom_raw` 和 `odom -> base_link`、`map -> base_link` TF。只要出现
+`NaN` 或 `TF_NAN_INPUT`，先发布零速度并重启导航/底盘里程计链路，确认恢复有限值
+和两个 TF 后才可继续。
+
+### Simulation 物块可见性验收
+
+`task3_prepare.launch` 启动完成后，确认 `/gazebo/get_world_properties`
+的 `model_names` 同时包含 `cube_0`、`cube_1`、`cube_2`。若模型实体存在但
+Gazebo 中不可见，检查 `src/car3/models/cube/model_*.sdf` 的 visual mesh URI
+必须是可移植的 `model://cube/meshes/cube_*.obj`，不得包含特定机器的绝对
+`file:///...` 路径。`v3_cym_gazebo.launch` 必须在启动 `empty_world.launch`
+（即 `gzserver`）之前设置 `GAZEBO_MODEL_PATH`，否则服务端无法解析该 URI。
+
+```bash
+cd ~/smartcar2026-simulation
+source /opt/ros/noetic/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+export ROS_IP=192.168.8.197
+source devel/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+export ROS_IP=192.168.8.197
+rosservice call /gazebo/get_world_properties
+```
+
+### Simulation 场区文字标识验收
+
+食品、日用品和电子产品场区的墙面文字由 `math.world` 的 `wall_food`、
+`wall_daily` 和 `wall_electronics` mesh 提供。它们必须使用
+`model://sign/meshes/...` URI；`src/car3/models/sign/` 必须同时包含
+`model.config` 和 `model.sdf`，使 Gazebo 能从启动前设置的
+`GAZEBO_MODEL_PATH` 中定位资源。启动后在 Gazebo 视图确认三块文字墙可见。
+
+```bash
+cd ~/smartcar2026-simulation
+grep -n 'model://sign/meshes' src/car3/world/math.world
+test -f src/car3/models/sign/model.config
+test -f src/car3/models/sign/model.sdf
+```
+
+## 2026 局部代价地图与仿真对齐
+
+本次仅将真机任务的局部代价地图几何和数值调参与 Task 3 仿真对齐；`map` /
+`base_link` 坐标系和 `/scan_filtered` 输入仍是实车专用接口。不要为了文本一致而改用
+仿真的 `odom`、`base_footprint` 或原始 `/scan`，否则会破坏 `lidar_loc` 与离群点
+过滤链路。
+
+以下为历史任务脚本与局部代价地图对齐记录，当前不要执行。先在本机检查
+`yolo2025/scripts/2026.py` 和配置，再同步当时的四个文件；不要在小车端创建备份：
+
+```bash
+python3 -m py_compile ucar_ws/src/yolo2025/scripts/2026.py
+
+scp ucar_ws/src/yolo2025/scripts/2026.py \
+  ucar@192.168.8.231:~/ucar_ws/src/yolo2025/scripts/
+scp ucar_ws/src/yolo2025/launch/2026.launch \
+  ucar@192.168.8.231:~/ucar_ws/src/yolo2025/launch/
+scp ucar_ws/src/ucar_nav/launch/cym_move_base_omni_2026.launch \
+  ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/launch/
+scp ucar_ws/src/ucar_nav/config/omni_test20250620/local_costmap_params.yaml \
+  ucar@192.168.8.231:~/ucar_ws/src/ucar_nav/config/omni_test20250620/
+```
+
+在小车端先静态验证，再停止旧导航并以无自动目标模式启动。以下均为历史命令，当前不要
+执行；所有 `source` 完成后都要显式恢复唯一的 WSL Master：
+
+```bash
+source /opt/ros/melodic/setup.bash
+export ROS_MASTER_URI=http://192.168.8.197:11311
+cd ~/ucar_ws
+python2 -m py_compile src/yolo2025/scripts/2026.py
+catkin_make --pkg yolo2025
+source devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_IP=192.168.8.231
+export ROS_MASTER_URI=http://192.168.8.197:11311
+roslaunch --nodes yolo2025 2026.launch
+
+# 停止旧 2026.launch 后执行；不允许小车端启动 roscore。
+python2 /opt/ros/melodic/bin/roslaunch yolo2025 2026.launch startup_goal_enabled:=false
+```
+
+启动后先做静态和零运动检查，只有 `/odom_raw` 为有限值且两个 TF 都可用时，才允许
+在 RViz 发送导航目标：
+
+```bash
+rosparam get /move_base/local_costmap/footprint
+rosparam get /move_base/local_costmap/width
+rosparam get /move_base/local_costmap/height
+rosparam get /move_base/local_costmap/resolution
+rosparam get /move_base/local_costmap/inflation_layer/inflation_radius
+rosparam get /move_base/local_costmap/inflation_layer/cost_scaling_factor
+rostopic echo -n 1 /odom_raw
+rosrun tf tf_echo odom base_link
+rosrun tf tf_echo map base_link
+```
+### 完整自动任务
+
+完整任务会执行默认启动目标、`d → a → i` 二维码方向扫描，随后按
+`2 → 12 → 22 → 32 → 31 → 21 → 11 → 1` 运行生产路线。正式导航与 RViz
+先以无运动模式启动并完成安全门检查，然后在车端停止该 launch，再用以下命令启用任务：
+
+```bash
+unset ROS_HOSTNAME
+export ROS_MASTER_URI="http://${MASTER_IP}:11311"
+export ROS_IP="$(ip -4 route get "$MASTER_IP" | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+roslaunch yolo2025 2026.launch full_task_enabled:=true
+```
+
+完整任务模式由 `navigation_2026` 独占 `/scan_raw → /scan` 和
+`/scan_global_obstacles` 转发，独立 `navigation_scan_relay` 不启动；二维码节点复用
+正式入口中的 `/usb_cam`，不会重复打开摄像头。
+
+## 2026 CymPlanner 两模式参数与受限横移
+
+`ucar_cym_planner_params.yaml` 的控制参数分为两套：
+
+- `mode1_point/*`：二维码/普通点碰撞阶段；当前 2026 自动任务的 52、二维码朝向、
+  生产路线和 OCR 复拍导航均锁定在这一模式；
+- `mode2_body_projection/*`：真实车体实验和手工回退模式；当前自动任务不会发布它。
+
+当前前视点回退沿用 `mode1_point` 已有速度，未借此改动速度参数。若以后明确要调整
+自动任务速度，应调整模式 1 的 `max_vel_x`、`max_vel_theta`，并重新验证门洞；模式 2 的
+`heading_slowdown_min_scale` 与 `command_sweep_*` 不在当前自动任务控制链上。YAML 修改后
+必须重启 move_base 才会加载。
+`command_sweep_time` 和 `command_sweep_step` 控制候选 Twist 的未来车体扫掠，
+生产模式默认 `0.40 s`、`0.025 s`，不应为了提速而关闭。模式 2 的
+`command_sweep_time` 若配置为 `0` 或负数，规划器会记录错误并强制恢复为
+`0.40 s`；`command_sweep_step` 若为 NaN、Inf、`0` 或负数，会强制恢复为
+`0.025 s`。若日志出现 `control cycle exceeded 50 ms`，先停止实车运动，再
+评估代价地图大小和 `command_sweep_step`，不得通过关闭
+`command_sweep_time` 绕过保护。
+
+受限横移当前必须保持 `escape_enabled: false`。首版实现还缺少完整状态保持、
+全接触格统计和本地动态障碍检查；当前源码也会拒绝任何 `true` 请求。
+模式切换只能在车辆已停止、两个导航目标之间执行，不允许运动中切换。
+
+`elastic_enabled=true` 是模式 2 的预防性局部带状路径，不是脱困横移：当前真实
+footprint 必须完全安全。前视 footprint 一旦触及 local `254/255`，或其 raw 代价达到
+`elastic_activation_cost`（默认 `220`），就在 `0.25 m` 带内枚举 `±0.02..±0.12 m`
+平滑偏移。候选首先以完整轨迹的**最高 footprint raw 代价**排序，再以平均代价排序，
+因此选择 local costmap 中净空最大的安全带；只有代价完全相同时才优先较小偏移。每个候选
+以 `0.015 m` 以下间距投影完整 footprint 并保留现有 Twist 0.40 秒扫掠。位置与变形后
+切线朝向同时插值，旋转采样间隔不超过 `0.05 rad`；候选阶段速度固定受
+`elastic_max_vel_x`（默认 `0.07 m/s`）和 `elastic_max_vel_theta`（默认 `0.30 rad/s`）约束。
+规划器对 global plan 按弧长取 7 点，全部位置偏差不超过 `0.04 m`、切线角偏差不超过
+`0.20 rad` 才视为等价；等价 plan 不会清除已验证的带或 0.4 秒搜索计时，中段绕行等实质
+几何变化才重置。
+前视高代价而无更低代价带时，CymPlanner 立即返回失败，让 move_base 基于持续 `marking` /
+`clearing` 的 global ObstacleLayer 重规划；不会先停等 0.4 秒。当前 footprint 已接触、未知区、
+TF 或 local costmap 不新鲜时始终零速失败关闭。不要以提高 `elastic_max_lateral_offset`、放宽
+254/255 或关闭 sweep 来解决无解路径。
+
+同步修改时不得在小车端创建备份目录。以下命令只部署、构建和测试，不启动 ROS、
+不发布速度：
+
+```bash
+export VEHICLE_HOST="ucar@<按 rosmaster/NETWORK_CONFIGURATION.md 发现的当前小车 IP>"
+scp ucar_ws/src/cym_planner/CMakeLists.txt \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/"
+scp ucar_ws/src/cym_planner/src/cym_planner.cpp \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/src/"
+scp ucar_ws/src/cym_planner/include/cym_planner.h \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/include/"
+scp ucar_ws/src/cym_planner/include/cym_planner/escape_recovery.h \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/include/cym_planner/"
+scp ucar_ws/src/cym_planner/include/cym_planner/planner_tuning.h \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/include/cym_planner/"
+scp ucar_ws/src/cym_planner/include/cym_planner/local_elastic_path.h \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/include/cym_planner/"
+scp ucar_ws/src/cym_planner/config/ucar_cym_planner_params.yaml \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/config/"
+scp ucar_ws/src/cym_planner/test/escape_recovery_test.cpp \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/test/"
+scp ucar_ws/src/cym_planner/test/planner_tuning_test.cpp \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/test/"
+scp ucar_ws/src/cym_planner/test/local_elastic_path_test.cpp \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/test/"
+
+ssh "${VEHICLE_HOST}"
+cd ~/ucar_ws
+source /opt/ros/melodic/setup.bash
+catkin_make --pkg cym_planner -DCATKIN_ENABLE_TESTING=ON
+catkin_make run_tests_cym_planner
+catkin_test_results --verbose build/test_results/cym_planner
+```
+
+实车验证必须等待用户明确确认并把车放回固定起点。启动前仍按本文件的安全门检查
+`/odom_raw`、`odom → base_link`、`map → base_link` 和雷达有限值；任一 NaN 或
+`TF_NAN_INPUT` 都必须先零速停机并重启导航/里程计链路。启动后先只读确认：
+
+```bash
+rosparam get /move_base/cym_planner/CymPlanner/mode1_point
+rosparam get /move_base/cym_planner/CymPlanner/mode2_body_projection
+rosparam get /move_base/cym_planner/CymPlanner/escape_enabled
+rosparam get /move_base/cym_planner/CymPlanner/elastic_activation_cost
+```
+
+第三条必须为 `false`；第四条必须在 `1..253`，默认 `220`。若不符合，立即停止任务，
+不得进入实车运动。
+
+## 2026 相机按需采集与 local footprint 性能优化
+
+`2026.launch` 中的 `/usb_cam` 节点保持存在，但默认以
+`camera_start_suspended:=true` 启动，不使用 RViz/相机时不采集。
+任务到达 52 且停车后才开启 QR 相机；QR 结束到 OCR 模型加载完成期间再次暂停；
+生产阶段在每个目标到达后才重新开启并暖机，完成该点的 360° OCR 搜索、复拍与测距后立刻
+暂停，成功、异常或 shutdown 时也暂停。这里的“暂停”是 `VIDIOC_STREAMOFF`，减少
+USB/转换/发布负载但不释放设备 fd。若
+`use_ros_camera_for_ocr=false` 需要原生 V4L2，仍必须走任务已有的精确
+`rosnode kill /usb_cam` 释放路径。
+
+QR 每个朝向的 `qr_search_timeout`（默认 `4.0 s`）只是尚未识别时的搜索上限；
+一旦收到新的、符合去重规则的 QR 回调，任务立刻进入下一个朝向，不会为该参数
+额外停留。旧参数 `qr_hold_seconds` 仅作为未迁移旧 launch 的兼容回退。
+手工 RViz 确实需要立即图像时，显式使用
+`camera_start_suspended:=false`。最终停止服务连续两次失败时，任务会精确停止
+`/usb_cam` 节点作为资源释放兜底；任务模式下该节点不 respawn。
+
+CymPlanner 的 `debug_images_enabled` 默认必须保持 `false`。模式 2 使用 local
+Costmap2D 的单周期快照，不再订阅 `/move_base/global_costmap/costmap`。局部代价
+地图必须同时包含 `/map` StaticLayer 和 `/scan_filtered` ObstacleLayer；
+`expected_update_rate: 0.30` 配合 `costmap_ros_->isCurrent()` 令雷达断流失败关闭。
+raw 253 不表示真实 footprint 接触，raw 254/255 必须阻挡。
+
+完成依赖移除后，global costmap 可以设置：
+
+```yaml
+global_costmap:
+  always_send_full_costmap: false
+```
+
+GlobalPlanner 读取 move_base 进程内的 global Costmap2D，不依赖完整 OccupancyGrid
+发布；不得在旧版仍订阅 full costmap 时单独修改这个参数。
+
+只部署、构建和测试，不启动 ROS：
+
+```bash
+export VEHICLE_HOST="ucar@<当前小车 IP>"
+
+scp ucar_ws/src/cym_planner/src/cym_planner.cpp \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/src/"
+scp ucar_ws/src/cym_planner/include/cym_planner.h \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/include/"
+scp ucar_ws/src/cym_planner/include/cym_planner/global_cost_semantics.h \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/include/cym_planner/"
+scp ucar_ws/src/cym_planner/include/cym_planner/local_elastic_path.h \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/include/cym_planner/"
+scp ucar_ws/src/cym_planner/config/ucar_cym_planner_params.yaml \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/config/"
+scp ucar_ws/src/cym_planner/test/global_cost_semantics_test.cpp \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/test/"
+scp ucar_ws/src/cym_planner/test/local_elastic_path_test.cpp \
+  "${VEHICLE_HOST}:~/ucar_ws/src/cym_planner/test/"
+
+scp ucar_ws/src/ucar_2026/launch/2026.launch \
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/launch/"
+scp ucar_ws/src/ucar_2026/scripts/production_task_2026.py \
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/scripts/"
+scp ucar_ws/src/ucar_2026/test/test_production_task_geometry.py \
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/test/"
+scp ucar_ws/src/ucar_2026/package.xml \
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/"
+
+scp ucar_ws/src/ucar_nav/config/testnav20260721/local_costmap_params.yaml \
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_nav/config/testnav20260721/"
+scp ucar_ws/src/ucar_nav/config/testnav20260721/local_costmap_common.yaml \
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_nav/config/testnav20260721/"
+scp ucar_ws/src/ucar_nav/config/testnav20260721/global_costmap_params.yaml \
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_nav/config/testnav20260721/"
+
+ssh "${VEHICLE_HOST}"
+cd ~/ucar_ws
+source /opt/ros/melodic/setup.bash
+catkin_make --pkg cym_planner ucar_2026 -DCATKIN_ENABLE_TESTING=ON
+catkin_make run_tests_cym_planner
+catkin_make run_tests_ucar_2026
+catkin_test_results --verbose build/test_results/cym_planner
+catkin_test_results --verbose build/test_results/ucar_2026
+```
+
+用户确认静态验证时，必须先启动唯一的 WSL Master，完成所有 `source` 后再设置本次
+动态发现的 `ROS_MASTER_URI`/`ROS_IP`。任务保持禁用或把启动延时调长，依次检查：
+
+```bash
+rosparam get /move_base/cym_planner/CymPlanner/debug_images_enabled
+rosparam get /move_base/global_costmap/always_send_full_costmap
+rosparam get /move_base/local_costmap/plugins
+rosparam get /move_base/local_costmap/obstacle_layer/laser_scan_sensor/expected_update_rate
+rosservice call /usb_cam/start_capture
+rostopic echo -n 1 /usb_cam/image_raw/header
+rosservice call /usb_cam/stop_capture
+```
+
+前两项应为 `false`；local plugins 应包含 static、obstacle、inflation。停止相机后应
+不再产生新图，重新开启后必须出现更新后的时间戳。随后只做静态 make_plan，
+确认 global planner 仍能生成路径。暂停 `/scan_filtered` 的断流验证必须确认
+CymPlanner 报 local costmap not current 并保持零速。任何 NaN、TF_NAN、地图墙
+缺失、相机无新帧或重复控制周期超 50 ms 都应立即停止，不得进入完整任务。
+
+## 2026 中间区到点 OCR 转圈路线
+
+二维码阶段结束后的生产目标固定为 `12 → 22 → 13 → 23 → 14 → 24 → 15 → 25 → 16 → 26
+→ 17 → 27 → 18 → 28 → 19 → 29`（16 点，航向交替 -45°/45°），每一目标均按以下状态机
+执行：导航到点并验证到达 → 开启相机 → 原地最多顺时针转 360° 进行异步 OCR → 关闭相机
+→ 前往下一个目标。行驶途中不会调用 OCR，也不会因 OCR 结果改变当前导航目标。目标类别
+由二维码文本经星火分类得到（`PRODUCTION_TASK_TARGET_CATEGORY`）；转圈中首个目标类别
+候选被记录（`PRODUCTION_TARGET_CATEGORY_FOUND`）即停止旋转、提前退出生产循环，不再
+识别其余区域。命中后根据前向激光射线与墙的交点编号/坐标，计算停车点 = 墙交点向场内
+垂直 25 cm（如交点 300 → 停点 (0.75,1.25)=点 7；交点 455 → 停点 (2.25,0.75)=点 20），
+导航停稳后停留 `processing_dwell_seconds`（默认 3 s，`PROCESSING_DWELL_%03d`），随后
+直接导航到终点 `17 (0.75,0.75)`、航向朝点 `300 (0.75,1.5)`（顶墙），到达后
+SUCCEEDED；16 点走完仍未识别到目标类别则任务失败（MissionAbort）。
+
+转圈期间的第一个合格 OCR 候选会立即连续发布零速度并等待新鲜低速里程计；由于推理结果
+可能在车辆已继续旋转后才返回，任务会先原地回到候选帧的拍摄朝向并再次验证停车，之后才
+进行 OCR 框居中、前向雷达测距、TF 投影和墙点匹配。转满一圈仍无候选时，仅记录
+`no_ocr_after_full_turn`，立即进入下一目标，不会中止任务。非目标类别的候选只记
+`PRODUCTION_CATEGORY_IGNORED`，不停车继续转圈。
+
+运行目录的 `observations.json` 保留成功候选的 OCR、雷达和墙点结果，并以
+`target_scan_events` 审计每个目标的完整转圈或候选。生产完成后要求得到目标类别的一个
+有效墙点；找不到时安全停止并报告任务失败。`ocr_scan_rotation_speed`、
+`ocr_scan_poll_period` 和 `ocr_scan_candidate_confidence` 可在 `2026.launch` 中调节。当前
+`ocr_scan_rotation_speed=0.30 rad/s`；整圈截止时间按
+`2π / speed × rotation_timeout_scale + 2 s` 自动计算，`rotation_timeout_scale=3.5` 时约
+`75.3 s`。首次实车观察 `PRODUCTION_TASK_TURN_START` 的速度、完整圈进度、识别率和停车稳定性；
+任何 NaN、TF 或 CRC 异常均立即停车，不以提高速度绕过安全门。
+
+部署、构建和测试不启动 ROS、不发布速度。小车地址和 WSL Master 必须按
+`rosmaster/NETWORK_CONFIGURATION.md` 在当次网络中发现，示例中的变量不是固定 IP：
+
+```powershell
+$VEHICLE_HOST = 'ucar@<当前小车IP或主机名>'
+git ls-files --eol `
+  ucar_ws/src/ucar_2026/scripts/production_task_geometry.py `
+  ucar_ws/src/ucar_2026/scripts/production_task_2026.py
+
+scp ucar_ws/src/ucar_2026/scripts/production_task_geometry.py `
+  ucar_ws/src/ucar_2026/scripts/production_task_2026.py `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/scripts/"
+scp ucar_ws/src/ucar_2026/launch/2026.launch `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/launch/"
+scp ucar_ws/src/ucar_2026/test/test_production_task_geometry.py `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/test/"
+ssh $VEHICLE_HOST 'chmod 755 ~/ucar_ws/src/ucar_2026/scripts/production_task_2026.py; head -n 1 ~/ucar_ws/src/ucar_2026/scripts/production_task_2026.py | od -An -tx1'
+```
+
+然后登入小车，以本次 WSL Master 地址替换 `<MASTER_IP>`。每次 `source` 后均重新设置
+`ROS_MASTER_URI`，但下面命令只构建和运行单测：
+
+```bash
+cd ~/ucar_ws
+source /opt/ros/melodic/setup.bash
+unset ROS_HOSTNAME
+export ROS_MASTER_URI="http://<MASTER_IP>:11311"
+export ROS_IP="$(ip -4 route get <MASTER_IP> | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+catkin_make -DCATKIN_WHITELIST_PACKAGES="ucar_controller;ucar_2026" --pkg ucar_2026 -DCATKIN_ENABLE_TESTING=ON
+source devel/setup.bash
+export ROS_MASTER_URI="http://<MASTER_IP>:11311"
+export ROS_IP="$(ip -4 route get <MASTER_IP> | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+catkin_make -DCATKIN_WHITELIST_PACKAGES="ucar_controller;ucar_2026" run_tests
+catkin_test_results --verbose build/test_results/ucar_2026
+```
+
+`-DCATKIN_WHITELIST_PACKAGES="ucar_controller;ucar_2026"` 是 2026-08-07 起车上
+CMakeCache 的白名单现值（含历史残留的 ucar_controller）；若车端白名单已变，构建前先
+`grep CATKIN_WHITELIST_PACKAGES build/CMakeCache.txt` 按实际值覆盖，否则会报
+`No rule to make target 'ucar_2026/all'`。
+
+实车运行仍需用户明确确认车辆已放回固定起点。启动前按安全门检查 `/odom_raw`、
+`odom → base_link`、`map → base_link` 和雷达均为有限且新鲜；任何 NaN 或
+`TF_NAN_INPUT` 都必须先发布零速度并重启导航/里程计链路。完成后使用
+`bash ~/ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh` 停止所有任务终端，不能在后台
+遗留 launch。
+
+## 2026 全程前视点回退
+
+### 2026-08-04：三类 OCR 墙边界定位覆盖说明
+
+生产目标为 `12 → 22 → 13 → 23 → 14 → 24 → 15 → 25 → 16 → 26 → 17 → 27 → 18 → 28 →
+19 → 29`（16 点，航向交替 -45°/45°），集齐 3 个类别后提前停止去终点点 `170`（朝向点
+`319`）。每个到达点会完成一整圈静止 OCR 扫描；只有
+`日用品`、`食品`、`电子产品` 会触发停车、居中和前向雷达测量，已保存类别或其它文字不停车。
+每个新类别会立即在任务终端打印 `PRODUCTION_CATEGORY_RECORDED`，其中含路线点、墙参考编号和
+地图坐标；`observations.json` 与结果话题字段为 `recognized_categories`。前向测距必须与
+`map ← laser` 前向射线到中间墙边界的距离相差不超过 `ray_range_agreement_m`（默认 `0.30 m`），
+否则该类别不记入完成数。
+
+OCR 水平居中不再通过 `move_base` 的同位置 yaw 目标实现。首次静止抓拍取得 OCR 框中心误差后，
+任务以 P/D 直接发布受限角速度，并在**下一张 OCR 帧异步识别期间持续发布**该速度；每一张新帧只会
+更新速度，不会在中间停车。首次落入 `ocr_alignment_tolerance_px` 后才发送零速、确认连续低速 odom，
+然后进行前向激光测距、TF 投影和墙点匹配。OCR 空帧、识别超时、对准次数耗尽或安全异常均立即零速
+并确认停车。使用镜像 OCR 帧时，bbox 已处在后处理坐标系，控制器直接使用其误差符号，不能手工再
+反向设置 `ocr_alignment_kp`。若 PD 输出的角速度低于底盘 MCU 旋转死区（实车曾见 0.073 rad/s
+转不动而 0.18 rad/s 正常），连续对准仍会钳制到 `ocr_alignment_min_speed`（默认 `0.12`）以上。
+
+部署时需额外同步本次纯函数回归文件，随后仅在小车 Ubuntu 18.04 上构建和测试：
+
+```powershell
+scp ucar_ws/src/ucar_2026/scripts/production_task_2026.py `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/scripts/production_task_2026.py"
+scp ucar_ws/src/ucar_2026/test/test_production_task_geometry.py `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/test/test_production_task_geometry.py"
+```
+
+不要把多个源文件上传到包根目录。随后使用本文件既有的动态 `<MASTER_IP>` 环境设置运行
+`catkin_make --pkg ucar_2026` 和
+`catkin_make run_tests`。部署、构建
+和测试不启动 ROS、不发布速度；实车试跑仍需用户重新确认起点和安全门。
+
+### USB 扬声器音量
+
+播放设备由 `~/wake/audio_dev.py` 按 USB VID:PID 动态识别，不能把声卡序号写入代码。先查看
+当次识别的声卡索引，再将该声卡的 `PCM` 左右声道设为目标百分比并保存；下例将当前识别出的声卡
+设为 50%。这只修改播放混音，不启动 ROS、不发声、不发布速度。
+
+```bash
+python3 ~/wake/audio_dev.py
+# 将 <AUDIO_CARD> 替换为上一条输出中 UACDemoV1.0 的当前 idx。
+amixer -M -c <AUDIO_CARD> set PCM 50% unmute
+amixer -M -c <AUDIO_CARD> get PCM
+sudo alsactl store
+```
+
+当前自动任务在安全门通过、任一 `move_base` 目标前，等待 CymPlanner 连接
+`/ucar/navigation_mode` 并锁存连续发布三次 `point`。因此起点到 52、二维码朝向、
+`12 → 22 → 13 → 23 → 14 → 24 → 15 → 25 → 16 → 26 → 17 → 27 → 18 → 28 → 19 → 29`（提前
+集齐 3 类则去 170）和 OCR 居中复拍的导航目标都使用前视点模式；二维码/OCR 的
+原地扫描仍由任务直接受控的角速度完成，不属于 CymPlanner 模式切换。任务不再在二维码后
+发布 `body_projection`。CymPlanner 的 footprint、局部 costmap、动态障碍链、NaN/TF 门和
+`cost >= 253` 的前视点阻挡阈值均未放宽；body/elastic 源码保留，供后续独立实验或回退，
+但当前任务不可达这些分支。
+
+这一回退不提供 body projection 的完整矩形 footprint 与 0.40 秒 Twist sweep 证明；并且会
+使用 `mode1_point` 的现有速度上限。用户要求本轮不调速，因此首轮实车必须有人看护，并在
+门洞附近准备急停；任何 status `4`、NaN 或 `TF_NAN_INPUT` 都不得自动重跑。
+
+只部署、构建和测试（不启动 ROS、不发布速度）时，必须逐个指定远端子目录，不能把多个
+源文件一次复制到包根目录：
+
+```powershell
+$VEHICLE_HOST = 'ucar@<按 rosmaster/NETWORK_CONFIGURATION.md 发现的小车地址>'
+
+scp ucar_ws/src/ucar_2026/scripts/production_task_2026.py `
+  ucar_ws/src/ucar_2026/scripts/production_task_geometry.py `
+  ucar_ws/src/ucar_2026/scripts/production_task_perception.py `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/scripts/"
+scp ucar_ws/src/ucar_2026/test/test_production_task_geometry.py `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/test/"
+scp ucar_ws/src/ucar_2026/launch/2026.launch `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/launch/"
+```
+
+然后在车端以当次动态发现的 `<MASTER_IP>` 构建并运行 Python 2 回归：
+
+```bash
+cd ~/ucar_ws
+source /opt/ros/melodic/setup.bash
+unset ROS_HOSTNAME
+export ROS_MASTER_URI="http://<MASTER_IP>:11311"
+export ROS_IP="$(ip -4 route get <MASTER_IP> | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+catkin_make --pkg ucar_2026 -DCATKIN_ENABLE_TESTING=ON
+source devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_MASTER_URI="http://<MASTER_IP>:11311"
+export ROS_IP="$(ip -4 route get <MASTER_IP> | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+~/ucar_ws/src/ucar_2026/scripts/run_melodic_python2.sh \
+  ~/ucar_ws/src/ucar_2026/test/test_production_task_geometry.py -v
+```
+
+用户明确允许实车后，启动唯一 WSL Master 并完成原有有限 odom/TF/雷达安全门。任务内部会在
+安全门通过后、前往 52 前锁存 `point`；`rostopic echo -n 1 /ucar/navigation_mode` 只能用于
+观察该已执行的锁定，不能替代或延后任务内部的安全门。结束时仍只用
+`~/ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh` 停车/停 launch，并停止 WSL Master。
+
+停止脚本已经先发布零速度并停止车端进程；在网络不稳定时，Master 可能暂时保留已死亡节点的
+注册。**只有**先用 `ps` 确认这些进程确实已退出后，才可在仍连接同一 WSL Master 的小车终端
+清理该注册，随后关闭 Master：
+
+```bash
+ps -eo pid=,args= | grep -E \
+  '[r]oslaunch.*2026.launch|[p]roduction_task_2026|[m]ove_base|[b]ase_driver'
+# 上一条无输出后才执行：
+printf 'y\n' | rosnode cleanup
+```
+
+`rosnode cleanup` 会删除无法联系节点的 Master 注册，因此绝不能在正常运行或网络不稳定、却尚未
+确认进程退出时使用。
+
+## YOLO 图像采集（300 张，0.5 秒间隔）
+
+`yolo_dataset_capture.launch` 只启动 `/usb_cam` 和采集节点，不启动导航、底盘驱动或
+`/cmd_vel` 发布者。默认连续采集 300 张、每 0.5 秒一张（约 150 秒），并把每五张中的
+一张放入验证集，因此生成 240 张训练图和 60 张验证图：
+
+```text
+<output_root>/
+  images/train/capture_*.jpg
+  images/val/capture_*.jpg
+  labels/train/capture_*.txt
+  labels/val/capture_*.txt
+  capture_manifest.json
+```
+
+每张图会有一个同名的空 `.txt` 标签文件，表示尚待标注；标注完成后必须按 YOLO
+`class x_center y_center width height`（全部归一化）覆盖这些文件。采集完成或失败时，节点会调用
+`/usb_cam/stop_capture` 停止视频流。
+
+小车重新供电后，先按本文件的动态网络流程启动唯一 WSL Master；小车端每次 source 后重新设置
+本次 `ROS_MASTER_URI`/`ROS_IP`，然后运行：
+
+```bash
+roslaunch ucar_2026 yolo_dataset_capture.launch \
+  output_root:="$HOME/.ros/ucar_2026_yolo_dataset"
+```
+
+开始前确认没有已运行的 `2026.launch` 或其它 `/usb_cam` 占用者。不得与生产任务、原生 OCR 或
+手工相机节点同时运行。若改变数量或间隔，只通过 launch 参数显式设置，例如
+`capture_count:=300 capture_interval:=0.5`；采集期间不要关闭 Master 或拔出相机。
+
+## 星火 Spark 二维码分类（QR → 日用品/食品/电子产品）
+
+分类在二维码阶段自动执行：`production_task_2026.py` 每收到一个新二维码，就通过
+`production_qr_classifier.py` helper 调用讯飞星火（OpenAI 兼容 HTTP），失败后降级本地
+关键字映射，仍无结果只记录 `source=none` 并在终端输出"无法与模型取得联系"，不阻断任务。
+结果写入 `observations.json` 的 `qr_classifications`。
+
+二维码内容若是 `http(s)://` URL，helper 会先 GET 该 URL 并解析 JSON 的 `result` 字段
+（`code==200` 时）作为分类文本，例如 `http://192.168.8.1:3663/a` →
+`{"code":200,"result":"蛋糕"}` → 以"蛋糕"分类；GET 失败或非 JSON 则降级用 URL 原文
+分类（结果 JSON 中 `resolved_text`/`error` 字段可诊断）。**小车必须能访问该 API 服务器**：
+2026-08-06 实机验证中小车访问 `192.168.8.1:3663` 报 `Connection refused`（本机 Windows
+同 URL 正常），导致三个码全部降级用 URL 原文喂星火（X2 猜"日用品"）；需场地侧放行
+小车 IP 或检查 AP 隔离。
+
+默认 `spark_classify_enabled=true`（已启用；小车端缺密码文件时自动降级本地映射，不阻断）。
+首次启用前需在小车放好密码文件，步骤：
+
+1. 注册 https://www.xfyun.cn 并实名，控制台创建应用、领取 X2 授权体验
+   （https://xinghuo.xfyun.cn/sparkapi?scr=price）；
+2. 在控制台 https://console.xfyun.cn/services/bmx1 复制 APIPassword；
+3. 在小车本地保存密码文件（不入库、不备份到仓库），例如（APIKey:
+   `2fe221f22301690618c6756e68975b6b`，APISecret: `YjFjZWM1NDgyNzFkN2JmMjlhMWUzNjk2`，
+   合并为 `APIKey:APISecret` 格式）：
+
+   ```bash
+   printf '%s\n' '<APIPassword>' > ~/.ucar/spark_password
+   chmod 600 ~/.ucar/spark_password
+   ```
+
+4. `2026.launch` 已默认 `spark_classify_enabled=true`、
+   `spark_password_file=/home/ucar/.ucar/spark_password`。默认即深度推理
+   **Spark X2**：`spark_model=spark-x`、`spark_api_base_url=
+   https://spark-api-open.xf-yun.com/x2/chat/completions`、`spark_thinking=disabled`
+   （分类任务关闭深度思考最快；需要深度推理可改 `enabled`，此时建议把
+   `spark_timeout` 提到 60 以上）。X1.5 可用 `/v2/chat/completions`。
+5. 按本文件"ucar_2026 正式生产任务"流程部署并构建（Python 3 helper 在小车端以
+   `/usr/bin/python3` 运行，Python 2 任务端通过 stdin/stdout 与它通信）。
+
+单独验证 helper（可先在任意 Python 3 机器上做，不影响小车）：
+
+```bash
+printf '%s\n' '{"command":"classify","qr_text":"旺仔牛奶"}' \
+             '{"command":"classify","qr_text":"手机充电器"}' \
+             '{"command":"close"}' \
+  | python3 ucar_ws/src/ucar_2026/scripts/production_qr_classifier.py \
+      --password-file ~/.ucar/spark_password
+```
+
+预期依次返回 `source=spark`（或断网时 `source=local`）的 `category`：`食品`、`电子产品`。
+helper 日志位于 `~/.ros/ucar_2026_observations/spark_classifier.log`；任务日志关键字
+`PRODUCTION_SPARK_CLASSIFY`。注意：从 Windows 终端管道传中文给 Python 可能因 locale
+乱码，正式验证在小车 Ubuntu（UTF-8）上进行。
+
+**2026-08-06 实车验证**：第八次 mission 中二维码阶段三个码（262/232/295）全部完成分类，
+`qr_classifications` 记录 `source=spark`、`attempts=3`（首请求流控重试），分类结果写入
+`observations.json`；此前多次 `ascii codec` 崩溃（Py2 rospy.loginfo 中文参数、JSON 中文
+bytes）已修复，QR 阶段零崩溃，任务可正常进入生产路线巡检。
+
+## 2026 双物品主流程 + 本机仿真联动（2026-08-10 起）
+
+主流程改版：唤醒后说出**两个**物品类别（现实类别 + 仿真类别）→ 扫码并分类集齐两个
+匹配类别的码、取得实际物品名 → 第一轮找现实类别、停入并同步播报「已将X放入Y」→ 从找到点
+继续第二轮找仿真类别、停入 → POST 本机 WSL 仿真 `/start` → 轮询 `/status` 至 done
+→ 播报「仿真任务已完成，已将X放入Y」→ 终点 → **自动交接 lane_proto 巡线**
+（黄线对齐 → 等绿灯认箭头 → 进三岔口 → 巡线 → 终点横线 STOPPED）。详细行为见
+`docs/changes/2026-08-10-dual-item-simulation-link.md`。
+
+### 二维码固定观察面回归（2026-08-11 起）
+
+二维码观察面固定按 180°（262）→90°（232）→-90°（295）推进。某面收到二维码但
+物品名不属于两个输入目标时，日志应出现
+`PRODUCTION_QR_FACE_REJECTED ... advance_to_next_face=true`，随后进入下一面；该面
+不得出现 `QR_SEARCH_TURN`。只有该面完全没有二维码事件时才允许转圈兜底。
+
+同步代码到小车后，只在小车 Ubuntu 18.04 / ROS Melodic 上执行下列回归；所有
+`source` 完成后必须恢复当前 WSL Master，且测试不会启动任务节点或发送运动命令：
+
+```bash
+cd ~/ucar_ws
+source /opt/ros/melodic/setup.bash
+source ~/ucar_ws/devel/setup.bash
+unset ROS_HOSTNAME
+read -r -p '请输入 WSL Master 当前地址: ' MASTER_IP
+export ROS_MASTER_URI="http://${MASTER_IP}:11311"
+export ROS_IP="$(ip -4 route get "$MASTER_IP" | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+catkin_make -DCATKIN_WHITELIST_PACKAGES=ucar_2026 run_tests
+catkin_test_results --verbose build/test_results/ucar_2026
+```
+
+### 终点自动交接 lane_proto（2026-08-10 起）
+
+- 2026 任务 SUCCEEDED 后：发布 task_result → 延迟 1s（`lane_handoff_delay`）
+  → 任务节点 `setsid` 启动 `handoff_lane.sh` 并 `signal_shutdown` 退出
+  （required=true 触发 2026.launch 整体关闭，释放底盘串口与相机）→ 脚本等待
+  2026.launch 退出（30s）与 `/dev/ttyUSB0` 可打开（10s）后前台启动：
+  ```bash
+  roslaunch lane_proto lane_proto.launch dry_run:=false linear_speed:=0.35 \
+    gain:=1.2 template:="$(rospack find lane_proto)/config/red_template_band2.png" \
+    is_fork:=yolo yellow_target:=0.90 align_offset:=0.14 start_offset:=0.23 \
+    goal_y_lo:=0.85 rate:=20 dump_every:=3
+  ```
+  （yellow_target=0.90 黄线在画面下方 10%；align_offset=0.14 对准黄线后前进
+  0.14m 到规定位；start_offset=0.23 等绿灯后前进 0.23m 进三岔口中心；
+  rate=20 控制循环 20Hz，实测可达 16Hz；2026-08-12 起与手动调参命令对齐）
+- **硬约束**：lane_proto.launch 自带 ucar_controller_simple 底盘驱动 + V4L2
+  直连相机，与 2026.launch **不能同时跑**（同串口、相机被抢）——交接必须等
+  2026.launch 完全退出，人工重跑时先 `stop_2026_task.sh` 再启动 lane_proto。
+- 交接开关：`2026.launch` 参数 `lane_handoff_enabled`（默认 true；false 保持
+  旧行为——任务 SUCCEEDED 后节点继续 spin，由 stop 脚本停止）。
+- lane_proto 观察：`rostopic echo /lane_proto/state`（FOLLOW→PAUSE→APPROACH→
+  STOPPED）；急停 `/lane_proto/estop`。当前车端没有 `stop_lane.sh`；若自动交接的
+  launch 仍在运行，先发布零速度，再从 `pgrep -af 'roslaunch lane_proto lane_proto.launch'`
+  输出中确认本次 PID 并 `kill -INT <PID>`（前台手工启动时可直接 Ctrl-C）。日志关键字 `HANDOFF_LANE_STARTED` /
+  `HANDOFF_LANE_FAILED`、`HANDOFF_WAIT_2026_EXIT`、`HANDOFF_SERIAL_READY`。
+
+### 仿真桥接服务（随仿真仓库克隆）
+
+`sim_bridge.py` 已纳入 `smartcar2026-simulation` 的 `bridge/` 目录；新电脑只要克隆并
+构建该仓库，不再需要从真车仓库、旧电脑或交付盘复制 bridge。仿真专用 Master 和 prepare
+已就绪后，在仿真工作区执行：
+
+```bash
+cd ~/smartcar2026-simulation
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+unset ROS_HOSTNAME
+export ROS_MASTER_URI=http://127.0.0.1:11312
+export ROS_IP=127.0.0.1
+python3 bridge/sim_bridge.py
+```
+
+只有看到 `SIMULATION_BRIDGE_READY` 和 `state=waiting` 后，才可启动真车 mission。
+bridge 的接口、每轮重启要求和故障排查见仿真仓库 `bridge/README.md`；完整的新电脑顺序见
+`docs/new-computer-gui-simulation-mission.md`。
+
+Windows 防火墙放行端口 11313（管理员 PowerShell，只限局域网子网）：
+
+```powershell
+New-NetFirewallRule -DisplayName 'SimBridge from UCar' -Direction Inbound \
+  -Protocol TCP -LocalPort 11313 -RemoteAddress LocalSubnet -Action Allow
+```
+
+### 任务运行顺序（2026-08-10 起，新增仿真前置步骤）
+
+0. （一次性，本机 WSL2 常驻配置）在 `C:\Users\<用户>\.wslconfig` 的 `[wsl2]`
+   段设置 `vmIdleTimeout=-1` 并 `wsl --shutdown` 重启——否则最后一个 `wsl`
+   会话退出后发行版关闭，后台 roslaunch 被连带杀掉（master 日志出现
+   `keyboard interrupt, will exit`）。
+1. WSL 启动 ROS Master（`~/start_ros_master.sh`，显示非 localhost）；
+2. **仿真端**（独立于真车 Master，先于小车任务）：先在一个保持打开的 WSL 终端启动
+   仿真专用 Master；不能用一次性后台 WSL 子进程启动，否则子进程退出会连带关闭
+   `roscore`，使随后 Gazebo、`map_server` 和 `move_base` 消失。
+   ```bash
+   export HOME=/home/car
+   source /opt/ros/noetic/setup.bash
+   export ROS_MASTER_URI=http://127.0.0.1:11312
+   export ROS_IP=127.0.0.1
+   roscore -p 11312
+   ```
+   保持该终端运行后，再在**另一个** WSL 终端启动准备阶段：
+   ```bash
+   cd /home/car/smartcar2026-simulation && \
+   source /opt/ros/noetic/setup.bash && source devel/setup.bash && \
+   export ROS_MASTER_URI=http://127.0.0.1:11312 && export ROS_IP=127.0.0.1 && \
+   roslaunch car3 task3_prepare.launch   # 等机械臂初始化完成
+   ```
+   确认 `/gazebo/get_link_state`、`/move_base/clear_costmaps` 和 `/map` 都可读后，再起桥接服务
+   （第三个 WSL 终端）：
+   ```bash
+   source /opt/ros/noetic/setup.bash && source devel/setup.bash && \
+   export ROS_MASTER_URI=http://127.0.0.1:11312 && export ROS_IP=127.0.0.1 && \
+   python3 bridge/sim_bridge.py
+   # 看到 SIMULATION_BRIDGE_READY 后即进入 waiting 状态
+   # （就绪判定轮询常驻的 /map 话题，不可用 /sim_task3/arm_initial_pose_ready：
+   #  该话题由 set_arm_initial_pose 节点发布一次后即注销）
+   ```
+3. 把车放回起点 `(-0.25, 2.75, 0)`（车头 x 负方向朝场内）；
+4. 小车端 `bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh <Master地址> mission`
+   → 听到提示后先说“小飞小飞”，再说固定双类别指令（如现实 `日用品`、仿真 `食品`）；
+5. 任务自动执行；仿真物品停入后小车 POST 桥接服务启动仿真（`cargo_category` +
+   `cargo_name` 透传），等待 `/sim_task3/done` 期间小车保持静止；
+6. 任务结束（SUCCEEDED）后：
+   ```bash
+   MASTER_IP=<Master地址> bash ~/ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh
+   ```
+   仿真端桥接服务与 prepare.launch 按需 Ctrl-C 停止，不留后台进程。
+
+### 仿真桥接协议与故障排查
+
+- 小车 → 桥：`POST /start` `{"item_name":"苹果","category":"食品"}` → 200
+  `{"accepted":true}`；409 = 仿真已在跑/已完成（单次任务后需重启 bridge 再跑）；
+- 小车 → 桥：`GET /status` → `{"state":"waiting|running|done|failed", ...}`；
+- 桥日志关键字：`SIMULATION_BRIDGE_READY` / `SIMULATION_BRIDGE_DONE` /
+  `SIMULATION_BRIDGE_FAILED`；roslaunch 输出在 bridge 目录
+  `task3_run_<时间戳>.log`；
+- 小车日志关键字：`PRODUCTION_SIMULATION_START_ACCEPTED` /
+  `PRODUCTION_SIMULATION_STATUS_DONE`；`/start` 失败重试 3 次后 MissionAbort；
+- 端口被占：`ss -tlnp | grep 11313`；done 话题无数据：确认 prepare.launch 已就绪
+  （`rostopic echo -n 1 /map` 有输出即就绪）；
+- 小车端 `simulation_host` 默认从 `ROS_MASTER_URI` 自动推导（同一台电脑），
+  一般无需配置；多机场景在 2026.launch 显式传 `simulation_host`。
+- 防火墙：无需为 11313 新建规则——既有 `ROS TCPROS from UCar to WSL` 已是
+  `port=Any + RemoteAddress=LocalSubnet`，自动覆盖（2026-08-10 联调实测）。

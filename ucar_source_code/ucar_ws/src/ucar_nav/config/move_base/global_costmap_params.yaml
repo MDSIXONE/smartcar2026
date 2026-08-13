@@ -1,0 +1,29 @@
+#Description:
+#  全局代价地图参数配置文件,各参数的意义如下：
+#  global_frame:在全局代价地图中的全局坐标系;
+#  robot_base_frame:机器人的基坐标系;
+#
+global_costmap:
+  global_frame: map                                      # 在全局代价地图中的全局坐标系
+  robot_base_frame: base_link                 # 机器人的基坐标系
+  update_frequency: 1.5 #0.5                     # 代价地图更新的频率(以 Hz 为单位)。根据传感器数据,全局地图更新的频率,这个数值越大,你的计算机的 CPU 负担会越重,
+                                                                               # 特别对于全局地图,通常设定一个相对较小、在 1.0 到 5.0 之间的值。
+  publish_frequency: 1.0 #0.5                    # 代价地图发布可视化信息的速率(以 Hz 为单位)。
+  #static_map: true
+  rolling_window: false                                 # 当机器人移动时,不保持机器人在本地代价地图中心。
+  resolution: 0.05                                             # global_costmap 的分辨率(米/单元格)
+  transform_tolerance: 1.2 #10                 # 获取各坐标系 TF 变换超时时间
+
+  #cost_scaling_factor:  10.0  # exponential rate at which the obstacle cost drops off (default: 10)【障碍代偿下降的指数速率（膨胀层中颜色分层）】
+  #inflation_radius:     0.005 # max. distance from an obstacle at which costs are incurred for planning paths.
+  #track_unknown_space: true
+
+
+  plugins:
+    - {name: static_layer,    type: "costmap_2d::StaticLayer"}
+#    - {name: obstacle_layer,  type: "costmap_2d::ObstacleLayer"}
+    - {name: inflation_layer, type: "costmap_2d::InflationLayer"}
+
+GlobalPlanner:        
+   allow_unknown:  true     # allow_unknown:是否允许规划器规划穿过未知区域的路径，只设计该参数为true还不行,还要在
+                                                     # costmap_commons_params.yaml中设置track_unknown_space参数也为true才行.

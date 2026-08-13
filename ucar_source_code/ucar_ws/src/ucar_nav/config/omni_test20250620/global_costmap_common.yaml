@@ -1,0 +1,36 @@
+# Simulation-aligned global costmap tuning. Keep the real vehicle's measured
+# footprint and available frames/sensors. The global safety inflation is the
+# user-selected real-vehicle value of 0.205 m.
+footprint: [[0.171, -0.128], [0.171, 0.128], [-0.171, 0.128], [-0.171, -0.128]]
+footprint_padding: 0.0
+transform_tolerance: 0.5
+
+static_layer:
+  enabled: true
+  map_topic: /map
+  subscribe_to_updates: true
+
+obstacle_layer:
+  enabled: true
+  combination_method: 1
+  track_unknown_space: false
+  obstacle_range: 3.0
+  raytrace_range: 4.0
+  observation_sources: global_scan_sensor
+  global_scan_sensor:
+    sensor_frame: laser_frame
+    data_type: LaserScan
+    # Static-wall returns are removed before this global input so map walls
+    # are not duplicated with a shifted laser trace.
+    topic: /scan_global_obstacles
+    marking: true
+    clearing: true
+    inf_is_valid: true
+    observation_persistence: 0.0
+    min_obstacle_height: 0.0
+    max_obstacle_height: 0.30
+
+inflation_layer:
+  enabled: true
+  inflation_radius: 0.205
+  cost_scaling_factor: 0.05

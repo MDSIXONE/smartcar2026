@@ -1,0 +1,44 @@
+# 底盘控制器串口设备名；设备变更后才调整。
+#port: /dev/base_serial_port #ttyUSB0 # base_serial_port
+port: /dev/ttyUSB0
+# 串口波特率；必须与底盘单片机固件一致，不能仅为提速而随意修改。
+baud: 921600 # 115200 
+# ROS 车体、里程计、传感器坐标系名称；通常无需调整。
+base_frame: base_link
+odom_frame: odom
+imu_frame: imu
+laser_frame: laser_frame
+camera_frame: camera_link
+# 遥控器输入与里程计输出的话题名称。
+joy_topic:  /joy
+odom_topic: /odom
+# 车体半长（m），用于将角速度换算为各轮速度；必须与实际底盘几何一致。
+base_shape_a: 0.2169
+# 车轮半径（m），用于速度/编码器脉冲换算；填错会导致实际速度和里程计比例错误。
+wheel_radius: 0.04657 
+# 导航速度输入话题；当前应为 move_base 直接发布的 /cmd_vel。
+vel_topic: /cmd_vel
+#provide_odom_tf: true
+# 超过此时间（s）没有收到新速度指令时，底盘自动置零；过小会导致运动断续。
+cmd_timeout: 0.2
+# 串口读写超时（ms）；不是速度参数。
+serial_timeout: 50
+# 仅用于记录底盘串口/里程计发布断帧的告警阈值（s）；不改变任务的 odom 安全门。
+serial_gap_warn: 0.35
+# Restore the original chassis command limits for comparison with the high CymPlanner command limit.
+# 平移速度命令裁剪上限，单位 m/s；超过该值的 linear.x / linear.y 会被底盘驱动裁剪。
+linear_speed_max:  3.0
+# 角速度命令裁剪上限，单位 rad/s；超过该值的 angular.z 会被底盘驱动裁剪。
+angular_speed_max: 3.14
+# 里程计累计里程文件名；不影响速度控制。
+Mileage_file_name:  car_Mileage_info.txt
+# false 时不再同步写里程文件（避免 odom/imu 发布线程被文件写卡顿断流）。
+# 比赛/任务场景下里程话题已足够，关闭写入更稳。
+Mileage_enable:  false
+# true 时输出大量串口调试信息；通常保持 false，避免日志影响实时性。
+debug_log:  false
+
+# 角速度换算校准系数：驱动公式以它为除数；增大该值会减小同一 angular.z 产生的轮速。
+angular_cali: 0.95   #1.0 #1.08 #1.037
+# 平移速度换算校准系数：驱动公式以它为除数；增大该值会减小同一 linear.x/y 产生的轮速。
+linear_cali: 1.0

@@ -1,0 +1,18 @@
+local_costmap:
+  # Keep map/base_link: lidar_loc's map -> odom corrections otherwise leave
+  # stale obstacle trails while the vehicle rotates in place.
+  global_frame: map
+  robot_base_frame: base_link
+  update_frequency: 12.0
+  publish_frequency: 5.0
+  static_map: false
+  rolling_window: true
+  # The physical vehicle only needs a compact near-field avoidance window.
+  # Keep the simulation-aligned obstacle/inflation tuning from the common file.
+  width: 2.0
+  height: 2.0
+  resolution: 0.03
+  always_send_full_costmap: true
+  plugins:
+    - {name: obstacle_layer, type: "costmap_2d::ObstacleLayer"}
+    - {name: inflation_layer, type: "costmap_2d::InflationLayer"}

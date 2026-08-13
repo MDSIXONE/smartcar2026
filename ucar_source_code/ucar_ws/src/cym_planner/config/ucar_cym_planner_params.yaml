@@ -1,0 +1,78 @@
+cym_planner/CymPlanner:
+  base_link_frame: base_link
+  odom_frame: odom
+  # 无 RViz 时关闭调试图像；碰撞检查不依赖此开关。
+  debug_images_enabled: false
+
+  # 模式 1：point / main / main_legacy。
+  # 保留原来的点碰撞阶段速度；heading_slowdown_min_scale=1 表示不因转角降速。
+  # 2026-08-11：max_vel_x 0.50→0.35、max_vel_theta 1.00→0.80，
+  #   final_yaw_tolerance 0.10→0.15 —— 降低绕行 431 类中途障碍时的碰撞
+  #   概率/冲击；放宽到点朝向容差，省回部分降速时间。
+  mode1_point:
+    linear_x_gain: 1.5
+    linear_x_kd: 0.5
+    max_vel_x: 0.35
+    angular_gain: 2.5
+    angular_kd: 0.4
+    max_vel_theta: 0.80
+    heading_slowdown_min_scale: 1.00
+    command_sweep_time: 0.00
+    command_sweep_step: 0.025
+    final_yaw_gain: 2.0
+    final_yaw_max_vel: 1.00
+    final_yaw_tolerance: 0.15
+    final_linear_x_gain: 1.0
+    obstacle_lookahead_distance: 0.25
+    obstacle_cost_threshold: 253
+    carry_speed_scale: 1.0
+
+  # 模式 2：body_projection / footprint / laser_avoidance。
+  # 生产路线默认更慢；转角越大，线速度按 cos² 缩小，但不低于下方比例。
+  # 常用调速入口：max_vel_x、max_vel_theta、heading_slowdown_min_scale。
+  mode2_body_projection:
+    linear_x_gain: 0.9
+    linear_x_kd: 0.2
+    max_vel_x: 0.07
+    angular_gain: 2.0
+    angular_kd: 0.2
+    max_vel_theta: 0.35
+    heading_slowdown_min_scale: 0.15
+    # 按实际 (linear.x, linear.y, angular.z) 对未来 0.4 s 车体姿态做扫掠。
+    command_sweep_time: 0.40
+    command_sweep_step: 0.025
+    final_yaw_gain: 1.5
+    final_yaw_max_vel: 0.25
+    final_yaw_tolerance: 0.10
+    final_linear_x_gain: 0.6
+    obstacle_lookahead_distance: 0.25
+    obstacle_cost_threshold: 253
+    carry_speed_scale: 1.0
+
+  # 受限横移目前是次级兜底。Sol 安全复核发现状态保持、全接触格统计和本地动态
+  # 障碍检查仍需补齐，因此硬关闭；即使误改 true，当前源码也会拒绝并记录错误。
+  escape_enabled: false
+  escape_blocked_timeout: 0.4
+  escape_replan_wait: 0.4
+  escape_step_distance: 0.02
+  escape_projection_step: 0.005
+  escape_speed: 0.04
+  escape_max_attempts: 4
+  escape_max_total_distance: 0.08
+  escape_heading_tolerance: 0.05
+
+  # 局部 footprint 在前视路径进入高代价区前就开始选带；候选按完整轨迹的
+  # 最差 footprint 代价、平均代价排序，选择净空最大的安全带。
+  # 每一条带状候选都以 local 合并 costmap 的 254/255 和完整 footprint 验证；
+  # 当前 footprint 接触、未知区、TF 或 costmap 异常仍直接失败关闭并请求全局重规划。
+  elastic_enabled: true
+  elastic_lookahead_distance: 0.25
+  elastic_lateral_step: 0.02
+  elastic_max_lateral_offset: 0.12
+  elastic_validation_step: 0.015
+  elastic_validation_yaw_step: 0.05
+  elastic_max_vel_x: 0.07
+  elastic_max_vel_theta: 0.30
+  # >= 此 raw local cost 的前视 footprint 先尝试最大净空带；没有更低代价
+  # 的带时立即让 move_base 用持续更新的 global costmap 重规划。
+  elastic_activation_cost: 220

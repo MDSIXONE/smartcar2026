@@ -1,0 +1,12 @@
+<launch>
+    <include file="$(find ucar_controller)/launch/base_driver.launch" />
+    <node pkg="joy" name="joy_node" type="joy_node" output="screen" respawn="false" />
+    <node pkg="ucar_controller" name="joy_ps2" type="lax_twist_joy.py" output="screen" respawn="false">
+    <!-- <param name="x_speed_scale" value="0.075" />
+    <param name="y_speed_scale" value="0.075" />
+    <param name="w_speed_scale" value="0.25" /> -->
+    <param name="x_speed_scale" value="1.075" />
+    <param name="y_speed_scale" value="1.075" />
+    <param name="w_speed_scale" value="1.25" />
+  </node>
+</launch>

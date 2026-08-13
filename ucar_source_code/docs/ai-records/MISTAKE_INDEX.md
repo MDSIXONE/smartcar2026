@@ -1,0 +1,26 @@
+# AI 错误索引
+
+## 主题索引
+
+- 二维码状态机 / 接收过滤：2026-08-11.md
+- OCR 连续视觉伺服 / 停车时机：2026-08-11.md
+- 部署路径 / SCP 多源目标目录：2026-08-11.md
+- 单测 mock / object.__new__ 新增属性：2026-08-11.md
+- 边界巡航 / middle target guard 适用范围：2026-08-11.md
+- 构建 / Catkin 测试目标层级：2026-08-11.md
+- WSL 文件系统 / p9_client_rpc 构建阻塞：2026-08-12.md
+
+## 按日期
+
+### 2026-08-11
+
+- QR 接收过滤误触发单面转圈
+- OCR 分段停车不满足连续对准需求
+- SCP 多文件目标目录误投放
+- object.__new__ 单测缺少新增任务属性
+- 边界巡航 / middle target guard 适用范围不匹配
+- Catkin run_tests 子包目标被当作包名
+
+### 2026-08-12
+
+- WSL p9_client_rpc 阻塞 Noetic catkin_make

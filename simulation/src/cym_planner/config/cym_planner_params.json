@@ -1,0 +1,50 @@
+# CymPlanner 局部规划器参数
+# 修改本文件后不需要重新编译，只需重新启动仿真。
+{
+    "CymPlanner": {
+        # 机器人本体坐标系
+        "base_link_frame": "base_link",
+
+        # 里程计坐标系
+        "odom_frame": "odom",
+
+        # 取货后的障碍判定直接使用该二维激光雷达，不依赖 costmap
+        # 间接转发。每帧扫描都会转换到 base_link 坐标系。
+        "scan_topic": "/scan",
+
+        # main_legacy：取货前，origin/main 巡线 + 原始 costmap 判障。
+        # laser_avoidance：取货后，同一套 origin/main 巡线控制，只把
+        # 判障源换成激光点与前视车体投影的相交测试。
+        "navigation_mode": "main_legacy",
+
+        # origin/main 的实际巡线参数。main 源码虽然声明
+        # lookahead_distance=0.5，实际选点阈值固定为 0.2 m。
+        "main_legacy_target_distance": 0.2,
+        "main_legacy_linear_x_gain": 10.0,
+        "main_legacy_linear_x_kd": 0.05,
+        "main_legacy_angular_gain": 14.0,
+        "main_legacy_max_vel_x": 14.0,
+        "main_legacy_max_vel_theta": 20.5,
+        "main_legacy_final_yaw_gain": 12.0,
+        "main_legacy_final_yaw_max_vel": 10.2,
+        "main_legacy_final_yaw_tolerance": 0.10,
+        "main_legacy_final_linear_x_gain": 1.5,
+        "main_legacy_goal_position_tolerance": 0.05,
+
+        # 两阶段都向前检查 0.8 m。取货前检查路径中心的 costmap 值；
+        # 取货后沿同一路径每 0.03 m 投影一次完整矩形车体，并检查是否
+        # 有 /scan 激光点落入任一投影。命中时返回 false 请求重规划。
+        "main_legacy_obstacle_lookahead_distance": 0.8,
+        "main_legacy_obstacle_cost_threshold": 253,
+        "laser_projection_step": 0.03,
+
+        # 雷达数据超过该时长即按失效安全返回 false。无限远射线代表
+        # 当前方向无障碍，因此“新扫描没有有效回波”本身不会误判为阻塞。
+        "scan_timeout": 0.4,
+        "scan_min_range": 0.03,
+        "scan_max_range": 3.0,
+
+        # 载货前后速度参数保持一致；阶段切换只改变障碍判定源。
+        "carry_speed_scale": 1.00
+    }
+}

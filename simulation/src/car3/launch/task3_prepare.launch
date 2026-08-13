@@ -1,0 +1,41 @@
+<launch>
+  <!-- Step 1 only: start the environment and park the arm.  The arm/gripper
+       controllers are loaded but stopped, so navigation cannot make the arm
+       shake. -->
+  <!-- Official competition runs require Gazebo and RViz to remain visible. -->
+  <arg name="gui" default="true"/>
+  <arg name="rviz" default="true"/>
+  <arg name="navigation_mode" default="main_legacy"/>
+  <arg name="arm_start_pose" default="-0.0001,-0.4999,1.2800,1.7000,0.0000"/>
+  <!-- Match the reference pickup sequence: keep the gripper fully open while
+       travelling so pickup begins directly with the arm descent. -->
+  <arg name="gripper_park_position" default="1.0"/>
+  <arg name="grasp_attachment_enabled" default="true"/>
+  <!-- Publish the exact parked pose so pickup recovery uses the same value,
+       including when arm_start_pose is overridden at launch time. -->
+  <param name="/sim_task3/arm_initial_pose" value="$(arg arm_start_pose)"/>
+
+  <include file="$(find car3)/launch/gazebo.launch">
+    <arg name="gui" value="$(arg gui)"/>
+    <arg name="rviz" value="$(arg rviz)"/>
+    <arg name="navigation_mode" value="$(arg navigation_mode)"/>
+    <arg name="start_arm_controllers" value="false"/>
+    <arg name="set_initial_arm_pose" value="true"/>
+    <arg name="arm_initial_positions" value="$(arg arm_start_pose)"/>
+    <arg name="gripper_initial_position" value="$(arg gripper_park_position)"/>
+    <arg name="grasp_attachment_enabled"
+         value="$(arg grasp_attachment_enabled)"/>
+    <arg name="initial_pose_duration" value="6.0"/>
+    <arg name="initial_transition_steps" value="2"/>
+    <!-- Use the same two-stage controller trajectory as origin/main, then
+         stop the arm/gripper controllers until pickup begins. -->
+    <arg name="direct_initial_configuration" value="false"/>
+    <!-- Physics-only support preserves this pose while controllers are off. -->
+    <arg name="disable_arm_gravity" value="true"/>
+    <!-- Never reapply the pose while driving.  Each
+         /gazebo/set_model_configuration call pauses the world and teleports
+         every joint, which destroys the solver state and makes the gripper
+         shake.  Disabled gravity alone already holds the parked pose. -->
+    <arg name="hold_initial_arm_pose" value="false"/>
+  </include>
+</launch>

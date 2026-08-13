@@ -1,0 +1,21 @@
+local_costmap:
+  # Keep map/base_link: lidar_loc map -> odom corrections otherwise leave
+  # stale obstacle trails while the vehicle rotates in place.
+  global_frame: map
+  robot_base_frame: base_link
+  update_frequency: 8.0
+  publish_frequency: 3.0
+  # Rolling local window still includes the static /map walls. This keeps
+  # footprint safety independent of a momentary lidar occlusion.
+  static_map: true
+  rolling_window: true
+  # 1 m square is sufficient for the slow body-projection horizon and avoids
+  # copying/drawing unused cells on every local planner cycle.
+  width: 1.0
+  height: 1.0
+  resolution: 0.03
+  always_send_full_costmap: true
+  plugins:
+    - {name: static_layer, type: "costmap_2d::StaticLayer"}
+    - {name: obstacle_layer, type: "costmap_2d::ObstacleLayer"}
+    - {name: inflation_layer, type: "costmap_2d::InflationLayer"}

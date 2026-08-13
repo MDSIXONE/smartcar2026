@@ -1,0 +1,22 @@
+{
+  "projectType": "比赛",
+  "createdFolders": [],
+  "existingFoldersPreserved": [
+    ".agents",
+    "competition-rules",
+    "simulation",
+    "tmp",
+    "ucar_message",
+    "ucar_source_code"
+  ],
+  "components": {
+    "AGENTS.md": "appended-universal-rules",
+    "project-memory-records": "installed",
+    "github-commit": "installed",
+    "project-lingo": "installed",
+    "project-index": "installed",
+    "context7-mcp": "already-registered-globally, no project config needed (removed .mcp.json)"
+  },
+  "initTime": "2026-08-09",
+  "updated": "2026-08-13"
+}

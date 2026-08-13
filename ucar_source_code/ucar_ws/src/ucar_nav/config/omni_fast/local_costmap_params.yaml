@@ -1,0 +1,17 @@
+local_costmap:
+   global_frame: odom
+   robot_base_frame: base_link
+   update_frequency: 6.0       #3.0 不低于costmap converter的频率
+   publish_frequency: 3.0
+   rolling_window: true
+   width: 2
+   height: 2
+   resolution: 0.01
+   transform_tolerance: 1.2  
+   cost_scaling_factor:  50  # exponential rate at which the obstacle cost drops off (default: 10)
+   inflation_radius:     0.03 # max. distance from an obstacle at which costs are incurred for planning paths.
+
+plugins:
+#   - {name: static_layer,        type: "costmap_2d::StaticLayer"}
+   - {name: obstacle_layer,      type: "costmap_2d::VoxelLayer"}
+   - {name: inflation_layer,     type: "costmap_2d::InflationLayer"}

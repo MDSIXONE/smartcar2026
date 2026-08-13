@@ -1,0 +1,24 @@
+# ROS/catkin build output
+/build/
+/devel/
+/install/
+/logs/
+
+# Runtime package excludes training data and extra model exports.
+/datasets/
+/src/car3/models/vision/*
+!/src/car3/models/vision/cube_yolov5_best.onnx
+
+# Python and editor state
+**/__pycache__/
+*.py[cod]
+.vscode/
+.idea/
+
+# Per-run HTTP bridge output
+/bridge/task3_run_*.log
+
+# Local calibration and backup snapshots
+*.before_*
+*.bak
+

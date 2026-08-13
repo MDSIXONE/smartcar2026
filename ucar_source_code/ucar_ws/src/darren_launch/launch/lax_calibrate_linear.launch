@@ -1,0 +1,10 @@
+<launch>
+    <param name="use_sim_time" value="false"/>
+    <node pkg="ucar_controller" name="base_driver" type="base_driver" output="screen">
+      <rosparam command="load" file="$(find ucar_controller)/config/driver_params_mini.yaml" />
+      <param name="provide_odom_tf" value="true"/>
+      <param name="odom_frame"      value="/odom"/>
+    </node>
+    <node name="calibrate_linear" pkg="lax_controller" type="calibrate_linear.py" output="screen"/>
+    <node pkg="tf" type="static_transform_publisher" name="base_footprint_to_imu" args="0.05 -0.05 0.05 0 0 0 base_link imu 100"/>
+</launch>
