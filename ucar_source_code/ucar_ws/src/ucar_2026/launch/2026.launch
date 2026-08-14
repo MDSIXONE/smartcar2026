@@ -13,6 +13,9 @@
          moves the vehicle without task_enabled:=true. -->
     <arg name="task_enabled" default="false"/>
     <arg name="task_start_delay" default="2.0"/>
+    <!-- The PC HTTP simulation endpoint.  This is passed explicitly because
+         ROS Master is local to the vehicle. -->
+    <arg name="simulation_host" default=""/>
     <!-- No RViz/camera workload by default. Set false only when a manual
          session explicitly needs an immediately-live camera stream. -->
     <arg name="camera_start_suspended" default="true"/>
@@ -33,7 +36,7 @@
          session may opt in with camera_start_suspended:=false. -->
     <node name="usb_cam" pkg="usb_cam" type="usb_cam_node" output="screen"
           respawn="$(eval arg('task_enabled') != 'true')" respawn_delay="2.0">
-        <param name="video_device" value="/dev/ucar_video"/>
+        <param name="video_device" value="/dev/video0"/>
         <param name="image_width" value="640"/>
         <param name="image_height" value="480"/>
         <param name="pixel_format" value="yuyv"/>
@@ -91,13 +94,58 @@
         <param name="outlier_threshold" value="0.10"/>
     </node>
 
-    <!-- Same move_base/CymPlanner flow as the simulation.  The plugin writes
-         /cmd_vel directly to the chassis driver; RViz is the only goal source. -->
-    <include file="$(find ucar_nav)/launch/cym_move_base_omni_2026.launch"/>
+    <!-- Exactly one node writes the driver topic /cmd_vel.  Navigation and
+         lane following each write an isolated input selected by cmd_vel_owner. -->
+    <node pkg="ucar_2026" type="cmd_vel_owner.py" name="cmd_vel_owner"
+          output="screen"
+          launch-prefix="$(find ucar_2026)/scripts/run_melodic_python2.sh">
+        <param name="output_topic" value="/cmd_vel"/>
+        <param name="mission_topic" value="/cmd_vel/navigation"/>
+        <param name="lane_topic" value="/cmd_vel/lane"/>
+    </node>
+
+    <!-- Same move_base/CymPlanner flow as the simulation, isolated from the
+         chassis by cmd_vel_owner. -->
+    <group>
+        <remap from="/cmd_vel" to="/cmd_vel/navigation"/>
+        <include file="$(find ucar_nav)/launch/cym_move_base_omni_2026.launch"/>
+    </group>
 
     <node name="robot_pose_publisher" pkg="robot_pose_publisher" type="robot_pose_publisher"/>
 
     <group if="$(arg task_enabled)">
+        <!-- Keep the lane model and image subscriber warm throughout the
+             mission.  It has no serial-port ownership and emits no command
+             until production_task activates it at the final destination. -->
+        <include file="$(find lane_proto)/launch/lane_proto.launch">
+            <arg name="dry_run" value="false"/>
+            <arg name="start_base_driver" value="false"/>
+            <arg name="use_ros_camera" value="true"/>
+            <arg name="image_topic" value="/usb_cam/image_raw"/>
+            <arg name="cmd_vel_topic" value="/cmd_vel/lane"/>
+            <arg name="odom_topic" value="/odom_raw"/>
+            <arg name="start_enabled" value="false"/>
+            <arg name="require_fresh_odom" value="true"/>
+            <arg name="odom_fresh_timeout" value="4.0"/>
+            <arg name="exit_on_stop" value="true"/>
+            <!-- 2026-08-15：交接后必须走起跑序列（黄线对齐 → 认灯 → 进三岔口
+                 → 巡线 → 终点横线 STOPPED）。缺 is_fork:=yolo 时交接点画面里的
+                 黄线会在 FOLLOW 相位被 goal_block 当终点横线立即触发
+                 APPROACH/STOPPED，整段巡线被跳过。以下起跑与性能参数与已实车
+                 验证的 handoff_lane.sh（2026-08-12 最终值）对齐。 -->
+            <arg name="is_fork" value="yolo"/>
+            <arg name="template" value="$(find lane_proto)/config/red_template_band2.png"/>
+            <arg name="yellow_target" value="0.90"/>
+            <arg name="align_offset" value="0.14"/>
+            <arg name="start_offset" value="0.23"/>
+            <arg name="goal_y_lo" value="0.85"/>
+            <arg name="linear_speed" value="0.35"/>
+            <arg name="gain" value="1.2"/>
+            <arg name="rate" value="20"/>
+            <arg name="dump_every" value="3"/>
+            <arg name="goal_pause" value="1.0"/>
+        </include>
+
         <!-- ucar_2026 already owns the camera.  Keep decoding disabled until
              the mission explicitly enters its QR stage.  Real-field QR codes
              carry a full URL whose host/path changes per competition; when
@@ -111,13 +159,14 @@
         </include>
 
         <node pkg="ucar_2026" type="production_task_2026.py"
-              name="production_task_2026" output="screen" required="true"
+              name="production_task_2026" output="screen" required="false"
               launch-prefix="$(find ucar_2026)/scripts/run_melodic_python2.sh">
+            <param name="cmd_vel_topic" value="/cmd_vel/navigation"/>
             <param name="grid_path"
                    value="$(find ucar_2026)/config/production_full_grid_all_numbered.json"/>
             <param name="start_delay" value="$(arg task_start_delay)"/>
-            <!-- Relaxed x2 (2026-08-11) so the chassis odom/imu characteristic
-                 ~1 s gap never trips a readiness/safety timeout. -->
+            <!-- 2026-08-14：恢复为 180 s，覆盖 move_base 冷启动，同时避免
+                 mission 因长时间就绪等待而被误认为仍在正常启动。 -->
             <param name="move_base_ready_timeout" value="180"/>
             <param name="safe_start_timeout" value="90"/>
             <param name="plan_timeout" value="30"/>
@@ -155,26 +204,24 @@
             <param name="processing_dwell_seconds" value="3.0"/>
             <!-- Local simulation (host PC) coordination: only after the
                  real item has been parked and its completion announcement
-                 has finished does the task park/start the simulation item.
-                 simulation_host empty derives the host from ROS_MASTER_URI. -->
+                 has finished does the task park/start the simulation item. -->
             <param name="simulation_port" value="11313"/>
-            <param name="simulation_host" value=""/>
+            <param name="simulation_host" value="$(arg simulation_host)"/>
             <param name="simulation_start_timeout" value="60"/>
             <param name="simulation_start_retries" value="3"/>
-            <param name="simulation_done_timeout" value="150"/>
+            <!-- 仿真状态断连或未完成最多等 120 秒；到时继续小车终点流程。 -->
+            <param name="simulation_done_timeout" value="120"/>
             <param name="simulation_poll_period" value="2.0"/>
             <!-- Synchronous announcement budget; a timeout terminates the
                  TTS helper and continues the mission. -->
             <param name="speak_wait_timeout" value="120"/>
-            <!-- After SUCCEEDED, hand off to the lane-follow launch
-                 (lane_proto owns the chassis serial and camera, so
-                 2026.launch must fully exit first; the handoff script waits
-                 for that, then starts lane_proto.launch).  Set false to keep
-                 the old post-success spin behaviour. -->
+            <!-- After SUCCEEDED, activate the already resident lane node and
+                 atomically switch the single /cmd_vel owner. -->
             <param name="lane_handoff_enabled" value="true"/>
-            <param name="lane_handoff_script"
-                   value="$(find ucar_2026)/scripts/handoff_lane.sh"/>
-            <param name="lane_handoff_delay" value="0.3"/>
+            <param name="lane_activate_service" value="/lane_proto/set_active"/>
+            <param name="lane_owner_service" value="/cmd_vel_owner/set_lane_mode"/>
+            <param name="lane_state_topic" value="/lane_proto/state"/>
+            <param name="lane_handoff_timeout" value="360.0"/>
             <!-- Retry window (s) for a scan stamp briefly outrunning the TF
                  clock (~9 ms jitter seen on the real vehicle); the lookup
                  stays fatal after the window. -->
@@ -237,7 +284,7 @@
             <param name="camera_service_timeout" value="10.0"/>
             <param name="use_ros_camera_for_ocr" value="true"/>
             <param name="camera_image_topic" value="/usb_cam/image_raw"/>
-            <param name="video_device" value="/dev/ucar_video"/>
+            <param name="video_device" value="/dev/video0"/>
             <param name="camera_width" value="640"/>
             <param name="camera_height" value="480"/>
             <param name="ocr_python" value="/usr/bin/python3"/>

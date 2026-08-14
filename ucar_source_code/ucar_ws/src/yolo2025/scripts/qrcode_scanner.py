@@ -32,6 +32,10 @@ class QRCodeScanner(object):
         self.last_text = ""
         self.last_publish_time = 0.0
         self.api_inflight = set()
+        # Process-local successful URL -> item-name cache.  It deliberately
+        # lives on this node instance so a qrcode_scanner restart starts a new
+        # mission with no retained API result.
+        self.api_item_cache = {}
         self.api_lock = threading.Lock()
 
         self.result_pub = rospy.Publisher("/qr_result", String, queue_size=1)
@@ -127,28 +131,48 @@ class QRCodeScanner(object):
             return ""
 
     def query_api_async(self, decoded_text):
+        url = decoded_text.strip()
         with self.api_lock:
-            if decoded_text in self.api_inflight:
+            cached_item = self.api_item_cache.get(url)
+            if cached_item is not None:
+                response = {
+                    "qr_text": decoded_text,
+                    "key": "",
+                    "ok": True,
+                    "cached": True,
+                    "response": {"code": 200, "result": cached_item},
+                }
+            elif url in self.api_inflight:
                 return
-            self.api_inflight.add(decoded_text)
-        worker = threading.Thread(target=self.query_api, args=(decoded_text,))
+            else:
+                self.api_inflight.add(url)
+                response = None
+        if response is not None:
+            rospy.loginfo("QR API cache %s -> result=%s", url, cached_item)
+            self.api_result_pub.publish(
+                json.dumps(response, ensure_ascii=False, sort_keys=True))
+            return
+        worker = threading.Thread(target=self.query_api, args=(decoded_text, url))
         worker.daemon = True
         worker.start()
 
-    def query_api(self, decoded_text):
-        url = decoded_text.strip()
+    def query_api(self, decoded_text, url):
         response = {"qr_text": decoded_text, "key": "", "ok": False}
         try:
             with urlopen(url, timeout=self.api_timeout_sec) as http_response:
                 parsed = json.loads(http_response.read().decode("utf-8"))
                 response.update({"ok": True, "http_status": http_response.getcode(), "response": parsed})
+                item = parsed.get("result")
+                if item:
+                    with self.api_lock:
+                        self.api_item_cache[url] = item
                 rospy.loginfo("QR API %s -> code=%s result=%s", url, parsed.get("code"), parsed.get("result"))
         except Exception as error:
             response["error"] = str(error)
             rospy.logwarn("QR API lookup for %s failed: %s", url, error)
         finally:
             with self.api_lock:
-                self.api_inflight.discard(decoded_text)
+                self.api_inflight.discard(url)
         self.api_result_pub.publish(json.dumps(response, ensure_ascii=False, sort_keys=True))
 
 

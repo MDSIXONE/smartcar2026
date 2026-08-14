@@ -54,8 +54,8 @@ if [[ "$serial_ready" != true ]]; then
   echo "HANDOFF_ERROR chassis serial port did not become available" >&2
   exit 4
 fi
-if [[ ! -e /dev/ucar_video ]]; then
-  echo "HANDOFF_WARNING camera /dev/ucar_video not present" >&2
+if [[ ! -e /dev/video0 ]]; then
+  echo "HANDOFF_WARNING camera /dev/video0 not present" >&2
 fi
 
 unset ROS_HOSTNAME
@@ -77,7 +77,7 @@ echo "HANDOFF_LANE_STARTED master=$ROS_MASTER_URI ip=$ROS_IP template=$lane_temp
 # 2026-08-12 速度参数与手动调参命令对齐：linear_speed 0.2→0.35、
 # gain 1.0→1.2、rate 默认→20、dump_every 0→3、模板 band→band2、
 # align_offset 0.15→0.14、start_offset 0.25→0.23（手动实测可达 16Hz）。
-roslaunch lane_proto lane_proto.launch dry_run:=false linear_speed:=0.35 gain:=1.2 \
+roslaunch --screen lane_proto lane_proto.launch dry_run:=false linear_speed:=0.35 gain:=1.2 \
   "template:=$lane_template" is_fork:=yolo yellow_target:=0.90 \
   align_offset:=0.14 start_offset:=0.23 goal_y_lo:=0.85 rate:=20 dump_every:=3
 lane_status=$?

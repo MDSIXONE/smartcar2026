@@ -6,6 +6,7 @@ find_package(catkin REQUIRED)
 catkin_package()
 
 catkin_install_python(PROGRAMS
+  scripts/cmd_vel_owner.py
   scripts/navigation_scan_relay.py
   scripts/production_camera_ocr.py
   scripts/production_task_2026.py

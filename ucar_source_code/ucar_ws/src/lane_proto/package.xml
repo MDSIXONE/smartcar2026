@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>lane_proto</name>
+  <version>0.1.0</version>
+  <description>直道巡线测试原型: V4L2直连相机 + 固化分割网 + 红三角模板判向</description>
+  <maintainer email="zyf@example.com">zyf</maintainer>
+  <license>BSD</license>
+  <buildtool_depend>catkin</buildtool_depend>
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>ucar_controller_simple</exec_depend>
+  <exec_depend>ucar_2026</exec_depend>
+</package>

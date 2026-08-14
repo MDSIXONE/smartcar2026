@@ -1,0 +1,216 @@
+<launch>
+    <!-- 直道巡线测试原型: 可独立占用底盘/相机，也可由 2026.launch 常驻接管。
+         独立默认会启动底盘和直连相机；主流程必须传 start_base_driver:=false
+         use_ros_camera:=true，不能同时占用串口或 V4L2。
+         常用:
+           roslaunch lane_proto lane_proto.launch                        # 空跑看决策
+           roslaunch lane_proto lane_proto.launch dry_run:=false linear_speed:=0
+           roslaunch lane_proto lane_proto.launch dry_run:=false linear_speed:=0.15 gain:=2.0
+         转向只有 gain 一个旋钮(大=猛), 曲线自动算:
+           az = min_turn_speed + gain*(侵入深度 - min_intrusion), 上限 turn_max
+         跑着的时候还能直接调, 不用重启:
+           rosparam set /lane_follow/gain 2.0
+    -->
+    <arg name="dry_run" default="true"/>
+    <!-- 主流程交接模式：不启动第二套底盘驱动、不独占 V4L2，相机和底盘由
+         ucar_2026 常驻节点提供；巡线节点等待 /lane_proto/set_active。 -->
+    <arg name="start_base_driver" default="true"/>
+    <arg name="use_ros_camera" default="false"/>
+    <arg name="image_topic" default="/usb_cam/image_raw"/>
+    <arg name="cmd_vel_topic" default="/cmd_vel"/>
+    <arg name="odom_topic" default="/odom"/>
+    <arg name="start_enabled" default="true"/>
+    <arg name="require_fresh_odom" default="false"/>
+    <arg name="odom_fresh_timeout" default="0.5"/>
+    <arg name="exit_on_stop" default="false"/>
+    <arg name="linear_speed" default="0.10"/>   <!-- 0 = 原地只转车体 -->
+    <arg name="gain" default="1.2"/>            <!-- 转向唯一旋钮, 大=猛 -->
+    <arg name="mirror" default="true"/>         <!-- 该相机输出是镜像的 -->
+    <arg name="video_device" default="/dev/video0"/>
+    <arg name="dump_every" default="1"/>        <!-- 每几帧写一张诊断图, 0=关 -->
+    <!-- 控制环频率(Hz)。**以前这里是写死的 10, 命令行 rate:=20 给了也不生效**
+         —— 就是这个原因。诊断图挪到后台线程后一帧只忙 ~50ms(实测 p90 48ms),
+         所以 15~18 能稳稳跑住; 给 20 就贴着极限, 偶尔超时 rospy.Rate 会少睡
+         一点补回来, 不会崩但周期开始抖, 而控制环最怕周期不稳。
+         判据: rate <= 1000/[耗时]那行的"忙 p90" -->
+    <arg name="rate" default="10.0"/>
+    <arg name="stats_every" default="2.0"/>     <!-- 每几秒打一行[耗时], 0=关 -->
+    <!-- 诊断图放后台线程画。实测同步时它平摊占一帧 44%(单张约190ms), 比分割
+         还贵一倍, 而它对控制毫无贡献。后台忙不过来就丢图(只留最新一张),
+         绝不阻塞控制。⚠ dump_every=1 时后台必然大量丢图(它一秒画不了10张),
+         丢的只是图不影响控制; 想每张都留就把 dump_every 调大 -->
+    <arg name="dump_async" default="true"/>
+    <!-- 相机: 默认都不动。启动日志会打出协商到的编码/帧率, 发现只有 ~10fps
+         再开 MJPG(很多 USB 相机 YUYV@640x480 只有 10fps, 带宽不够) -->
+    <arg name="fourcc" default=""/>
+    <arg name="cam_fps" default="0"/>
+    <!-- 终点框: 视觉检出正前方横线 -> 刹停打点 -> 再走一段 -> 停
+         use_lidar:=true 则检出即停(之后由激光雷达导航接管, 本节点不实现) -->
+    <arg name="use_lidar" default="false"/>
+    <arg name="goal_enable" default="true"/>
+    <arg name="goal_pause" default="1.0"/>          <!-- 检出后刹停几秒打点 -->
+    <arg name="goal_stop_distance" default="0.50"/> <!-- 打点后再走多远停 -->
+    <arg name="goal_confirm" default="1"/>          <!-- 连续N帧检出才算数; 车快时留不住3帧 -->
+    <!-- 只看画面最底下 (1-goal_y_lo) 的行 = 只认"很近的"横线。
+         0.78 = 底部22%; 调小->更早触发->停得更远。dump 图上那条青色线
+         就是它, 横线跌到线以下才算数 -->
+    <arg name="goal_y_lo" default="0.78"/>
+    <!-- 扫描带半宽(列, 中央±goal_half) 和 触发用的列覆盖率阈值。
+         判据是"这个矩形里有多少列被线穿过"(0~1), 与线的角度无关 ——
+         大角度插入时线很斜, 照样满分。dump 图上画着这个矩形和实时分数 -->
+    <arg name="goal_half" default="60"/>
+    <arg name="goal_cover" default="0.80"/>
+    <!-- 直线搜索: 左右边各取候选端点两两连线(倾角<=goal_max_deg),
+         沿线覆盖率>=goal_line_cover 的候选线有 >=goal_line_count 条才算数。
+         这一条强制"被盖住的列必须共线", 补上单纯列覆盖率的漏(墙角处两条
+         车道线汇聚也能盖满所有列)。三个条件与门, 实测误报 0.8%->0.4% -->
+    <arg name="goal_line_cover" default="0.75"/>
+    <arg name="goal_line_count" default="8"/>
+    <arg name="goal_max_deg" default="35.0"/>
+    <!-- 岔路(∈ 的中间那条, 末端 Y) —— 三态, 命令行直接写不用加引号:
+         is_fork:=false  横线=终点, 老行为
+         is_fork:=true   第一次检出横线 -> 原地转 fork_turn_deg 度(负=右转)
+                         对准一条臂, 继续巡线; 之后再检出才算终点
+         is_fork:=yolo   起跑序列: 黄线对齐 -> 前进 align_offset(10cm)到规定
+                         位置 -> 在那儿等红灯变绿、认出箭头就**记住**并立刻
+                         杀掉 yolo -> 前进 start_offset(30cm)到三岔口 ->
+                         按记住的方向动 ——
+                           left     -> 原地左转 yolo_turn_deg(60)° 跑左臂,
+                                       之后检出横线 = 终点
+                           right    -> 原地右转 60° 跑右臂, 同上
+                           straight -> 不转, 巡线往中间跑; 检出横线 = 到了
+                                       Y 岔口, 转 fork_turn_deg(-45)° 进一条
+                                       支路, 再之后的横线才是终点
+                         三条路线一条命令跑完, 不用按任务改参数。
+                         **红灯(stop) 和 什么都没认出来是同一种处理: 都继续
+                         等**, 等到方向灯为止(兜底 yolo_wait_max 秒)
+         转向读 /imu 的 AHRS 四元数, 内部维护多圈连续角, 不假设读数是
+         -180~180 还是 0~360 -->
+    <arg name="is_fork" default="false"/>
+    <arg name="fork_turn_deg" default="-45.0"/>   <!-- 负=右转, 仅 true 用 -->
+    <arg name="yolo_turn_deg" default="60.0"/>    <!-- 仅 yolo 用: 左右各转这么多 -->
+    <arg name="yolo_conf" default="0.20"/>
+    <arg name="yolo_backend" default="auto"/>     <!-- auto|cuda|cpu -->
+    <!-- 红灯(stop) 和 什么都没认出来 是同一种处理: 都继续等, 等到方向灯为止。
+         等满 yolo_wait_max 秒还没有方向就按 yolo_fallback 走(0=一直等) -->
+    <arg name="yolo_wait_max" default="60.0"/>
+    <arg name="yolo_fallback" default="straight"/><!-- 等到超时才用得上 -->
+    <!-- 左右互换。默认 true: 实测这套权重给出的 left/right 和翻正后画面里
+         箭头的实际朝向是反的(训练集是用这台镜像相机拍的, 标注按画面里看到的
+         方向写, 而我们喂 yolo 的是**已翻正**的帧, 两次镜像抵消不掉一次)。
+         哪天换了非镜像数据重训, 把这里改回 false -->
+    <arg name="yolo_swap_lr" default="true"/>
+    <arg name="yolo_use_raw" default="false"/>    <!-- true=喂没去畸变的帧 -->
+    <!-- 起点看的是**远处**的灯, 在 640x480 里可能只有十几个像素。>1 就先抠
+         中间放大再送(数字变焦), 认不到远灯时先试 1.5~2.5 -->
+    <arg name="yolo_zoom" default="1.0"/>
+    <arg name="fork_turn_speed" default="0.45"/>
+    <arg name="fork_cooldown" default="3.0"/>     <!-- 转完多久内不认横线 -->
+    <!-- 检出横线后、转弯前的前后微调(米): 0=原地就转, 正=先前进这么远
+         再转, 负=先后退。用轮式里程计量。转弯点对不准赛道时调这个 -->
+    <arg name="fork_offset" default="0.0"/>
+    <arg name="fork_move_speed" default="0.12"/>
+    <!-- 起点补偿(米, 仅 is_fork:=yolo 用): 车特意往后摆这么多再开跑 ——
+         让远处那个红绿灯落在视野里, 也不压起跑线。认完灯先补这一段回到
+         真正的起跑点, 再执行记住的方向。正=认完往前走, 负=往后退, 0=不补。
+         **单位是米**: 命令行 start_offset:=0.5 就是 500mm。0.5m / 0.12(m/s)
+         要走 ~4s, 嫌慢就一起给 start_move_speed:=0.2 -->
+    <arg name="start_offset" default="0.30"/>   <!-- 米! 认完灯开到三岔口的距离 -->
+    <!-- 起跑黄线对齐(仅 is_fork:=yolo)。规定位置是"车轮在黄线前 10cm 内",
+         可那个位置上黄线已经掉出视野了 —— 所以先用黄线把车顶到一个**看得见
+         线**的固定位置, 再盲走 align_offset 进去。
+         yellow_target 是黄线该落在画面第几行(占图高比例), **现场标一次**:
+         把车摆到你要的对齐位姿, dry_run 跑一下, 看日志 [对齐] 报的行号/比例,
+         填进来。诊断图 dump/align_*.jpg: 绿线=检出, 品红线=目标, 红色=黄掩码 -->
+    <arg name="align_yellow" default="true"/>
+    <arg name="yellow_target" default="0.90"/>
+    <arg name="yellow_tol" default="0.012"/>    <!-- ±0.012*480 ≈ 6px -->
+    <arg name="yellow_b_min" default="145"/>    <!-- Lab b 阈值, 越大越严 -->
+    <arg name="align_speed" default="0.08"/>
+    <arg name="align_offset" default="0.10"/>   <!-- 对齐后盲走进规定位置 -->
+    <arg name="align_back_max" default="0.30"/> <!-- 找不到黄线最多往后倒多远 -->
+    <arg name="start_move_speed" default="0.12"/>
+    <!-- 挪动收尾最低速: 快到位按剩余距离减速, 不低于此值(否则底盘推不动) -->
+    <arg name="move_min_speed" default="0.06"/>
+    <!-- 兜底: 跑够这么久无条件停车(0=不限)。原型阶段防"停不下来又 Ctrl-C
+         不掉"。随时也可以远程急停:
+           rostopic pub -1 /lane_proto/estop std_msgs/Bool "data: true" -->
+    <arg name="max_runtime" default="300.0"/>
+    <arg name="distance_source" default="auto"/>    <!-- auto|odom|time|imu -->
+    <!-- 空=用 config/red_template.png; 想试平行四边形版就指到
+         $(find lane_proto)/config/red_template_band.png -->
+    <arg name="template" default=""/>
+    <include if="$(arg start_base_driver)"
+             file="$(find ucar_controller_simple)/launch/base_driver.launch"/>
+    <node pkg="lane_proto" type="lane_follow.py" name="lane_follow"
+          output="screen" required="false"
+          launch-prefix="$(find ucar_2026)/scripts/run_melodic_python2.sh">
+        <param name="dry_run" value="$(arg dry_run)"/>
+        <param name="linear_speed" value="$(arg linear_speed)"/>
+        <param name="gain" value="$(arg gain)"/>
+        <param name="mirror" value="$(arg mirror)"/>
+        <param name="video_device" value="$(arg video_device)"/>
+        <param name="use_ros_camera" value="$(arg use_ros_camera)"/>
+        <param name="image_topic" value="$(arg image_topic)"/>
+        <param name="cmd_vel_topic" value="$(arg cmd_vel_topic)"/>
+        <param name="odom_topic" value="$(arg odom_topic)"/>
+        <param name="start_enabled" value="$(arg start_enabled)"/>
+        <param name="require_fresh_odom" value="$(arg require_fresh_odom)"/>
+        <param name="odom_fresh_timeout" value="$(arg odom_fresh_timeout)"/>
+        <param name="exit_on_stop" value="$(arg exit_on_stop)"/>
+        <param name="dump_every" value="$(arg dump_every)"/>
+        <param name="dump_keep" value="0"/>   <!-- 0=不限额, 启动时清空目录 -->
+        <param name="dump_async" type="bool" value="$(arg dump_async)"/>
+        <param name="stats_every" value="$(arg stats_every)"/>
+        <param name="fourcc" type="str" value="$(arg fourcc)"/>
+        <param name="cam_fps" value="$(arg cam_fps)"/>
+        <param name="template" value="$(arg template)"/>
+        <!-- ⚠ 这里以前写死 10.0, 所以命令行 rate:=20 一直不生效 -->
+        <param name="rate" value="$(arg rate)"/>
+        <param name="use_lidar" value="$(arg use_lidar)"/>
+        <param name="goal_enable" value="$(arg goal_enable)"/>
+        <param name="goal_pause" value="$(arg goal_pause)"/>
+        <param name="goal_stop_distance" value="$(arg goal_stop_distance)"/>
+        <param name="goal_confirm" value="$(arg goal_confirm)"/>
+        <param name="goal_y_lo" value="$(arg goal_y_lo)"/>
+        <param name="goal_half" value="$(arg goal_half)"/>
+        <param name="goal_cover" value="$(arg goal_cover)"/>
+        <param name="goal_line_cover" value="$(arg goal_line_cover)"/>
+        <param name="goal_line_count" value="$(arg goal_line_count)"/>
+        <param name="goal_max_deg" value="$(arg goal_max_deg)"/>
+        <!-- type="str" 是必须的: 不写的话 roslaunch 会把 "false" 自动
+             识别成 bool、"yolo" 留成字符串, 参数类型就飘了。写死成
+             字符串以后, 命令行 is_fork:=false / true / yolo 都不用加引号,
+             节点里 _fork_mode() 统一解析(bool 也照样接) -->
+        <param name="is_fork" type="str" value="$(arg is_fork)"/>
+        <param name="fork_turn_deg" value="$(arg fork_turn_deg)"/>
+        <param name="yolo_turn_deg" value="$(arg yolo_turn_deg)"/>
+        <param name="yolo_conf" value="$(arg yolo_conf)"/>
+        <param name="yolo_backend" type="str" value="$(arg yolo_backend)"/>
+        <param name="yolo_wait_max" value="$(arg yolo_wait_max)"/>
+        <param name="yolo_fallback" type="str" value="$(arg yolo_fallback)"/>
+        <param name="yolo_swap_lr" type="bool" value="$(arg yolo_swap_lr)"/>
+        <param name="yolo_use_raw" type="bool" value="$(arg yolo_use_raw)"/>
+        <param name="yolo_zoom" value="$(arg yolo_zoom)"/>
+        <param name="fork_turn_speed" value="$(arg fork_turn_speed)"/>
+        <param name="fork_cooldown" value="$(arg fork_cooldown)"/>
+        <param name="fork_offset" value="$(arg fork_offset)"/>
+        <param name="fork_move_speed" value="$(arg fork_move_speed)"/>
+        <param name="start_offset" value="$(arg start_offset)"/>
+        <param name="align_yellow" type="bool" value="$(arg align_yellow)"/>
+        <param name="yellow_target" value="$(arg yellow_target)"/>
+        <param name="yellow_tol" value="$(arg yellow_tol)"/>
+        <param name="yellow_b_min" value="$(arg yellow_b_min)"/>
+        <param name="align_speed" value="$(arg align_speed)"/>
+        <param name="align_offset" value="$(arg align_offset)"/>
+        <param name="align_back_max" value="$(arg align_back_max)"/>
+        <param name="start_move_speed" value="$(arg start_move_speed)"/>
+        <param name="move_min_speed" value="$(arg move_min_speed)"/>
+        <param name="max_runtime" value="$(arg max_runtime)"/>
+        <param name="distance_source" value="$(arg distance_source)"/>
+        <!-- 下面这些由硬件/噪声决定, 一般不用碰 -->
+        <param name="min_intrusion" value="0.02"/>   <!-- 死区 -->
+        <param name="min_turn_speed" value="0.12"/>  <!-- 底盘旋转死区 -->
+        <param name="turn_max" value="0.50"/>
+    </node>
+</launch>

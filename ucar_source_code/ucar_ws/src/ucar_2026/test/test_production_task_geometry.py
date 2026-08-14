@@ -299,6 +299,28 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
     def capture_warning(self, message, *args):
         self.warnings.append(message % args)
 
+    def test_rosout_ahrs_crc_is_warning_but_head_len_stays_critical(self):
+        self.task.lock = threading.RLock()
+        self.task.critical_error = ""
+        warnings = []
+        original_throttle = task_module.rospy.logwarn_throttle
+        task_module.rospy.logwarn_throttle = (
+            lambda _period, message, *args: warnings.append(message % args))
+        try:
+            self.task.rosout_cb(type("LogMessage", (object,), {
+                "msg": "check crc16 faild(ahrs)."})())
+            self.assertEqual(self.task.critical_error, "")
+            self.assertTrue(any("PRODUCTION_AHRS_CRC_IGNORED" in item
+                                for item in warnings))
+
+            self.task.rosout_cb(type("LogMessage", (object,), {
+                "msg": "base driver check head_len faild"})())
+            self.assertEqual(
+                self.task.critical_error,
+                "base driver check head_len faild")
+        finally:
+            task_module.rospy.logwarn_throttle = original_throttle
+
     def test_post_turn_position_excess_warns_and_continues(self):
         self.assertFalse(
             self.task.verify_position(
@@ -1687,7 +1709,8 @@ class ProductionTaskDualItemTest(unittest.TestCase):
             lambda item, category: events.append(
                 ("sim_start", item, category)))
         self.task.simulation_wait_done = (
-            lambda: events.append("sim_wait_done"))
+            lambda: (events.append("sim_wait_timeout"), False)[1])
+        self.task.simulation_done_timeout = 120.0
         self.task.publish_result = (
             lambda success, reason: events.append(("result", success)))
         self.task.lane_handoff_enabled = False
@@ -1718,7 +1741,7 @@ class ProductionTaskDualItemTest(unittest.TestCase):
             "camera_release",
             "save",
             ("sim_start", u"手机", u"电子产品"),
-            "sim_wait_done",
+            "sim_wait_timeout",
             ("announce", u"仿真任务已完成，已将手机放入电子产品"),
             ("nav_coord", "destination point 170"),
             ("result", True),
@@ -1910,18 +1933,10 @@ class ProductionTaskDualItemTest(unittest.TestCase):
             "PRODUCTION_TASK_TTS_TIMEOUT" in warning
             for warning in self.warnings))
 
-    def test_resolve_simulation_host_from_ros_master_uri(self):
+    def test_resolve_simulation_host_requires_explicit_value(self):
         self.task.simulation_host = ""
-        original = os.environ.get("ROS_MASTER_URI")
-        os.environ["ROS_MASTER_URI"] = "http://192.168.1.5:11311"
-        try:
-            self.assertEqual(
-                self.task.resolve_simulation_host(), "192.168.1.5")
-        finally:
-            if original is None:
-                del os.environ["ROS_MASTER_URI"]
-            else:
-                os.environ["ROS_MASTER_URI"] = original
+        with self.assertRaises(task_module.MissionAbort):
+            self.task.resolve_simulation_host()
 
     def test_resolve_simulation_host_explicit_value_wins(self):
         self.task.simulation_host = "10.0.0.2"
@@ -2085,10 +2100,10 @@ class ProductionTaskDualItemTest(unittest.TestCase):
             task_module.urllib2.urlopen = original_urlopen
             task_module.rospy.is_shutdown = original_is_shutdown
 
-    def test_simulation_wait_done_aborts_on_failed_state(self):
+    def test_simulation_wait_done_continues_after_failed_state_timeout(self):
         self.task.simulation_host = "192.168.1.5"
         self.task.simulation_port = 11313
-        self.task.simulation_done_timeout = 10.0
+        self.task.simulation_done_timeout = 0.03
         self.task.simulation_poll_period = 0.01
         self.task.require_safe = lambda: None
         original_is_shutdown = task_module.rospy.is_shutdown
@@ -2107,15 +2122,13 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         original_urlopen = task_module.urllib2.urlopen
         task_module.urllib2.urlopen = fake_urlopen
         try:
-            with self.assertRaises(task_module.MissionAbort) as raised:
-                self.task.simulation_wait_done()
+            completed = self.task.simulation_wait_done()
         finally:
             task_module.urllib2.urlopen = original_urlopen
             task_module.rospy.is_shutdown = original_is_shutdown
-        self.assertIn("simulation failed: sim crashed",
-                      str(raised.exception))
+        self.assertFalse(completed)
 
-    def test_simulation_wait_done_aborts_on_timeout(self):
+    def test_simulation_wait_done_continues_on_timeout(self):
         self.task.simulation_host = "192.168.1.5"
         self.task.simulation_port = 11313
         self.task.simulation_done_timeout = 0.05
@@ -2137,12 +2150,45 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         original_urlopen = task_module.urllib2.urlopen
         task_module.urllib2.urlopen = fake_urlopen
         try:
-            with self.assertRaises(task_module.MissionAbort) as raised:
-                self.task.simulation_wait_done()
+            completed = self.task.simulation_wait_done()
         finally:
             task_module.urllib2.urlopen = original_urlopen
             task_module.rospy.is_shutdown = original_is_shutdown
-        self.assertIn("simulation did not finish", str(raised.exception))
+        self.assertFalse(completed)
+
+    def test_simulation_wait_done_reconnects_after_bad_status_line(self):
+        self.task.simulation_host = "192.168.1.5"
+        self.task.simulation_port = 11313
+        self.task.simulation_done_timeout = 1.0
+        self.task.simulation_poll_period = 0.0
+        self.task.require_safe = lambda: None
+        attempts = []
+        original_is_shutdown = task_module.rospy.is_shutdown
+        task_module.rospy.is_shutdown = lambda: False
+
+        def fake_urlopen(url, timeout=None):
+            attempts.append((url, timeout))
+            if len(attempts) == 1:
+                raise task_module.httplib.BadStatusLine(
+                    "No status line received")
+
+            class Response(object):
+                def read(self):
+                    return '{"state": "done"}'
+
+                def close(self):
+                    pass
+
+            return Response()
+
+        original_urlopen = task_module.urllib2.urlopen
+        task_module.urllib2.urlopen = fake_urlopen
+        try:
+            self.assertTrue(self.task.simulation_wait_done())
+        finally:
+            task_module.urllib2.urlopen = original_urlopen
+            task_module.rospy.is_shutdown = original_is_shutdown
+        self.assertEqual(len(attempts), 2)
 
     def test_warehouse_name_for_category_matches_workshop_signs(self):
         self.assertEqual(
@@ -2165,72 +2211,57 @@ class ProductionTaskDualItemTest(unittest.TestCase):
 
     def test_handoff_to_lane_disabled_does_not_spawn(self):
         self.task.lane_handoff_enabled = False
-        self.task.lane_handoff_script = (
-            "/home/ucar/ucar_ws/src/ucar_2026/scripts/handoff_lane.sh")
-        spawned = []
-        original_popen = task_module.subprocess.Popen
-        task_module.subprocess.Popen = (
-            lambda *args, **kwargs: spawned.append(args))
+        self.task.handoff_to_lane()
+
+    def test_handoff_to_lane_activates_resident_node_then_switches_owner(self):
+        self.task.lane_handoff_enabled = True
+        self.task.lane_activate_service = "/lane_proto/set_active"
+        self.task.lane_owner_service = "/cmd_vel_owner/set_lane_mode"
+        self.task.lane_handoff_timeout = 1.0
+        self.task.lane_state = "STOPPED"
+        self.task.lane_state_event = threading.Event()
+        self.task.lock = threading.RLock()
+        self.task.set_ros_camera_streaming = lambda _on, required=True: None
+        self.task.publish_state = lambda _state: None
+        calls = []
+        original_wait = task_module.rospy.wait_for_service
+        original_proxy = task_module.rospy.ServiceProxy
+
+        class Response(object):
+            success = True
+            message = "ok"
+
+        task_module.rospy.wait_for_service = (
+            lambda service, timeout: calls.append(("wait", service)))
+        task_module.rospy.ServiceProxy = (
+            lambda service, _kind: lambda enabled: (
+                calls.append(("call", service, enabled)) or Response()))
         try:
             self.task.handoff_to_lane()
         finally:
-            task_module.subprocess.Popen = original_popen
-        self.assertEqual(spawned, [])
+            task_module.rospy.wait_for_service = original_wait
+            task_module.rospy.ServiceProxy = original_proxy
+        self.assertEqual(calls, [
+            ("wait", "/lane_proto/set_active"),
+            ("wait", "/cmd_vel_owner/set_lane_mode"),
+            ("call", "/lane_proto/set_active", True),
+            ("call", "/cmd_vel_owner/set_lane_mode", True),
+        ])
 
-    def test_handoff_to_lane_spawns_setsid_with_master_ip(self):
+    def test_handoff_to_lane_service_failure_aborts(self):
         self.task.lane_handoff_enabled = True
-        self.task.lane_handoff_delay = 0.0
-        self.task.lane_handoff_script = (
-            "/home/ucar/ucar_ws/src/ucar_2026/scripts/handoff_lane.sh")
-        spawned = []
-        original_popen = task_module.subprocess.Popen
-        original_sleep = task_module.rospy.sleep
-        task_module.rospy.sleep = lambda _seconds: None
-        task_module.subprocess.Popen = (
-            lambda *args, **kwargs: spawned.append(args))
-        original_env = os.environ.get("ROS_MASTER_URI")
-        os.environ["ROS_MASTER_URI"] = "http://192.168.8.198:11311"
+        self.task.lane_activate_service = "/lane_proto/set_active"
+        self.task.lane_owner_service = "/cmd_vel_owner/set_lane_mode"
+        self.task.set_ros_camera_streaming = lambda _on, required=True: None
+        original_wait = task_module.rospy.wait_for_service
+        task_module.rospy.wait_for_service = (
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                task_module.rospy.ROSException("not ready")))
         try:
-            self.task.handoff_to_lane()
+            with self.assertRaises(task_module.MissionAbort):
+                self.task.handoff_to_lane()
         finally:
-            task_module.subprocess.Popen = original_popen
-            task_module.rospy.sleep = original_sleep
-            if original_env is None:
-                del os.environ["ROS_MASTER_URI"]
-            else:
-                os.environ["ROS_MASTER_URI"] = original_env
-        self.assertEqual(spawned, [([
-            "setsid",
-            "/home/ucar/ucar_ws/src/ucar_2026/scripts/handoff_lane.sh",
-            "192.168.8.198"],)])
-
-    def test_handoff_to_lane_popen_failure_warns_without_raising(self):
-        self.task.lane_handoff_enabled = True
-        self.task.lane_handoff_delay = 0.0
-        self.task.lane_handoff_script = (
-            "/home/ucar/ucar_ws/src/ucar_2026/scripts/handoff_lane.sh")
-        original_popen = task_module.subprocess.Popen
-        original_sleep = task_module.rospy.sleep
-        task_module.rospy.sleep = lambda _seconds: None
-
-        def failing_popen(*args, **kwargs):
-            raise OSError("setsid not found")
-
-        task_module.subprocess.Popen = failing_popen
-        original_env = os.environ.get("ROS_MASTER_URI")
-        os.environ["ROS_MASTER_URI"] = "http://192.168.8.198:11311"
-        try:
-            self.task.handoff_to_lane()  # must not raise
-        finally:
-            task_module.subprocess.Popen = original_popen
-            task_module.rospy.sleep = original_sleep
-            if original_env is None:
-                del os.environ["ROS_MASTER_URI"]
-            else:
-                os.environ["ROS_MASTER_URI"] = original_env
-        self.assertTrue(any(
-            "PRODUCTION_LANE_HANDOFF_FAILED" in warning
-            for warning in self.warnings))
+            task_module.rospy.wait_for_service = original_wait
 
 
 if __name__ == "__main__":

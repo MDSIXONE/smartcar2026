@@ -53,7 +53,7 @@ class ProductionCameraOcrTest(unittest.TestCase):
         CAMERA_OCR.cv2.VideoCapture = fake_video_capture
         try:
             camera = CAMERA_OCR.open_camera(
-                "/dev/ucar_video", 640, 480, 2,
+                "/dev/video0", 640, 480, 2,
                 open_timeout=1.0, retry_interval=0.0)
         finally:
             CAMERA_OCR.cv2.VideoCapture = original_video_capture

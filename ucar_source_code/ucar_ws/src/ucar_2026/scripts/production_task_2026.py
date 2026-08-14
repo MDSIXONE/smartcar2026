@@ -21,11 +21,9 @@ Flow:
      fallback perimeter route once.  If a required category remains absent,
      release OCR and continue directly to the 441 handoff destination.
   7. Save every attempt plus the three strongest distinct wall observations.
-  8. On SUCCEEDED, hand the vehicle over to the lane-follow launch: the
-     handoff script (handoff_lane.sh) waits for this launch to exit, then
-     starts lane_proto.launch (it owns the chassis serial and camera), and
-     the task node shuts itself down so the required=true launch releases
-     those resources.
+  8. On SUCCEEDED, activate the already-resident lane follower and switch
+     the single chassis-command owner.  The shared ROS camera and chassis
+     driver stay alive, eliminating the old launch restart pause.
 
 The node never drives to the QR edge points: they lie on the field boundary.
 They are gaze targets while the chassis remains at centre 52.
@@ -41,6 +39,7 @@ import subprocess
 import sys
 import threading
 import time
+import httplib
 import urllib2
 
 import actionlib
@@ -56,7 +55,7 @@ from nav_msgs.srv import GetPlan
 from rosgraph_msgs.msg import Log
 from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import Int8, String
-from std_srvs.srv import Empty
+from std_srvs.srv import Empty, SetBool
 
 from production_task_geometry import (
     DEFAULT_FALLBACK_PRODUCTION_OBSERVATION_HEADINGS_DEG,
@@ -155,8 +154,8 @@ class ProductionTask2026(object):
         ]
         self.processing_dwell_seconds = float(rospy.get_param(
             "~processing_dwell_seconds", 3.0))
-        # Local simulation (host PC) coordination.  An empty simulation_host
-        # derives the host from ROS_MASTER_URI (resolve_simulation_host).
+        # The simulation HTTP server is on the PC.  It is deliberately
+        # independent of ROS_MASTER_URI: the ROS Master runs on the vehicle.
         self.simulation_port = int(rospy.get_param(
             "~simulation_port", 11313))
         self.simulation_host = str(
@@ -166,23 +165,24 @@ class ProductionTask2026(object):
         self.simulation_start_retries = max(
             1, int(rospy.get_param("~simulation_start_retries", 3)))
         self.simulation_done_timeout = float(rospy.get_param(
-            "~simulation_done_timeout", 150.0))
+            "~simulation_done_timeout", 120.0))
         self.simulation_poll_period = float(rospy.get_param(
             "~simulation_poll_period", 2.0))
         self.speak_wait_timeout = float(rospy.get_param(
             "~speak_wait_timeout", 60.0))
-        # After SUCCEEDED the mission hands the vehicle over to the
-        # lane-follow launch.  lane_proto owns the chassis serial and the
-        # camera, so the handoff script waits for this launch to exit first.
+        # lane_proto is resident from launch time.  At the destination this
+        # node only activates it and switches the sole /cmd_vel owner; it
+        # never tears down and restarts another launch.
         self.lane_handoff_enabled = bool(
             rospy.get_param("~lane_handoff_enabled", True))
-        self.lane_handoff_script = str(rospy.get_param(
-            "~lane_handoff_script",
-            os.path.join(
-                os.path.expanduser("~"),
-                "ucar_ws/src/ucar_2026/scripts/handoff_lane.sh")))
-        self.lane_handoff_delay = float(rospy.get_param(
-            "~lane_handoff_delay", 1.0))
+        self.lane_activate_service = str(rospy.get_param(
+            "~lane_activate_service", "/lane_proto/set_active"))
+        self.lane_owner_service = str(rospy.get_param(
+            "~lane_owner_service", "/cmd_vel_owner/set_lane_mode"))
+        self.lane_state_topic = str(rospy.get_param(
+            "~lane_state_topic", "/lane_proto/state"))
+        self.lane_handoff_timeout = float(rospy.get_param(
+            "~lane_handoff_timeout", 360.0))
         self.tf_lookup_retry_seconds = float(rospy.get_param(
             "~tf_lookup_retry_seconds", 0.5))
         self.tts_enabled = bool(
@@ -274,7 +274,7 @@ class ProductionTask2026(object):
         self.camera_frame_timeout = float(
             rospy.get_param("~camera_frame_timeout", 1.0))
         self.video_device = str(
-            rospy.get_param("~video_device", "/dev/ucar_video"))
+            rospy.get_param("~video_device", "/dev/video0"))
         self.camera_width = int(rospy.get_param("~camera_width", 640))
         self.camera_height = int(rospy.get_param("~camera_height", 480))
         self.camera_warmup_frames = max(
@@ -414,14 +414,16 @@ class ProductionTask2026(object):
                 not (1 <= self.simulation_port <= 65535)):
             raise TaskDefinitionError(
                 "simulation communication parameters are invalid")
-        if (not is_finite(self.lane_handoff_delay) or
-                self.lane_handoff_delay < 0.0):
+        if (not is_finite(self.lane_handoff_timeout) or
+                self.lane_handoff_timeout <= 0.0):
             raise TaskDefinitionError(
-                "lane_handoff_delay must be finite and non-negative")
-        if (self.lane_handoff_enabled and
-                not self.lane_handoff_script.strip()):
+                "lane_handoff_timeout must be finite and positive")
+        if (self.lane_handoff_enabled and not all((
+                self.lane_activate_service.strip(),
+                self.lane_owner_service.strip(),
+                self.lane_state_topic.strip()))):
             raise TaskDefinitionError(
-                "lane_handoff_script must be set when lane_handoff_enabled")
+                "lane activation, owner, and state endpoints must be set")
         self.simulation_host = self.resolve_simulation_host()
         rospy.loginfo(
             "PRODUCTION_TASK_SIMULATION_HOST host=%s port=%d",
@@ -554,8 +556,10 @@ class ProductionTask2026(object):
         self.tf_listener = tf.TransformListener()
         self.cv_bridge = CvBridge()
 
+        self.cmd_vel_topic = str(rospy.get_param(
+            "~cmd_vel_topic", "/cmd_vel/navigation"))
         self.cmd_vel_pub = rospy.Publisher(
-            "/cmd_vel", Twist, queue_size=10)
+            self.cmd_vel_topic, Twist, queue_size=10)
         self.qr_enable_pub = rospy.Publisher(
             "/qrcode_start_flag", Int8, queue_size=1, latch=True)
         self.navigation_mode_pub = rospy.Publisher(
@@ -613,6 +617,8 @@ class ProductionTask2026(object):
         self.expected_sim_category = None
         self.served_wall_points = set()
         self._ocr_turn_stop_flag = False
+        self.lane_state = ""
+        self.lane_state_event = threading.Event()
 
         rospy.Subscriber(
             "/odom_raw", Odometry, self.odom_cb, queue_size=20)
@@ -630,6 +636,8 @@ class ProductionTask2026(object):
             "/qr_api_result", String, self.qr_api_result_cb, queue_size=20)
         rospy.Subscriber(
             "/rosout_agg", Log, self.rosout_cb, queue_size=100)
+        rospy.Subscriber(
+            self.lane_state_topic, String, self.lane_state_cb, queue_size=10)
         rospy.on_shutdown(self.shutdown)
 
         self.publish_state("WAITING_START")
@@ -728,6 +736,11 @@ class ProductionTask2026(object):
             self.latest_camera_receipt = rospy.Time.now()
             self.camera_sequence += 1
 
+    def lane_state_cb(self, message):
+        with self.lock:
+            self.lane_state = message.data.strip()
+        self.lane_state_event.set()
+
     def qr_result_cb(self, message):
         text = message.data.strip()
         if not text:
@@ -775,6 +788,11 @@ class ProductionTask2026(object):
 
     def rosout_cb(self, message):
         text = message.msg.lower()
+        if "crc16" in text and "ahrs" in text:
+            rospy.logwarn_throttle(
+                5.0, "PRODUCTION_AHRS_CRC_IGNORED %s",
+                self.log_safe_text(message.msg))
+            return
         critical_markers = (
             "crc16",
             "head_len",
@@ -1047,14 +1065,22 @@ class ProductionTask2026(object):
         self.publish_state("SIMULATION_START")
         self.simulation_request_start(sim_item, sim_category)
         self.publish_state("SIMULATION_WAIT_DONE")
-        self.simulation_wait_done()
-        self.publish_state("SIMULATION_DONE")
-        rospy.loginfo(
-            "PRODUCTION_SIMULATION_FINISHED item=%s category=%s",
-            self.log_safe_text(sim_item),
-            self.log_safe_text(sim_category))
-        self.speak_wait(
-            u"仿真任务已完成，已将%s放入%s" % (sim_item, sim_category))
+        simulation_completed = self.simulation_wait_done()
+        if simulation_completed:
+            self.publish_state("SIMULATION_DONE")
+            rospy.loginfo(
+                "PRODUCTION_SIMULATION_FINISHED item=%s category=%s",
+                self.log_safe_text(sim_item),
+                self.log_safe_text(sim_category))
+            self.speak_wait(
+                u"仿真任务已完成，已将%s放入%s" % (sim_item, sim_category))
+        else:
+            self.publish_state("SIMULATION_TIMEOUT_CONTINUE")
+            rospy.logwarn(
+                "PRODUCTION_SIMULATION_TIMEOUT_CONTINUE timeout=%.1f",
+                self.simulation_done_timeout)
+            self.speak_wait(
+                u"仿真任务已完成，已将%s放入%s" % (sim_item, sim_category))
 
         self.finish_at_destination(
             "recognized both target categories; announced processing "
@@ -1103,15 +1129,14 @@ class ProductionTask2026(object):
             destination[0], destination[1], destination_yaw,
             "destination %s" % destination_label,
             require_plan=True)
-        self.stop_motion()
         self.publish_state("SUCCEEDED")
         self.publish_result(
             True, "%s; arrived at destination %s" % (reason, destination_label))
-        # Hand the vehicle over to the lane-follow launch, then exit this
-        # node so the required=true launch shuts down and releases the
-        # chassis serial port and camera for lane_proto.
+        # The successful navigation action is the boundary.  Do not add a
+        # parking command here: activate the already-warm lane node and
+        # switch command ownership directly.
         self.handoff_to_lane()
-        rospy.signal_shutdown("lane handoff")
+        rospy.signal_shutdown("lane following completed")
 
     @staticmethod
     def normalize_qr_text(value):
@@ -1937,6 +1962,21 @@ class ProductionTask2026(object):
             return value
         return json.dumps(value, ensure_ascii=True)
 
+    @staticmethod
+    def print_terminal(text):
+        """Print a human-facing UTF-8 line to the launch terminal.
+
+        rospy log lines must stay ASCII (Python 2 crash lesson 2026-08-06),
+        so Chinese meant for the operator goes straight to stdout instead.
+        The task node runs with output="screen", so this appears in the
+        mission terminal.  Text arrives as unicode and is encoded to UTF-8
+        bytes before printing.
+        """
+        if isinstance(text, unicode):
+            text = text.encode("utf-8")
+        print(text)
+        sys.stdout.flush()
+
     def speak(self, text):
         """Play one TTS announcement asynchronously; never aborts the task."""
         if not self.tts_enabled:
@@ -1945,6 +1985,10 @@ class ProductionTask2026(object):
             payload = text
             if isinstance(payload, bytes):
                 payload = payload.decode("utf-8", "replace")
+            rospy.loginfo(
+                "PRODUCTION_TTS_SPEAK text=%s",
+                self.log_safe_text(payload))
+            self.print_terminal(u"[播报] %s" % payload)
             argv = [
                 self.tts_python, self.tts_helper_path,
                 payload.encode("utf-8")]
@@ -2028,6 +2072,10 @@ class ProductionTask2026(object):
             payload = text
             if isinstance(payload, bytes):
                 payload = payload.decode("utf-8", "replace")
+            rospy.loginfo(
+                "PRODUCTION_TTS_SPEAK text=%s",
+                self.log_safe_text(payload))
+            self.print_terminal(u"[播报] %s" % payload)
             argv = [
                 self.tts_python, self.tts_helper_path,
                 payload.encode("utf-8")]
@@ -2057,68 +2105,52 @@ class ProductionTask2026(object):
             "PRODUCTION_TASK_TTS_TIMEOUT seconds=%.1f text=%s",
             float(timeout), self.log_safe_text(text))
 
-    @staticmethod
-    def master_uri_host():
-        """Host parsed from ROS_MASTER_URI (scheme and port stripped).
-
-        ``http://host:11311`` yields ``host``; an empty or malformed URI
-        yields an empty string.
-        """
-        host = os.environ.get("ROS_MASTER_URI", "")
-        for prefix in ("http://", "https://"):
-            if host.startswith(prefix):
-                host = host[len(prefix):]
-                break
-        return host.split(":", 1)[0]
-
     def resolve_simulation_host(self):
-        """Explicit simulation_host wins; otherwise derive from ROS_MASTER_URI.
-
-        The master URI is ``http://host:11311``; strip the scheme and the
-        port so the simulation service on the same host can be reached.
-        """
-        if self.simulation_host:
-            return self.simulation_host
-        host = self.master_uri_host()
+        """Return the explicitly configured reachable PC simulation host."""
+        host = self.simulation_host.strip()
         if not host:
             raise MissionAbort(
-                "simulation_host is not configured and cannot be derived "
-                "from ROS_MASTER_URI")
+                "simulation_host must be explicitly configured; "
+                "ROS_MASTER_URI points at the vehicle")
         return host
 
     def handoff_to_lane(self):
-        """Hand the vehicle over to the lane-follow launch after success.
-
-        lane_proto owns the chassis serial port and the camera, so it can
-        only start after 2026.launch fully exits.  The handoff script waits
-        for this launch to exit, then starts lane_proto.launch.  A failure
-        to start the script only logs a warning: the mission already
-        succeeded and an operator can start lane_proto manually.
-        """
+        """Activate resident lane following without an intermediate stop."""
         if not self.lane_handoff_enabled:
             return
-        rospy.sleep(self.lane_handoff_delay)
-        master_ip = self.master_uri_host()
-        if not master_ip:
-            rospy.logwarn(
-                "PRODUCTION_LANE_HANDOFF_FAILED no host in ROS_MASTER_URI; "
-                "start lane_proto manually")
-            return
+        self.set_ros_camera_streaming(True, required=True)
         try:
-            devnull = open(os.devnull, "wb")
-            try:
-                subprocess.Popen(
-                    ["setsid", self.lane_handoff_script, master_ip],
-                    stdout=devnull, stderr=devnull)
-            finally:
-                devnull.close()
-        except (OSError, IOError, ValueError) as exc:
-            rospy.logwarn(
-                "PRODUCTION_LANE_HANDOFF_FAILED %s", exc)
-            return
-        rospy.loginfo(
-            "PRODUCTION_LANE_HANDOFF_STARTED master=%s script=%s",
-            master_ip, self.lane_handoff_script)
+            rospy.wait_for_service(self.lane_activate_service, timeout=10.0)
+            rospy.wait_for_service(self.lane_owner_service, timeout=10.0)
+            activate_lane = rospy.ServiceProxy(
+                self.lane_activate_service, SetBool)
+            activation = activate_lane(True)
+            if not activation.success:
+                raise MissionAbort(
+                    "lane activation rejected: %s" % activation.message)
+            set_lane_owner = rospy.ServiceProxy(
+                self.lane_owner_service, SetBool)
+            owner_result = set_lane_owner(True)
+            if not owner_result.success:
+                raise MissionAbort(
+                    "lane command ownership rejected: %s" %
+                    owner_result.message)
+        except (rospy.ROSException, rospy.ServiceException) as exc:
+            raise MissionAbort("lane handoff service failed: %s" % exc)
+
+        self.publish_state("LANE_ACTIVE")
+        deadline = time.time() + self.lane_handoff_timeout
+        while not rospy.is_shutdown() and time.time() < deadline:
+            with self.lock:
+                lane_state = self.lane_state
+            if lane_state == "STOPPED":
+                rospy.loginfo("PRODUCTION_LANE_HANDOFF_COMPLETED")
+                return
+            self.lane_state_event.wait(0.10)
+            self.lane_state_event.clear()
+        raise MissionAbort(
+            "lane following did not reach STOPPED within %.1f s" %
+            self.lane_handoff_timeout)
 
     def simulation_request_start(self, item_name, category):
         """Ask the local simulation to start; retries then aborts.
@@ -2183,9 +2215,9 @@ class ProductionTask2026(object):
     def simulation_wait_done(self):
         """Poll /status until the simulation reports done; safety stays on.
 
-        The vehicle must remain still during the wait; every poll iteration
-        re-checks the safety gate.  ``failed`` and the total timeout abort
-        the mission; transient status errors only log a warning.
+        Every poll opens a new HTTP connection, so transport failures retry
+        on the next period.  The vehicle continues after the configured
+        timeout whether the simulator reports running, failed, or no status.
         """
         url = "http://%s:%d/status" % (
             self.simulation_host, self.simulation_port)
@@ -2198,9 +2230,9 @@ class ProductionTask2026(object):
                     payload = json.loads(response.read())
                 finally:
                     response.close()
-            except (urllib2.URLError, IOError) as exc:
+            except (urllib2.URLError, IOError, httplib.HTTPException) as exc:
                 rospy.logwarn_throttle(
-                    2.0, "PRODUCTION_SIMULATION_STATUS_ERROR %s",
+                    2.0, "PRODUCTION_SIMULATION_STATUS_RECONNECT error=%s",
                     self.log_safe_text(str(exc)))
                 time.sleep(self.simulation_poll_period)
                 continue
@@ -2214,15 +2246,18 @@ class ProductionTask2026(object):
                 rospy.loginfo(
                     "PRODUCTION_SIMULATION_STATUS_DONE %s",
                     json.dumps(payload, ensure_ascii=True))
-                return
+                return True
             if state == "failed":
-                raise MissionAbort(
-                    "simulation failed: %s" %
-                    payload.get("detail", payload))
+                rospy.logwarn_throttle(
+                    2.0, "PRODUCTION_SIMULATION_STATUS_FAILED_WAITING %s",
+                    self.log_safe_text(str(payload.get("detail", payload))))
             time.sleep(self.simulation_poll_period)
-        raise MissionAbort(
-            "simulation did not finish within %.1f s" %
+        if rospy.is_shutdown():
+            raise MissionAbort("ROS shutdown while waiting for simulation")
+        rospy.logwarn(
+            "PRODUCTION_SIMULATION_WAIT_TIMEOUT_CONTINUE timeout=%.1f",
             self.simulation_done_timeout)
+        return False
 
     def wait_for_item_inputs(self):
         """Wait for the two task requests from voice or standard input.
@@ -2287,6 +2322,9 @@ class ProductionTask2026(object):
         rospy.loginfo(
             "PRODUCTION_VOICE_INPUT_STARTED listener=%s wake_word=%s",
             listener_path, self.log_safe_text(wake_word))
+        rospy.loginfo(
+            "PRODUCTION_VOICE_WAITING waiting for wake word and "
+            "dual-category command")
 
         timeout = float(self.voice_input_timeout)
         deadline = time.time() + timeout if timeout > 0.0 else None
@@ -2311,6 +2349,24 @@ class ProductionTask2026(object):
                 lines = buffered.split(b"\n")
                 buffered = lines.pop()
                 for raw_line in lines:
+                    decoded_line = raw_line
+                    if isinstance(decoded_line, bytes):
+                        decoded_line = decoded_line.decode(
+                            "utf-8", "replace")
+                    decoded_line = decoded_line.strip()
+                    if decoded_line:
+                        display_line = decoded_line
+                        if u"\r" in display_line:
+                            display_line = display_line.split(
+                                u"\r")[-1].strip()
+                        if display_line.startswith(u"音量"):
+                            display_line = u""
+                        try:
+                            json.loads(decoded_line)
+                        except ValueError:
+                            if display_line:
+                                self.print_terminal(
+                                    u"[语音] %s" % display_line)
                     parsed = self.parse_voice_listener_message(raw_line)
                     if parsed is None:
                         continue
