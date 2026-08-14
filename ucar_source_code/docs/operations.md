@@ -4,104 +4,27 @@
 [new-computer-gui-simulation-mission.md](new-computer-gui-simulation-mission.md)；本文件保留部署、
 回滚和故障排查的完整命令。
 
-## WSL ROS Master 与 RViz
+## 小车本机 ROS Master 与 RViz
 
-> **网络配置以 [rosmaster/NETWORK_CONFIGURATION.md](../rosmaster/NETWORK_CONFIGURATION.md) 为准。** WSL Ubuntu 20.04 是唯一 ROS Master；小车端不得启动 `roscore`。所有 `source` 完成后必须设置当前 `ROS_MASTER_URI`，小车 `ROS_IP` 由到 Master 的路由动态推导或显式配置。
+> **网络配置以 [rosmaster/NETWORK_CONFIGURATION.md](../rosmaster/NETWORK_CONFIGURATION.md) 为准。**
+> 主流程 ROS Master 位于小车；电脑 WSL 只运行仿真专用 `127.0.0.1:11312` 和 HTTP bridge。
 
-本机 WSL 的 Ubuntu 20.04 使用 ROS Noetic，只作为局域网 ROS Master 和 RViz 客户端。
-在 WSL 终端先清除旧网络变量，再由网络脚本选择当前局域网地址并启动 Master：
-
-```bash
-unset ROS_IP ROS_HOSTNAME ROS_MASTER_URI
-~/start_ros_master.sh
-```
-
-输出必须是电脑当前局域网地址；若显示 `localhost` 或 `127.0.0.1`，立即按 `Ctrl-C`
-停止。不要让小车连接回环地址。
-
-输出还必须包含 `XML-RPC=HTTP/1.0`。小车使用 Linux 4.9 内核；在当前 WSL 镜像网络
-中，Noetic Master 的 HTTP/1.1 XML-RPC 响应会间歇性无法到达小车，使
-`roslaunch` 卡在 `load_parameters starting ...`。仓库提供的启动脚本只对 Master
-进程树启用 HTTP/1.0 兼容层，不修改系统 ROS，不改变 TCPROS 话题传输。首次部署或
-兼容层更新后执行：
+小车端统一入口（`<电脑LAN_IP>` 是 bridge 的可达地址，不是 ROS Master）：
 
 ```bash
-mkdir -p ~/.config/smartcar/python_http10_compat
-cp /mnt/d/WORK/ALLCODE/smartcar2026/simulationforreal/ucar_source_code/rosmaster/start_ros_master.sh \
-  ~/start_ros_master.sh
-cp /mnt/d/WORK/ALLCODE/smartcar2026/simulationforreal/ucar_source_code/rosmaster/python_http10_compat/sitecustomize.py \
-  ~/.config/smartcar/python_http10_compat/sitecustomize.py
-chmod 0755 ~/start_ros_master.sh
+bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh <电脑LAN_IP> mission
 ```
 
-部署后先停止旧 Master，再重新运行 `~/start_ros_master.sh`。可在小车上执行以下
-零运动回归检查；连续 20 次均须成功：
+脚本动态选择小车 `ROS_IP`，启动小车本机 `roscore` 并前台监管；任务退出或用下列命令
+停止时不会遗留 Master：
 
 ```bash
-for attempt in $(seq 1 20); do
-  timeout 2 python2 -c \
-    "import xmlrpclib; print(xmlrpclib.ServerProxy('${ROS_MASTER_URI}').system.multicall([]))" \
-    >/dev/null || exit 1
-done
-echo "XML-RPC multicall: 20/20 passed"
+bash ~/ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh
 ```
 
-WSL 的 ROS 环境已设置 DISABLE_ROS1_EOL_WARNINGS=1，因此不会再显示 ROS 1
-Noetic 生命周期结束的提示窗口。
-
-必须以当前工作区的 `RVIZ_CONFIG` 覆盖 `~/start_rviz.sh` 的历史默认值：
-
-    export RVIZ_CONFIG=/mnt/d/WORK/ALLCODE/smartcar2026/simulationforreal/ucar_source_code/ucar_ws/src/ucar_2026/rviz/navigation_2026.rviz
-
-该配置已启用 `/map`、全局/局部代价地图、`/scan` 激光点云、`base_link` 朝向箭头和
-`/usb_cam/image_raw` 相机画面。点云轨迹与朝向 TF 的失效时间均为 `0.3 s`，因此不会把
-断流后的旧朝向继续显示为实时数据。
-
-首次使用前，必须在 Windows 的管理员 PowerShell 放行当前本地子网的入站 TCPROS：
-
-    Get-NetFirewallRule -DisplayName 'ROS TCPROS from UCar to WSL' | Get-NetFirewallAddressFilter | Set-NetFirewallAddressFilter -RemoteAddress LocalSubnet
-    Get-NetFirewallHyperVRule -DisplayName 'ROS TCPROS from UCar to WSL' | Set-NetFirewallHyperVRule -RemoteAddresses LocalSubnet
-
-规则限制在受信任的当前本地子网；ROS 话题使用动态 TCPROS 端口，不能只开放 11311。
-
-另开一个 WSL 终端即可运行：
-
-    RVIZ_CONFIG=/mnt/d/WORK/ALLCODE/smartcar2026/simulationforreal/ucar_source_code/ucar_ws/src/ucar_2026/rviz/navigation_2026.rviz ~/start_rviz.sh
-
-若 Windows 任务栏只有 RViz 图标、无法显示主窗口，说明 WSLg 远程应用会话卡住。在
-Windows PowerShell 执行以下命令重建图形会话，再运行上述 Master 和 RViz 启动命令：
-
-    wsl --shutdown
-
-小车端推荐只运行以下脚本；它会提示输入 WSL Master 地址，并自动完成所有 `source`、
-动态小车 IP 计算和 Master 连通检查：
-
-```bash
-bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh
-```
-
-不要在小车端执行 `roscore`，初学者不要再手工复制多行 `export`/`awk` 命令。
-
-若只验证小车到 WSL 的数据链路、绝不发送默认导航目标，小车端使用同一个默认
-`manual` 模式：
-
-```bash
-bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh
-```
-
-小车的唯一 ROS Master 是本机 WSL Ubuntu 20.04。因此以上两条 `export` 必须在所有
-`source` 命令**之后**执行；同时先 `unset ROS_HOSTNAME`，避免其与 `ROS_IP` 冲突。
-不得使用或启动小车本机 `roscore`，也不要只单独执行最后一条 `roslaunch`。
-
-随后在 WSL 终端检查；下列命令只读取数据，不会移动小车：
-
-```bash
-rostopic echo -n 1 /map
-rostopic echo -n 1 /scan
-rostopic echo -n 1 /move_base/global_costmap/costmap
-rostopic echo -n 1 /move_base/local_costmap/costmap
-rosrun tf tf_echo map base_link
-```
+电脑仅需启动仿真 bridge 并为可信局域网放行 TCP 11313。RViz 若需观察真车，应连接启动脚本
+显示的小车 `ROS_MASTER_URI`；不应再运行 WSL 的真车 Master。历史 WSL Master 命令保留在后续
+故障记录中，仅供追溯，不能作为当前启动步骤。
 
 ## 当前 2026 RViz 定点导航（CymPlanner）
 
@@ -116,7 +39,7 @@ base_driver + YDLidar (/scan_raw)
   -> navigation_scan_relay (/scan, /scan_global_obstacles)
   -> lidar_loc (map -> odom) + lidar_filter_node (/scan_filtered)
   -> move_base (GlobalPlanner + CymPlanner) -> /cmd_vel -> base_driver
-usb_cam (/dev/ucar_video) -> /usb_cam/image_raw -> RViz Image panel
+usb_cam (/dev/video0) -> /usb_cam/image_raw -> RViz Image panel
 ```
 
 `navigation_scan_relay` 仅转发激光并从全局障碍物输入中删除已存在于静态地图的墙体回波；
@@ -838,6 +761,15 @@ read -r -p '请输入 WSL Master 当前地址: ' MASTER_IP
 bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh "$MASTER_IP" mission
 ```
 
+在 WSL 的 E2 mission 终端运行 `~/.config/smartcar/term_e_mission.sh` 时，脚本会加载既有
+`ros_network.sh`，从当前 `ROS_MASTER_URI` 动态提取 Master 地址后传给小车；不得在 E2
+脚本中写死 Wi-Fi Master 地址。操作员确认起点并实际进入 `mission` 模式后，
+`start_2026.sh` 会仅截断 `~/.ros/lane_handoff.log`，确保任务 ABORTED 后 E2 不会显示
+上一轮巡线输出；取消启动不会删除上一轮日志。
+
+同时检查 WSL 的 `~/.config/smartcar/ros_network.env`：默认应保持 `ROS_IP` 注释，
+不能遗留旧 Wi-Fi 地址，否则会覆盖自动发现并使 Master 与 E2 同时指向错误地址。
+
 `start_2026.sh` 的 `mission` 模式启动前会询问「是否已把车放回起点」，输入 `yes`
 才继续，其他输入直接取消启动。因为 `lidar_loc` 的启动初值固定为起点
 `(-0.25, 2.75, 0)`；若任务中途终止且已经离开起点，停止完整 launch 后必须先把
@@ -877,7 +809,7 @@ ls -1dt ~/.ros/ucar_2026_observations/run_* | head -n 1
 `map -> base_link`、move_base action 结果，以及 `crc16`、`head_len`、
 `sensor not active`、`TF_NAN_INPUT` 日志。任一安全门失败时会取消目标、关闭扫码并
 连续发布零速度。生产 OCR 阶段 `/usb_cam` 应继续存在，图像话题应维持约 30 Hz；
-Python 3 helper 只读取任务节点保存的图片，不直接持有 `/dev/ucar_video`。视觉居中期间 `/cmd_vel` 的
+Python 3 helper 只读取任务节点保存的图片，不直接持有 `/dev/video0`。视觉居中期间 `/cmd_vel` 的
 预期发布者为 `/move_base` 和 `/production_task_2026`；后者只在 move_base 目标已经
 结束或取消后发布纯角速度。
 回中阶段状态为 `PRODUCTION_RECENTER_<点号>_<次数>`，此时重新由 `/move_base`
@@ -2282,46 +2214,65 @@ bytes）已修复，QR 阶段零崩溃，任务可正常进入生产路线巡检
 `PRODUCTION_QR_FACE_REJECTED ... advance_to_next_face=true`，随后进入下一面；该面
 不得出现 `QR_SEARCH_TURN`。只有该面完全没有二维码事件时才允许转圈兜底。
 
-同步代码到小车后，只在小车 Ubuntu 18.04 / ROS Melodic 上执行下列回归；所有
-`source` 完成后必须恢复当前 WSL Master，且测试不会启动任务节点或发送运动命令：
+同步代码到小车后，只在小车 Ubuntu 18.04 / ROS Melodic 上执行下列回归；主流程
+Master 在小车本机，测试不会启动任务节点或发送运动命令：
 
 ```bash
 cd ~/ucar_ws
 source /opt/ros/melodic/setup.bash
 source ~/ucar_ws/devel/setup.bash
 unset ROS_HOSTNAME
-read -r -p '请输入 WSL Master 当前地址: ' MASTER_IP
-export ROS_MASTER_URI="http://${MASTER_IP}:11311"
-export ROS_IP="$(ip -4 route get "$MASTER_IP" | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+export ROS_IP="$(hostname -I | awk '{print $1}')"
+export ROS_MASTER_URI="http://${ROS_IP}:11311"
 catkin_make -DCATKIN_WHITELIST_PACKAGES=ucar_2026 run_tests
 catkin_test_results --verbose build/test_results/ucar_2026
 ```
 
-### 终点自动交接 lane_proto（2026-08-10 起）
+### 常驻 lane_proto 无重启交接（2026-08-14 起）
 
-- 2026 任务 SUCCEEDED 后：发布 task_result → 延迟 1s（`lane_handoff_delay`）
-  → 任务节点 `setsid` 启动 `handoff_lane.sh` 并 `signal_shutdown` 退出
-  （required=true 触发 2026.launch 整体关闭，释放底盘串口与相机）→ 脚本等待
-  2026.launch 退出（30s）与 `/dev/ttyUSB0` 可打开（10s）后前台启动：
-  ```bash
-  roslaunch lane_proto lane_proto.launch dry_run:=false linear_speed:=0.35 \
-    gain:=1.2 template:="$(rospack find lane_proto)/config/red_template_band2.png" \
-    is_fork:=yolo yellow_target:=0.90 align_offset:=0.14 start_offset:=0.23 \
-    goal_y_lo:=0.85 rate:=20 dump_every:=3
-  ```
-  （yellow_target=0.90 黄线在画面下方 10%；align_offset=0.14 对准黄线后前进
-  0.14m 到规定位；start_offset=0.23 等绿灯后前进 0.23m 进三岔口中心；
-  rate=20 控制循环 20Hz，实测可达 16Hz；2026-08-12 起与手动调参命令对齐）
-- **硬约束**：lane_proto.launch 自带 ucar_controller_simple 底盘驱动 + V4L2
-  直连相机，与 2026.launch **不能同时跑**（同串口、相机被抢）——交接必须等
-  2026.launch 完全退出，人工重跑时先 `stop_2026_task.sh` 再启动 lane_proto。
-- 交接开关：`2026.launch` 参数 `lane_handoff_enabled`（默认 true；false 保持
-  旧行为——任务 SUCCEEDED 后节点继续 spin，由 stop 脚本停止）。
-- lane_proto 观察：`rostopic echo /lane_proto/state`（FOLLOW→PAUSE→APPROACH→
-  STOPPED）；急停 `/lane_proto/estop`。当前车端没有 `stop_lane.sh`；若自动交接的
-  launch 仍在运行，先发布零速度，再从 `pgrep -af 'roslaunch lane_proto lane_proto.launch'`
-  输出中确认本次 PID 并 `kill -INT <PID>`（前台手工启动时可直接 Ctrl-C）。日志关键字 `HANDOFF_LANE_STARTED` /
-  `HANDOFF_LANE_FAILED`、`HANDOFF_WAIT_2026_EXIT`、`HANDOFF_SERIAL_READY`。
+- `task_enabled:=true` 时，`lane_proto` 与 `usb_cam`、底盘驱动一起常驻，但初始为
+  `STANDBY`：不打开第二个串口、不直连 V4L2，也不向底盘发送速度。
+- 终点导航成功后，任务不再执行 `handoff_lane.sh`、不退出/重启 `2026.launch`，也不新增
+  中途停车步骤；它先激活 `/lane_proto/set_active`，再调用
+  `/cmd_vel_owner/set_lane_mode true`。`cmd_vel_owner` 是唯一写 `/cmd_vel` 的节点，
+  将导航 `/cmd_vel/navigation` 或巡线 `/cmd_vel/lane` 转发给底盘。
+- 巡线状态可用 `rostopic echo /lane_proto/state` 观察（`STANDBY → FOLLOW → ... → STOPPED`）。
+  `STOPPED` 后任务才结束 ROS launch，避免提前关闭共享相机。`handoff_lane.sh` 仍保留在
+  仓库中作为旧版本记录，主流程不再调用它。
+- lane_proto 只能以 Melodic Python2 运行（其 `cv_bridge_boost` 是 Python2 二进制）。launch
+  已强制使用 `run_melodic_python2.sh`；不要通过默认 `python` 直接执行 `lane_follow.py`。
+- 若看到 Python2 `logging` 栈停在 `record.getMessage` / `msg = msg % self.args`，确认启动的是
+  已部署的 lane_follow；该版本会先在节点内完成 UTF-8 日志格式化。重启**下一次** lane_follow
+  即可生效，不要手工改用 Python3。
+- 共享 ROS 相机的性能行会显示图像回调的实际 `cam_fps`；若看到
+  `RosFrameGrabber ... has no attribute 'cam_fps'`，说明仍是 2026-08-14 前的旧脚本，更新后
+  随下一次 lane_follow 启动加载即可，无需以重启整个主流程来处理该属性错误。
+- 常驻主流程中的 lane_proto 在 `STANDBY` 不加载 TrackSeg/CUDA；终点交接调用
+  `/lane_proto/set_active true` 时才加载模型，服务返回成功后主流程才切换速度控制权。故启动期
+  不会看到 `[trackseg] ... cuda ...`，但首次交接会承担一次模型加载时长；服务失败应直接排查
+  TrackSeg/CUDA，不能在未加载模型时切换 owner。
+- 二维码扫描器对本次进程内已成功解析的网址缓存“网址 → 物品名”。同一网址再次识别时会
+  直接发布带 `cached=true` 的 `/qr_api_result`，不会重复请求二维码 HTTP API；缓存不写磁盘，
+  重启 `qrcode_scanner` 或主流程即清空。车端回归：
+  `/home/ucar/myenv/bin/python3 ~/ucar_ws/src/yolo2025/test/test_qrcode_scanner_cache.py`。
+- 主流程接受两项有效语音类别后会终止 `wake_listen.py` 以免后续播报被当成指令；监听器已捕获
+  `SIGTERM`，会先停止阵列麦录音并调用 `hid_close()` 释放 HID 设备。不要用 `kill -9`，它无法
+  给进程执行这条清理路径；主流程会保留 3 秒 SIGTERM 宽限期后才升级处理。
+- 仿真 `/status` 的 `No status line received` 会由小车每个轮询周期重新建连；主流程最多等待
+  120 秒。到期会发布 `SIMULATION_TIMEOUT_CONTINUE` 并继续终点/巡线，而非 ABORT；只有收到
+  `state=done` 才发布 `SIMULATION_DONE`，但到期继续也会播报仿真任务已完成。
+- `check crc16 faild(ahrs).` 会记录 `PRODUCTION_AHRS_CRC_IGNORED` 并继续任务；这只适用于
+  AHRS CRC，`head_len`、TF/odom 异常和急停不在此例外范围。
+- 交接参数：`lane_handoff_enabled`、`lane_activate_service`、`lane_owner_service`、
+  `lane_state_topic`、`lane_handoff_timeout`。巡线使用 `/odom_raw` 的有限且新鲜数据；
+  无有效更新会明确进入 `STOPPED`，而不会按速度×时间猜测距离。
+- **mission 语音/TTS 日志终端可见（2026-08-14 起）**：语音监听启动后任务日志打
+  `PRODUCTION_VOICE_WAITING`；监听子进程的非 JSON 状态行（校准/唤醒/ASR 进度）只以
+  `[语音] 中文原文` 输出到终端，不再写入会转义 Unicode 的
+  `PRODUCTION_VOICE_LISTENER` rosout 日志。识别结果由既有
+  `PRODUCTION_VOICE_INPUT_ACCEPTED/REJECTED` 显示；每次播报前打
+  `PRODUCTION_TTS_SPEAK text=<播报全文>`。详见
+  `docs/changes/2026-08-14-terminal-visible-logs.md`。
 
 ### 仿真桥接服务（随仿真仓库克隆）
 
@@ -2350,14 +2301,13 @@ New-NetFirewallRule -DisplayName 'SimBridge from UCar' -Direction Inbound \
   -Protocol TCP -LocalPort 11313 -RemoteAddress LocalSubnet -Action Allow
 ```
 
-### 任务运行顺序（2026-08-10 起，新增仿真前置步骤）
+### 任务运行顺序（2026-08-14 小车本机 Master）
 
 0. （一次性，本机 WSL2 常驻配置）在 `C:\Users\<用户>\.wslconfig` 的 `[wsl2]`
    段设置 `vmIdleTimeout=-1` 并 `wsl --shutdown` 重启——否则最后一个 `wsl`
    会话退出后发行版关闭，后台 roslaunch 被连带杀掉（master 日志出现
    `keyboard interrupt, will exit`）。
-1. WSL 启动 ROS Master（`~/start_ros_master.sh`，显示非 localhost）；
-2. **仿真端**（独立于真车 Master，先于小车任务）：先在一个保持打开的 WSL 终端启动
+1. **仿真端**（先于小车任务）：先在一个保持打开的 WSL 终端启动
    仿真专用 Master；不能用一次性后台 WSL 子进程启动，否则子进程退出会连带关闭
    `roscore`，使随后 Gazebo、`map_server` 和 `move_base` 消失。
    ```bash
@@ -2384,14 +2334,14 @@ New-NetFirewallRule -DisplayName 'SimBridge from UCar' -Direction Inbound \
    # （就绪判定轮询常驻的 /map 话题，不可用 /sim_task3/arm_initial_pose_ready：
    #  该话题由 set_arm_initial_pose 节点发布一次后即注销）
    ```
-3. 把车放回起点 `(-0.25, 2.75, 0)`（车头 x 负方向朝场内）；
-4. 小车端 `bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh <Master地址> mission`
+2. 把车放回起点 `(-0.25, 2.75, 0)`（车头 x 负方向朝场内）；
+3. 小车端 `bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh <电脑LAN_IP> mission`
    → 听到提示后先说“小飞小飞”，再说固定双类别指令（如现实 `日用品`、仿真 `食品`）；
-5. 任务自动执行；仿真物品停入后小车 POST 桥接服务启动仿真（`cargo_category` +
+4. 任务自动执行；仿真物品停入后小车 POST 桥接服务启动仿真（`cargo_category` +
    `cargo_name` 透传），等待 `/sim_task3/done` 期间小车保持静止；
-6. 任务结束（SUCCEEDED）后：
+5. 任务结束（SUCCEEDED）后：
    ```bash
-   MASTER_IP=<Master地址> bash ~/ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh
+   bash ~/ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh
    ```
    仿真端桥接服务与 prepare.launch 按需 Ctrl-C 停止，不留后台进程。
 
@@ -2407,7 +2357,66 @@ New-NetFirewallRule -DisplayName 'SimBridge from UCar' -Direction Inbound \
   `PRODUCTION_SIMULATION_STATUS_DONE`；`/start` 失败重试 3 次后 MissionAbort；
 - 端口被占：`ss -tlnp | grep 11313`；done 话题无数据：确认 prepare.launch 已就绪
   （`rostopic echo -n 1 /map` 有输出即就绪）；
-- 小车端 `simulation_host` 默认从 `ROS_MASTER_URI` 自动推导（同一台电脑），
-  一般无需配置；多机场景在 2026.launch 显式传 `simulation_host`。
-- 防火墙：无需为 11313 新建规则——既有 `ROS TCPROS from UCar to WSL` 已是
-  `port=Any + RemoteAddress=LocalSubnet`，自动覆盖（2026-08-10 联调实测）。
+- 小车端 `simulation_host` 必须显式传入电脑 LAN 地址；它不能从指向小车的
+  `ROS_MASTER_URI` 推导。
+- 防火墙：为 11313 建立仅限 `LocalSubnet` 的 bridge 入站规则。
+
+### 摄像头设备名迁移 /dev/ucar_video → /dev/video0（2026-08-15）
+
+摄像头改插 USB hub 后不再做固定端口 udev 映射，全仓改用内核默认设备名
+`/dev/video0`。改动文件已通过 scp 推送到小车（`ucar@192.168.8.231`），并删除
+小车端 `/etc/udev/rules.d/ucar.rules` 中的摄像头规则：
+
+```powershell
+# 删除小车端摄像头 udev 规则（仅剩底盘/麦克风/雷达规则）
+$cmd = 'sudo sed -i ''/SYMLINK+="ucar_video"/d'' /etc/udev/rules.d/ucar.rules && sudo udevadm control --reload-rules && cat /etc/udev/rules.d/ucar.rules'
+ssh ucar@<VEHICLE_IP> $cmd
+```
+
+验证：
+
+```bash
+# 小车端：源码引用清零；唯一摄像头应为 /dev/video0
+grep -rn 'ucar_video' ~/ucar_ws/src --include='*.launch' --include='*.py' --include='*.sh'
+v4l2-ctl --list-devices
+```
+
+注意：旧符号链接 `/dev/ucar_video -> video0` 会在重启后随 udev 规则移除而消失；
+代码已不再引用，残留期间无影响。若小车插入其他视频设备导致编号偏移，需重新
+评估映射。
+
+### 修复常驻交接起跑序列参数（2026-08-15）
+
+`2026.launch` 的 lane_proto 常驻 include 补齐 `is_fork:=yolo` 及起跑序列/性能参数
+（对齐 `handoff_lane.sh` 2026-08-12 最终值）。只部署、构建和测试（不启动 ROS、
+不发布速度）：
+
+```powershell
+$VEHICLE_HOST = 'ucar@<按 rosmaster/NETWORK_CONFIGURATION.md 发现的小车地址>'
+
+scp ucar_ws/src/ucar_2026/launch/2026.launch `
+  "${VEHICLE_HOST}:~/ucar_ws/src/ucar_2026/launch/2026.launch"
+scp ucar_ws/src/lane_proto/test/test_lane_runtime.py `
+  "${VEHICLE_HOST}:~/ucar_ws/src/lane_proto/test/test_lane_runtime.py"
+```
+
+车端验证（以当次动态 `<MASTER_IP>` 设置环境后）：
+
+```bash
+cd ~/ucar_ws
+source /opt/ros/melodic/setup.bash
+unset ROS_HOSTNAME
+export ROS_MASTER_URI="http://<MASTER_IP>:11311"
+export ROS_IP="$(ip -4 route get <MASTER_IP> | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+python2 -m py_compile ~/ucar_ws/src/lane_proto/test/test_lane_runtime.py
+catkin_make -DCATKIN_WHITELIST_PACKAGES="ucar_2026;lane_proto" run_tests
+catkin_test_results --verbose build/test_results/lane_proto
+catkin_test_results --verbose build/test_results/ucar_2026
+# 交接 include 参数完整性检查
+python2 ~/ucar_ws/src/lane_proto/test/test_lane_runtime.py -v
+```
+
+现场复测关键判据：交接后 `/lane_proto/state` 依次出现 `FOLLOW → ALIGN →
+START_MOVE → YOLO → … → FOLLOW → STOPPED`；日志首个相位应为 `ALIGN`（黄线对齐），
+而不是 `APPROACH`。若又出现 `APPROACH` 或直接 `STOPPED`，立即
+`bash ~/ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh` 停车排查。

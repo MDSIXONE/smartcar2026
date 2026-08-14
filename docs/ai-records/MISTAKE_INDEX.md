@@ -27,17 +27,17 @@
 | 跨 Shell 引号 / 变量展开 / 命令组合（PowerShell/WSL/SSH/Bash 嵌套 `$()`、`$pid`、here-string、awk/sed、引号破坏、组合超时） | 07-27、07-28、07-29、08-03、08-04、08-06、08-11 |
 | 文本编码与换行（CRLF/`\r`、GBK、UTF-8、shebang、中文乱码、Python 2 ASCII、stdin 管道编码） | 07-27、07-28、08-03、08-04、08-06 |
 | Python 2/3 差异（math.isfinite、time.monotonic、to_sec、json.dumps/loginfo 中文、unittest 跳过、mock 契约） | 07-26、07-27、07-28、07-29、08-03、08-04、08-06、08-07 |
-| 底盘 / 串口 / IMU / USB 硬件链路（CRC、短读、sensor inactive、odom stale、USB Hub 枚举、断电、旋转死区） | 07-27、07-28、08-04、08-05、08-06、08-07、08-10 |
+| 底盘 / 串口 / IMU / USB 硬件链路（CRC、短读、sensor inactive、odom stale、USB Hub 枚举、断电、旋转死区、设备身份识别） | 07-27、07-28、08-04、08-05、08-06、08-07、08-10、08-14 |
 | NaN / TF / 定位与安全门（TF_NAN_INPUT、固定初值重启、TF 外推、map→base_link、安全门锁死） | 07-27、07-28、07-29、08-03、08-04、08-07 |
-| 构建 / 测试（catkin_make、CTest、gtest main、白名单、test_results、--force-cmake、pytest、ROS 单测初始化、WSL 9P） | 07-26、07-27、07-28、07-29、08-03、08-04、08-07、08-10、08-11、08-12 |
-| 部署 / 传输 / 权限（scp 目标目录、多源 scp、哈希校验、0755、启动器参数、Base64/LF 传输、index.lock、FETCH_HEAD） | 07-26、07-27、07-28、07-29、08-03、08-04、08-07、08-11 |
-| ROS 生命周期与回调（action server 等待、回调竞态、closed topic、rosnode cleanup、respawn、launch 解析、取消竞态、节点退出注销话题） | 07-26、07-27、07-28、07-29、08-03、08-04、08-06、08-07、08-10、08-11 |
+| 构建 / 测试（catkin_make、CTest、gtest main、白名单、test_results、--force-cmake、pytest、ROS 单测初始化、WSL 9P） | 07-26、07-27、07-28、07-29、08-03、08-04、08-07、08-10、08-11、08-12、08-14 |
+| 部署 / 传输 / 权限（scp 目标目录、多源 scp、哈希校验、0755、启动器参数、Base64/LF 传输、index.lock、FETCH_HEAD） | 07-26、07-27、07-28、07-29、08-03、08-04、08-07、08-11、08-15 |
+| ROS 生命周期与回调（action server 等待、回调竞态、closed topic、rosnode cleanup、respawn、launch 解析、取消竞态、节点退出注销话题） | 07-26、07-27、07-28、07-29、08-03、08-04、08-06、08-07、08-10、08-11、08-14、08-15 |
 | 运动控制 / 规划器 / 碰撞（footprint、body_projection、253/254 代价、NO PATH、恢复/回中、PD 对齐、前视盲区、边界路线守卫、死区） | 07-26、07-27、07-28、07-29、08-03、08-04、08-06、08-10、08-11 |
 | OCR / 相机 / 二维码（V4L2 忙、usb_cam、OCR 候选/居中/镜像/类别去重/死循环、QR 文本、相机交接、QR 接收过滤、连续视觉伺服） | 07-26、07-27、07-28、07-29、08-03、08-04、08-07、08-11 |
-| 脚本环境与网络（nounset、ROS_MASTER_URI/ROS_IP 动态发现、WSL Master 后台/就绪、地址发现阻塞、WSLg COPY MODE） | 07-26、07-27、07-28、07-29、08-03、08-04、08-07、08-10、08-11 |
+| 脚本环境与网络（nounset、ROS_MASTER_URI/ROS_IP 动态发现、WSL Master 后台/就绪、地址发现阻塞、WSLg COPY MODE、ROS 日志目录软链） | 07-26、07-27、07-28、07-29、08-03、08-04、08-07、08-10、08-11、08-14 |
 | 文档 / 文件操作（patch 上下文、Markdown 折行、文件名误判、rg glob、路径通配符、组合读取超时） | 07-26、07-27、07-28、07-29、08-03、08-04 |
-| CLI 工具误用（--help、dump-params、rosrun、cleanup -y、位置参数、超时误判） | 07-27、07-28、07-29、08-03、08-11 |
-| 仿真 Gazebo/机械臂（set_model_configuration、物理抓取、RTF、模型恢复、官方向导一致性、代价地图残影） | 07-26、07-27、08-10、08-11 |
+| CLI 工具误用（--help、dump-params、rosrun、cleanup -y、位置参数、超时误判、timeout 退出码误报） | 07-27、07-28、07-29、08-03、08-11、08-14 |
+| 仿真 Gazebo/机械臂（set_model_configuration、物理抓取、RTF、模型恢复、官方向导一致性、代价地图残影、世界重置与 bridge 单轮） | 07-26、07-27、08-10、08-11、08-14 |
 
 ## 按日期
 
@@ -244,3 +244,20 @@
 
 - 2026-08-12：WSL p9_client_rpc 阻塞 Noetic catkin_make
 - pgrep 命令行模式自匹配
+
+### 2026-08-14（10 条）→ [mistakes/2026-08-14.md](mistakes/2026-08-14.md)
+
+- 误把讯飞麦克风阵列（10d6:b003 HID）当成普通外设拔掉，语音唤醒失效
+- 等仿真期间同 Hub 设备断连扰动 CP2102，odom 断流致任务 ABORTED
+- bridge 单轮服务 + 仿真世界不重置导致重跑失效
+- ~/.ros/log/latest 软链与车端时钟（mtime 2029）不可信，须按日志内容时间戳判断
+- timeout 退出码导致安全检查脚本 _FAIL 误报（长驻命令被截断是预期）
+- COPY MODE 预检时机太早，GUI 启动后 WSLg 仍退化，须 A→B→预检→C→D 且 C 后复检
+- SCP 多文件传输目标仅到包根目录，未保留 `scripts/`、`launch/` 子路径
+- `catkin_test_results` 每次只能读取一个结果目录，须分两次调用
+- bridge stdout pipe 失效使 HTTP 状态连接空响应
+- ROS 相机替换遗漏 FrameGrabber 的 `cam_fps` 运行时契约
+
+### 2026-08-15（1 条）→ [mistakes/2026-08-15.md](mistakes/2026-08-15.md)
+
+- 常驻交接 include 漏传 is_fork:=yolo，交接点黄线被当终点横线，巡线全程跳过

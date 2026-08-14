@@ -8,7 +8,7 @@
 ## 0. 先读完这四条
 
 1. 电脑和小车必须接入同一个可信 IPv4 局域网，且路由器不能开启 AP/client isolation。
-2. 小车唯一的 ROS Master 是电脑 WSL 的 `11311`；**小车端绝不运行 `roscore`**。
+2. 主流程 ROS Master 是小车本机的 `11311`；电脑 WSL **不运行真车 roscore**。
 3. 仿真另用 WSL 内的 `127.0.0.1:11312`，与真车 Master 完全隔离；两者只由 HTTP bridge 的
    `11313` 端口衔接。
 4. 在任何会带动车轮的命令前，都必须完成“第 7 节安全检查”。发现 `NaN`、`TF_NAN_INPUT`、
@@ -17,10 +17,16 @@
 完整链路如下：
 
 ```text
-小车 Melodic ─ROS→ WSL 真车 Master :11311
+小车 Melodic ─ROS→ 小车本机 Master :11311
 小车 Melodic ─HTTP→ WSL bridge :11313 ─ROS→ 仿真 Master :11312
                                               └─ Gazebo + RViz（可见窗口）
 ```
+
+> 2026-08-14 起，本文下方所有“WSL 真车 Master / start_ros_master.sh / 将 MASTER_IP
+> 传给小车”的旧段落均已退役。当前启动命令为小车端
+> `bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh <电脑LAN_IP> mission`；电脑地址
+> 只用于 bridge HTTP，不是 ROS Master。完整当前网络说明见
+> `rosmaster/NETWORK_CONFIGURATION.md`。
 
 ## 1. 一次性准备：新电脑、新 WSL 和代码
 
