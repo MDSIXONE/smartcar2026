@@ -139,7 +139,9 @@
             <arg name="align_offset" value="0.14"/>
             <arg name="start_offset" value="0.23"/>
             <arg name="goal_y_lo" value="0.85"/>
-            <arg name="linear_speed" value="0.35"/>
+            <!-- 2026-08-16：0.35 -> 0.25。实车巡线容易出线，
+                 降速 30% 给视觉修正留出反应时间。 -->
+            <arg name="linear_speed" value="0.25"/>
             <arg name="gain" value="1.2"/>
             <arg name="rate" value="20"/>
             <arg name="dump_every" value="3"/>

@@ -1,4 +1,11 @@
-# lane_follow Python2 日志 UnicodeDecodeError 修复
+# lane_follow Python2 日志 UnicodeDecodeError 修复 + 巡线降速
+
+## 巡线降速（2026-08-16 追加）
+
+- 实车巡线容易出线，`ucar_2026/launch/2026.launch` 交接段 `linear_speed` 0.35 → 0.25
+  （降 30%，给视觉修正留反应时间）。已部署小车，无需编译。
+- 注意：单独命令行跑 `lane_proto.launch` 时若自己传了 `linear_speed:=0.3`，仍按传参执行；
+  只有主流程交接路径（2026.launch）用 0.25。
 
 ## 原因
 
