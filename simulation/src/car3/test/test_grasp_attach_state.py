@@ -283,13 +283,14 @@ class GraspAttachStateTest(unittest.TestCase):
         # baseline.  URDF must never change.  For math.world, only the
         # time-related <physics> parameters are approved for adjustment (see
         # docs/changes); the model part of the world stays locked.  The hash
-        # below is the world state after the physics step was set to 200 Hz.
+        # below is the world state after the physics step was set to 0.003 s
+        # with max_update_rate 200 (realtime factor ~0.6).
         self.assertEqual(
             "d54efc16a412266712b6661dd60951e9d5d2519864b4782be9959904f2be8d26",
             _content_hash(URDF),
         )
         self.assertEqual(
-            "c1ecf61d12dffc52f608dcd7a46469836b013beb56fd4e5b62bf2200e0b1bc3c",
+            "48045b11c21da45803593222ab18297da0222e42de8ae0acf8838016a34b892e",
             _content_hash(WORLD),
         )
 
