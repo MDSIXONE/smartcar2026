@@ -1242,6 +1242,16 @@ rospack plugins --attrib=plugin nav_core | grep cym_planner
   移动到 147 与 158 之间（x=-0.5），其余流程与省赛完全一致。
 - `ucar_2026_extra` —— 国赛现场随机任务版：流程暂与省赛一致，地图沿用国赛布局。
 
+国赛版新增导航地图 `ucar_nav/maps/iflysse_field_walls_national.{pgm,yaml}`（墙从 x=0
+移到 x=-0.5），两个国赛包的 `map_file` 已指向它；省赛包仍用
+`iflysse_field_walls_without_middle_vertices`。部署国赛版前先把新地图同步到小车：
+
+```bash
+scp ucar_ws/src/ucar_nav/maps/iflysse_field_walls_national.pgm \
+    ucar_ws/src/ucar_nav/maps/iflysse_field_walls_national.yaml \
+    "ucar@${CAR_HOST}:~/ucar_ws/src/ucar_nav/maps/"
+```
+
 真车导航 pgm 仍共用 `iflysse_field_walls_without_middle_vertices`（无中间墙简化版），
 新墙位靠激光实时避障，静态地图无需改。
 
@@ -2022,8 +2032,9 @@ catkin_make -DCATKIN_WHITELIST_PACKAGES="ucar_controller;ucar_2026" run_tests
 catkin_test_results --verbose build/test_results/ucar_2026
 ```
 
-`-DCATKIN_WHITELIST_PACKAGES="ucar_controller;ucar_2026"` 是 2026-08-07 起车上
-CMakeCache 的白名单现值（含历史残留的 ucar_controller）；若车端白名单已变，构建前先
+`-DCATKIN_WHITELIST_PACKAGES="ucar_2026;lane_proto;ucar_2026_national;ucar_2026_extra"`
+是 2026-08-16 起车上 CMakeCache 的白名单现值（2026-08-16 部署国赛两个新包时扩展，
+此前为 `ucar_2026;lane_proto`）；若车端白名单已变，构建前先
 `grep CATKIN_WHITELIST_PACKAGES build/CMakeCache.txt` 按实际值覆盖，否则会报
 `No rule to make target 'ucar_2026/all'`。
 

@@ -66,8 +66,8 @@
         <param name="global_transform_max_age" value="2.4"/>
     </node>
 
-    <!-- Use the field-wall map without middle vertices for real navigation. -->
-    <arg name="map_file" default="$(find ucar_nav)/maps/iflysse_field_walls_without_middle_vertices.yaml" />
+    <!-- National layout: wall moved from 148-159 (x=0) to 147-158 (x=-0.5). -->
+    <arg name="map_file" default="$(find ucar_nav)/maps/iflysse_field_walls_national.yaml" />
     <node name="map_server" pkg="map_server" type="map_server" args="$(arg map_file)" output="screen">
         <param name="frame_id" value="map" />
     </node>
