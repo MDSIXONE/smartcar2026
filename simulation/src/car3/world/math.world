@@ -137,9 +137,11 @@
     <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
     <atmosphere type='adiabatic'/>
     <physics type='ode'>
-      <max_step_size>0.001</max_step_size>
+      <!-- 时间参数（非模型部分）由负责人授权可按需调整：物理步长 200 Hz，
+           目标实时率 1，每秒最多 200 个物理步（200 * 0.005 s = 1 s 仿真时间）。 -->
+      <max_step_size>0.005</max_step_size>
       <real_time_factor>1</real_time_factor>
-      <real_time_update_rate>1000</real_time_update_rate>
+      <real_time_update_rate>200</real_time_update_rate>
     </physics>
     <scene>
       <ambient>0.4 0.4 0.4 1</ambient>

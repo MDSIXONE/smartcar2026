@@ -280,13 +280,16 @@ class GraspAttachStateTest(unittest.TestCase):
 
     def test_robot_and_world_match_approved_official_resource_baseline(self):
         # The project owner confirmed these repository files as the official
-        # baseline.  The hashes prevent accidental model or world edits.
+        # baseline.  URDF must never change.  For math.world, only the
+        # time-related <physics> parameters are approved for adjustment (see
+        # docs/changes); the model part of the world stays locked.  The hash
+        # below is the world state after the physics step was set to 200 Hz.
         self.assertEqual(
             "d54efc16a412266712b6661dd60951e9d5d2519864b4782be9959904f2be8d26",
             _content_hash(URDF),
         )
         self.assertEqual(
-            "0318bc8e179a47eb356c3473728dee380daa977a6f450027900b60e574e3c5ce",
+            "c1ecf61d12dffc52f608dcd7a46469836b013beb56fd4e5b62bf2200e0b1bc3c",
             _content_hash(WORLD),
         )
 
