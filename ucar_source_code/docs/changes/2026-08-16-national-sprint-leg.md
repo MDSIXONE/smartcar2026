@@ -174,3 +174,19 @@ point/body 模式行为不变：approach 参数默认 0.0 = 禁用。
 - 终点提前后 288→52 段变长（坡顶 → 52），点模式 max_vel_x 0.35 正常
   通行；冲刺段总长缩短约 0.875 m。
 
+## 第五轮（同日追加）：速度再次加大
+
+- `mode3_sprint.linear_x_gain` 5.0→8.0（稳态 0.20×8.0=1.6 m/s）、
+  `max_vel_x` 1.20→1.60，稳态顶满上限；`sprintDefaults()` 同步。
+- 第六轮（同日）：加到 2.0——`linear_x_gain` 8.0→10.0（稳态
+  0.20×10=2.0 m/s）、`max_vel_x` 1.60→2.0，稳态顶满 2.0；
+  底盘裁剪上限 `linear_speed_max` 3.0 仍有余量。
+- 末端停车仍由 approach 自动减速兜底（1.0 m 起压到 0.12 m/s），
+  本轮未触碰。
+- 涉及文件：`ucar_cym_planner_params.yaml`、`cym_planner.cpp`
+  （sprintDefaults 默认值，与 yaml 一致）。
+- 已部署小车（192.168.8.231，2026-08-16 05:53）：scp 同步两文件，
+  车端 `catkin_make --pkg cym_planner` 编译通过，
+  `libcym_planner.so` 重新生成；车上 yaml 确认
+  `linear_x_gain: 10.0`、`max_vel_x: 2.0`。
+

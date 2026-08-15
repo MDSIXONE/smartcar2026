@@ -69,15 +69,21 @@ cym_planner/CymPlanner:
   #   到达 288 时朝向同样严格（与 mode1_point 一致）。
   # 2026-08-16（第三轮）：航向环 P 再翻倍（angular_gain 5.0→10.0），
   #   角速度输出仍受 max_vel_theta 0.80 钳制，只加快小角度误差收敛。
+  # 2026-08-16（第五轮）：速度再次加大——linear_x_gain 5.0→8.0
+  #   （稳态 0.20×8.0=1.6 m/s）、max_vel_x 1.20→1.60，稳态顶满上限；
+  #   末端停车仍由 approach 自动减速兜底（1.0m 起压到 0.12）。
+  # 2026-08-16（第六轮）：加到 2.0——linear_x_gain 8.0→10.0
+  #   （稳态 0.20×10=2.0 m/s）、max_vel_x 1.60→2.0，稳态顶满 2.0；
+  #   底盘裁剪上限 linear_speed_max 3.0 仍有余量。
   # 2026-08-16（第四轮）：冲刺终点提前到坡顶中点 (0.875, 1.75)（由任务
   #   节点 sprint_end_x/y 指定），新增接近目标自动减速（approach_decel
   #   _distance 1.0 m 起速度上限线性压到 approach_min_vel_x 0.12），
   #   防止 1.0 m/s 冲刺惯性冲过坡顶刹不住；final_linear_x_gain 0.0→0.6
   #   允许终点阶段位置回拉修正（轻微冲过头时倒回）。
   mode3_sprint:
-    linear_x_gain: 5.0
+    linear_x_gain: 10.0
     linear_x_kd: 0.5
-    max_vel_x: 1.20
+    max_vel_x: 2.0
     angular_gain: 10.0
     angular_kd: 0.4
     max_vel_theta: 0.80

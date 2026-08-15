@@ -1277,8 +1277,8 @@ roslaunch ucar_2026_national 2026.launch task_enabled:=true
 
 2026-08-16 起，国赛版 `2026.launch` 默认开启 `sprint_enabled=true`：起点→52
 拆为 起点→70→288→52 三段，其中 70→288 沿 y=1.75 直线（朝向 180°）以
-CymPlanner 新增的 `mode3_sprint` 参数集（`linear_x_gain: 5.0`、
-`max_vel_x: 1.20`、`angular_gain: 10.0`）通过，到达 288
+CymPlanner 新增的 `mode3_sprint` 参数集（`linear_x_gain: 10.0`、
+`max_vel_x: 2.0`、`angular_gain: 10.0`）通过，到达 288
 后切回 `point` 再进 52。`sprint_enabled=false` 时保持原起点→52 直航。
 2026-08-16 第四轮：70→288 之间有坡，冲刺终点提前到坡顶中点
 (0.875, 1.75)（launch 的 `sprint_end_x/y`，非空时优先于编号点 288；
@@ -1297,6 +1297,12 @@ label），并启用接近目标自动减速（`approach_decel_distance: 1.0` �
 含起点→70 的 180° 对准与 288 终点）。
 2026-08-16 第三轮：航向环 P 再翻倍（sprint `angular_gain` 5.0→10.0）；
 角速度输出仍受 `max_vel_theta` 0.80 钳制，只加快小角度误差收敛。
+2026-08-16 第五轮：速度再次加大——`linear_x_gain` 5.0→8.0（稳态
+0.20×8.0=1.6 m/s）、`max_vel_x` 1.20→1.60，稳态顶满上限；末端停车仍由
+approach 自动减速兜底。
+2026-08-16 第六轮：加到 2.0——`linear_x_gain` 8.0→10.0（稳态
+0.20×10=2.0 m/s）、`max_vel_x` 1.60→2.0，稳态顶满 2.0；底盘裁剪上限
+`linear_speed_max` 3.0 仍有余量。
 2026-08-16 第四轮：接近目标自动减速在 CymPlanner 主循环内生效——距终点
 `approach_decel_distance` 以内时速度上限按剩余距离线性压降
 （`max(approach_min_vel_x, max_vel_x × 剩余距离/approach_decel_distance)`）；

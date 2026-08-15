@@ -154,11 +154,11 @@ cym_planner::PlannerTuning bodyProjectionDefaults()
 cym_planner::PlannerTuning sprintDefaults()
 {
     cym_planner::PlannerTuning tuning;
-    tuning.linear_x_gain = 5.0;
+    tuning.linear_x_gain = 10.0;
     tuning.linear_x_kd = 0.5;
     tuning.angular_gain = 10.0;
     tuning.angular_kd = 0.4;
-    tuning.max_vel_x = 1.20;
+    tuning.max_vel_x = 2.0;
     tuning.max_vel_theta = 0.80;
     tuning.final_yaw_gain = 2.0;
     tuning.final_yaw_max_vel = 1.0;
