@@ -1,0 +1,58 @@
+<?xml version="1.0"?>
+<!-- RViz-only visual model.  All geometry is fixed in the existing base_link
+     frame so this file never publishes TF or participates in collision logic. -->
+<robot name="ucar_2026_national_visual">
+  <material name="chassis_blue">
+    <color rgba="0.08 0.32 0.78 0.95"/>
+  </material>
+  <material name="wheel_dark">
+    <color rgba="0.06 0.06 0.07 1.0"/>
+  </material>
+  <material name="sensor_gray">
+    <color rgba="0.35 0.38 0.42 1.0"/>
+  </material>
+  <material name="front_white">
+    <color rgba="0.95 0.95 0.95 1.0"/>
+  </material>
+
+  <link name="base_link">
+    <!-- Footprint-matched chassis: 0.342 m long by 0.256 m wide. -->
+    <visual>
+      <origin xyz="0 0 0.055" rpy="0 0 0"/>
+      <geometry><box size="0.342 0.256 0.11"/></geometry>
+      <material name="chassis_blue"/>
+    </visual>
+    <!-- Raised front panel makes the vehicle heading obvious in top-down RViz. -->
+    <visual>
+      <origin xyz="0.146 0 0.12" rpy="0 0 0"/>
+      <geometry><box size="0.04 0.176 0.025"/></geometry>
+      <material name="front_white"/>
+    </visual>
+    <!-- The lidar position matches the base_link -> laser_frame static TF. -->
+    <visual>
+      <origin xyz="-0.11 0 0.165" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.04" length="0.035"/></geometry>
+      <material name="sensor_gray"/>
+    </visual>
+    <visual>
+      <origin xyz="0.11 0.108 0.035" rpy="1.570796 0 0"/>
+      <geometry><cylinder radius="0.035" length="0.04"/></geometry>
+      <material name="wheel_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0.11 -0.108 0.035" rpy="1.570796 0 0"/>
+      <geometry><cylinder radius="0.035" length="0.04"/></geometry>
+      <material name="wheel_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.11 0.108 0.035" rpy="1.570796 0 0"/>
+      <geometry><cylinder radius="0.035" length="0.04"/></geometry>
+      <material name="wheel_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.11 -0.108 0.035" rpy="1.570796 0 0"/>
+      <geometry><cylinder radius="0.035" length="0.04"/></geometry>
+      <material name="wheel_dark"/>
+    </visual>
+  </link>
+</robot>

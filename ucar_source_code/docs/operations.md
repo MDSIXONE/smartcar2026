@@ -1233,6 +1233,36 @@ roslaunch yolo2025 2026.launch startup_goal_enabled:=true
 rospack plugins --attrib=plugin nav_core | grep cym_planner
 ```
 
+## 2026 主流程三场比赛副本（2026-08-16 起）
+
+主流程现有三份独立包，流程逻辑完全一致（国赛版仅地图墙位不同）：
+
+- `ucar_2026` —— 省赛版（原版，不动）。
+- `ucar_2026_national` —— 国赛版：编号图中 148 与 159 之间的墙（x=0，y 1.5~2.0）
+  移动到 147 与 158 之间（x=-0.5），其余流程与省赛完全一致。
+- `ucar_2026_extra` —— 国赛现场随机任务版：流程暂与省赛一致，地图沿用国赛布局。
+
+真车导航 pgm 仍共用 `iflysse_field_walls_without_middle_vertices`（无中间墙简化版），
+新墙位靠激光实时避障，静态地图无需改。
+
+部署/回归（小车 Ubuntu 18.04）时把新包名加入编译白名单，例如：
+
+```bash
+cd ~/ucar_ws
+catkin_make --pkg cym_planner ucar_2026 ucar_2026_national ucar_2026_extra
+catkin_make -DCATKIN_ENABLE_TESTING=ON \
+  -DCATKIN_WHITELIST_PACKAGES="cym_planner;jie_ware;yolo2025;ucar_2026;ucar_2026_national;ucar_2026_extra" \
+  -j2
+catkin_make run_tests_ucar_2026_national run_tests_ucar_2026_extra -j2
+catkin_test_results build/test_results
+```
+
+启动命令与 `2026.launch` 相同，包名换成对应副本即可：
+
+```bash
+roslaunch ucar_2026_national 2026.launch task_enabled:=true
+```
+
 ## QR Code 扫描
 
 二维码序列正常完成并识别至少 `3` 个不同二维码后，任务在 `0.1 s` 后进入中部生产网格。它保留普通 `move_base` 全局路径规划，且在向每一个格心发送目标前调用 `/move_base/make_plan`；无有效路径则零速度停止，不会直线穿墙。网格路线严格读取 `production_square_centers.json`，当前编号顺序为 `2 → 12 → 22 → 32 → 31 → 21 → 11 → 1`，所有停靠点均为 JSON 中的格心。

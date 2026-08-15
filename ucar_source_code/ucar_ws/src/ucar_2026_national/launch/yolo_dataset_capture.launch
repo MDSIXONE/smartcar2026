@@ -1,0 +1,30 @@
+<launch>
+  <!-- Standalone, non-driving image collection.  No navigation or cmd_vel
+       publisher is started by this launch file. -->
+  <arg name="output_root" default="$(env HOME)/.ros/ucar_2026_national_yolo_dataset"/>
+  <arg name="capture_count" default="300"/>
+  <arg name="capture_interval" default="0.5"/>
+  <arg name="image_topic" default="/usb_cam/image_raw"/>
+
+  <node name="usb_cam" pkg="usb_cam" type="usb_cam_node" output="screen">
+    <param name="video_device" value="/dev/video0"/>
+    <param name="image_width" value="640"/>
+    <param name="image_height" value="480"/>
+    <param name="pixel_format" value="yuyv"/>
+    <param name="camera_frame_id" value="usb_cam"/>
+    <param name="io_method" value="mmap"/>
+    <param name="framerate" value="30"/>
+    <param name="create_suspended" value="true"/>
+  </node>
+
+  <node name="yolo_dataset_capture" pkg="ucar_2026_national"
+        type="yolo_dataset_capture.py" output="screen" required="true">
+    <param name="output_root" value="$(arg output_root)"/>
+    <param name="image_topic" value="$(arg image_topic)"/>
+    <param name="capture_count" value="$(arg capture_count)"/>
+    <param name="capture_interval" value="$(arg capture_interval)"/>
+    <param name="train_ratio" value="0.8"/>
+    <param name="manage_camera" value="true"/>
+    <param name="stop_camera_after_capture" value="true"/>
+  </node>
+</launch>
