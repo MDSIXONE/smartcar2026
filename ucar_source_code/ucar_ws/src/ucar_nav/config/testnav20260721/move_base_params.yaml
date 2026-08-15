@@ -4,7 +4,10 @@ controller_frequency: 20.0
 controller_patience: 0.5
 # 2026-08-11：3.0→5.0。中途障碍（如 431）出现时更快重规划绕行，
 # 配合 CymPlanner 降速降低碰撞概率；频率仍远低于 controller 20Hz。
-planner_frequency: 5.0
+# 2026-08-15：5.0→0.0。关闭周期性全局重规划：一次规划后仅在
+# CymPlanner 前视判障失败（controller_patience 内）时事件驱动重规划，
+# 消除 5Hz 在近障碍处反复换侧导致的急转。
+planner_frequency: 0.0
 planner_patience: 3.0
 oscillation_timeout: 5.0
 oscillation_distance: 0.01

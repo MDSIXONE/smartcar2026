@@ -752,7 +752,8 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
 
         qr_codes = iter([u"苹果", u"手机"])
 
-        def scan_observation_point(observation_number, accept_text=None):
+        def scan_observation_point(observation_number, accept_text=None,
+                                   allow_revolution=True):
             events.append("qr_scan")
             try:
                 return next(qr_codes)
@@ -958,6 +959,38 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.assertEqual(turns, [(
             "QR observation point 262", 0.18, True, 0,
             True, 262)])
+
+    def test_scan_observation_point_skips_revolution_when_disabled(self):
+        self.task.lock = threading.RLock()
+        self.task.points = {52: (-1.75, 2.25), 262: (-2.50, 2.25)}
+        self.task.staging_point_number = 52
+        self.task.api_sequence = 0
+        self.task.latest_api_text = ""
+        self.task.api_event = threading.Event()
+        self.task.publish_state = lambda _state: None
+        self.task.qr_search_timeout = 1.0
+        self.task.qr_rotation_speed = 0.18
+        self.task.navigate_coordinates = lambda *_args, **_kwargs: None
+        self.task.accepted_qr_after = lambda *_args, **_kwargs: (None, False)
+        self.task.wait_for_fresh_qr = lambda *_args, **_kwargs: (None, False)
+        turns = []
+
+        def rotate_full_revolution(label, speed, stop_for_qr, qr_baseline,
+                                   qr_accept=None,
+                                   qr_observation_number=None):
+            turns.append((label, speed, stop_for_qr, qr_baseline,
+                          qr_accept is not None, qr_observation_number))
+            return None
+
+        self.task.rotate_full_revolution = rotate_full_revolution
+
+        # With the revolution fallback disabled this face only faces and
+        # waits: no 360-degree turn happens and None lets the collection
+        # loop advance to the next fixed direction.
+        self.assertIsNone(
+            self.task.scan_observation_point(
+                262, lambda raw: True, allow_revolution=False))
+        self.assertEqual(turns, [])
 
     def test_scan_observation_point_advances_after_non_target_qr(self):
         self.task.lock = threading.RLock()
@@ -1501,7 +1534,8 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         detected_items = iter([u"牙刷", u"蛋糕"])
         category_for_item = {u"牙刷": u"日用品", u"蛋糕": u"食品"}
 
-        def scan(observation_number, accept_text=None):
+        def scan(observation_number, accept_text=None,
+                 allow_revolution=True):
             item = next(detected_items)
             if accept_text is not None and not accept_text(item):
                 return None
@@ -1532,7 +1566,8 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         faces = []
         codes = iter([u"苹果", u"无关码", u"苹果", u"手机"])
 
-        def scan(observation_number, accept_text=None):
+        def scan(observation_number, accept_text=None,
+                 allow_revolution=True):
             faces.append(observation_number)
             code = next(codes)
             if accept_text is not None and not accept_text(code):
@@ -1545,6 +1580,8 @@ class ProductionTaskDualItemTest(unittest.TestCase):
 
         # The non-target code is skipped, the repeated 苹果 keeps its first
         # face, and the scan stops as soon as both targets are collected.
+        # Stage 1 faces 262 (collects 苹果), 232 (rejected), 295 (already
+        # collected), then stage 2 faces 262 again and collects 手机.
         self.assertEqual(collected, {u"苹果": 262, u"手机": 262})
         self.assertEqual(faces, [262, 232, 295, 262])
 
@@ -1552,7 +1589,8 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         self.task.qr_observation_numbers = [262, 232, 295]
         faces = []
 
-        def scan(observation_number, accept_text=None):
+        def scan(observation_number, accept_text=None,
+                 allow_revolution=True):
             faces.append(observation_number)
             return None
 
@@ -1560,7 +1598,32 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         collected = self.task.collect_target_qr_codes(
             set([u"苹果", u"手机"]))
         self.assertEqual(collected, {})
-        self.assertEqual(faces, [262, 232, 295, 262, 232, 295])
+        # Nothing found in either stage, so both rounds run fully: 3 faces
+        # without revolution + 3 revolution fallbacks per round.
+        self.assertEqual(faces, [
+            262, 232, 295, 262, 232, 295,
+            262, 232, 295, 262, 232, 295])
+
+    def test_qr_collection_faces_all_directions_before_revolution(self):
+        self.task.qr_observation_numbers = [262, 232, 295]
+        calls = []
+
+        def scan(observation_number, accept_text=None,
+                 allow_revolution=True):
+            calls.append((observation_number, allow_revolution))
+            return None
+
+        self.task.scan_observation_point = scan
+        collected = self.task.collect_target_qr_codes(
+            set([u"苹果", u"手机"]))
+        self.assertEqual(collected, {})
+        # Stage 1 always faces all three directions without revolution
+        # before stage 2 applies the revolution fallback, in both rounds.
+        self.assertEqual(calls, [
+            (262, False), (232, False), (295, False),
+            (262, True), (232, True), (295, True),
+            (262, False), (232, False), (295, False),
+            (262, True), (232, True), (295, True)])
 
     def test_run_mission_aborts_when_qr_codes_not_all_collected(self):
         class MoveBase(object):
@@ -1592,7 +1655,8 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         self.task.qr_enable_pub = QrPublisher()
         self.task.navigate_to = lambda *_args, **_kwargs: None
         self.task.scan_observation_point = (
-            lambda _observation_number, _accept_text=None: None)
+            lambda _observation_number, _accept_text=None,
+                   allow_revolution=True: None)
 
         with self.assertRaises(task_module.MissionAbort) as raised:
             self.task.run_mission()
@@ -2045,7 +2109,7 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         self.assertEqual(len(attempts), 3)
         self.assertEqual(sleeps, [2.0, 2.0])
 
-    def test_simulation_request_start_aborts_after_all_retries(self):
+    def test_simulation_request_start_continues_after_all_retries(self):
         self.task.simulation_host = "192.168.1.5"
         self.task.simulation_port = 11313
         self.task.simulation_start_timeout = 1.0
@@ -2062,13 +2126,15 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         original_urlopen = task_module.urllib2.urlopen
         task_module.urllib2.urlopen = fake_urlopen
         try:
-            with self.assertRaises(task_module.MissionAbort) as raised:
-                self.task.simulation_request_start(u"手机", u"电子产品")
+            result = self.task.simulation_request_start(u"手机", u"电子产品")
         finally:
             task_module.urllib2.urlopen = original_urlopen
             task_module.time.sleep = original_sleep
+        self.assertFalse(result)
         self.assertEqual(len(attempts), 3)
-        self.assertIn("failed after 3 attempts", str(raised.exception))
+        self.assertTrue(any(
+            "PRODUCTION_SIMULATION_START_FAILED_CONTINUE" in warning
+            for warning in self.warnings))
 
     def test_simulation_wait_done_returns_after_done(self):
         self.task.simulation_host = "192.168.1.5"

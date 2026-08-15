@@ -9,6 +9,10 @@ cym_planner/CymPlanner:
   # 2026-08-11：max_vel_x 0.50→0.35、max_vel_theta 1.00→0.80，
   #   final_yaw_tolerance 0.10→0.15 —— 降低绕行 431 类中途障碍时的碰撞
   #   概率/冲击；放宽到点朝向容差，省回部分降速时间。
+  # 2026-08-15（用户试跑）：heading_slowdown_min_scale 1.00→0.00 —— 线速度
+  #   按 cos²(航向误差) 缩放，换路后大角度对准先转向、基本不前进；
+  #   final_linear_x_gain 1.0→0.0 —— 终点阶段只对准朝向，不做前后位置
+  #   修正，消除墙边定点来回调整。
   mode1_point:
     linear_x_gain: 1.5
     linear_x_kd: 0.5
@@ -16,13 +20,13 @@ cym_planner/CymPlanner:
     angular_gain: 2.5
     angular_kd: 0.4
     max_vel_theta: 0.80
-    heading_slowdown_min_scale: 1.00
+    heading_slowdown_min_scale: 0.00
     command_sweep_time: 0.00
     command_sweep_step: 0.025
     final_yaw_gain: 2.0
     final_yaw_max_vel: 1.00
     final_yaw_tolerance: 0.15
-    final_linear_x_gain: 1.0
+    final_linear_x_gain: 0.0
     obstacle_lookahead_distance: 0.25
     obstacle_cost_threshold: 253
     carry_speed_scale: 1.0

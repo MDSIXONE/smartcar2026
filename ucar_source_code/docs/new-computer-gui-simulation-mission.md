@@ -22,8 +22,8 @@
                                               └─ Gazebo + RViz（可见窗口）
 ```
 
-> 2026-08-14 起，本文下方所有“WSL 真车 Master / start_ros_master.sh / 将 MASTER_IP
-> 传给小车”的旧段落均已退役。当前启动命令为小车端
+> 2026-08-14 起，主流程 ROS Master 在小车本机；“WSL 真车 Master / start_ros_master.sh /
+> MASTER_IP”旧步骤已从本文删除。当前启动命令为小车端
 > `bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh <电脑LAN_IP> mission`；电脑地址
 > 只用于 bridge HTTP，不是 ROS Master。完整当前网络说明见
 > `rosmaster/NETWORK_CONFIGURATION.md`。
@@ -88,48 +88,16 @@ test -d ~/smartcar2026-simulation/src/car3/models/cube/meshes && echo MESH_OK
 
 真车代码不用在新电脑编译；它只能在小车 Ubuntu 18.04 上构建。后文第 3 节会上传并在车端构建。
 
-### 1.3 安装 WSL 真车 Master 启动器
+### 1.3 ~~安装 WSL 真车 Master 启动器~~（已退役，不要安装）
 
-在 WSL 中，先把 Windows 真车仓库路径写成一个变量；下面路径必须按实际克隆位置修改：
-
-```bash
-export REAL_REPO=/mnt/d/SmartCar/ucar_source_code
-test -f "$REAL_REPO/rosmaster/start_ros_master.sh"
-mkdir -p ~/.config/smartcar/python_http10_compat
-cp "$REAL_REPO/rosmaster/start_ros_master.sh" ~/start_ros_master.sh
-cp "$REAL_REPO/rosmaster/python_http10_compat/sitecustomize.py" \
-  ~/.config/smartcar/python_http10_compat/sitecustomize.py
-chmod 0755 ~/start_ros_master.sh
-```
-
-首次安装还需要这个小型网络加载器。它只读取当前 Wi-Fi 的地址；每次换网时仅改
-`ros_network.env`，不改代码：
-
-```bash
-mkdir -p ~/.config/smartcar
-cat > ~/.config/smartcar/ros_network.sh <<'EOF'
-#!/usr/bin/env bash
-set -eo pipefail
-source /opt/ros/noetic/setup.bash
-if [[ -r "$HOME/.config/smartcar/ros_network.env" ]]; then
-  source "$HOME/.config/smartcar/ros_network.env"
-fi
-if [[ -z "${ROS_IP:-}" ]]; then
-  echo 'ERROR: set ROS_IP in ~/.config/smartcar/ros_network.env first.' >&2
-  return 2
-fi
-case "$ROS_IP" in
-  127.*|198.18.*|100.*) echo "ERROR: invalid LAN ROS_IP=$ROS_IP" >&2; return 2 ;;
-esac
-unset ROS_HOSTNAME
-export ROS_MASTER_URI="http://${ROS_IP}:11311"
-EOF
-chmod 0755 ~/.config/smartcar/ros_network.sh
-```
+2026-08-14 起主流程 ROS Master 改由小车本机托管（`start_2026.sh` 前台启动并监管
+`roscore`），WSL 不再运行真车 Master。旧步骤（`start_ros_master.sh`、
+`python_http10_compat/sitecustomize.py`、`ros_network.sh`、`ros_network.env`）已删除，
+不要按旧教程安装或使用。
 
 ## 2. 每次换 Wi-Fi：确定 IP 并配置防火墙
 
-### 2.1 找到电脑的局域网 IP（即 `MASTER_IP`）
+### 2.1 找到电脑的局域网 IP（即 `SIMULATION_HOST`）
 
 在 Windows PowerShell 执行：
 
@@ -145,22 +113,9 @@ ipconfig
 - `100.*`（VPN/Tailscale）；
 - `172.*` 或其他 WSL 虚拟网卡地址。
 
-在 WSL 中更新当前网络配置，IP 必须替换为本次 `ipconfig` 的 WLAN IPv4：
-
-```bash
-cat > ~/.config/smartcar/ros_network.env <<'EOF'
-ROS_IP=192.168.31.252
-EOF
-```
-
-验证 WSL 也看见同一地址：
-
-```bash
-source ~/.config/smartcar/ros_network.sh
-printf 'ROS_IP=%s\nROS_MASTER_URI=%s\n' "$ROS_IP" "$ROS_MASTER_URI"
-```
-
-若输出不是该 WLAN 地址，先检查 `.wslconfig` 的 mirrored networking 是否生效；不要继续。
+该地址是 `start_2026.sh` 传给小车的电脑仿真服务地址，仅用于 bridge HTTP 11313，不是
+ROS Master。若地址不是本机 WLAN IPv4，先检查 `.wslconfig` 的 mirrored networking
+是否生效；不要继续。
 
 ### 2.2 找到小车 IP（即 `CAR_IP`）
 
@@ -181,21 +136,13 @@ ssh ucar@<CAR_IP> hostname
 
 ### 2.3 Windows 防火墙（每台新电脑一次）
 
-小车必须能访问 WSL 的 ROS Master（11311 和 ROS 动态 TCPROS）与 bridge（11313）。在**管理员
-PowerShell** 为可信局域网创建/调整规则：
+小车只需访问 bridge 的 TCP **11313**；不需要开放 ROS 11311 或动态 TCPROS 端口（小车
+Master 在小车本机）。在**管理员 PowerShell** 为可信局域网创建规则：
 
 ```powershell
-New-NetFirewallRule -DisplayName 'ROS TCPROS from UCar to WSL' `
-  -Direction Inbound -Protocol TCP -RemoteAddress LocalSubnet -Action Allow
-New-NetFirewallHyperVRule -Name 'ROS TCPROS from UCar to WSL' `
-  -DisplayName 'ROS TCPROS from UCar to WSL' -Direction Inbound `
-  -RemoteAddresses LocalSubnet -Action Allow
-New-NetFirewallRule -DisplayName 'SimBridge 11313 from UCar to WSL' `
+New-NetFirewallRule -DisplayName 'SimBridge 11313 from UCar' `
   -Direction Inbound -Protocol TCP -LocalPort 11313 `
   -RemoteAddress LocalSubnet -Action Allow
-New-NetFirewallHyperVRule -Name 'SimBridge 11313 from UCar to WSL' `
-  -DisplayName 'SimBridge 11313 from UCar to WSL' -Direction Inbound `
-  -LocalPorts 11313 -RemoteAddresses LocalSubnet -Action Allow
 ```
 
 规则只在受信任的赛场局域网中使用 `LocalSubnet`。换 Wi-Fi 后无需把规则绑到新 IP；但必须重复
@@ -216,16 +163,15 @@ scp ucar_ws/src/ucar_2026/test/test_production_task_geometry.py "${CAR}:~/ucar_w
 ssh $CAR 'chmod 0755 ~/ucar_ws/src/ucar_2026/scripts/production_task_2026.py ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh'
 ```
 
-上传后应逐文件比对 SHA-256，再仅在小车端构建/回归。把 `<MASTER_IP>` 换成本次第 2.1 节的地址：
+上传后应逐文件比对 SHA-256，再仅在小车端构建/回归。构建测试以 mock 为主，不需要 ROS
+Master 在线；若个别用例需要，可先在本终端启动 `roscore`（测完 Ctrl-C 停止，不要与主流程
+同时运行）：
 
 ```bash
-# 在小车 Ubuntu 18.04 终端执行；不启动 roscore
+# 在小车 Ubuntu 18.04 终端执行；默认不启动 roscore
 cd ~/ucar_ws
 source /opt/ros/melodic/setup.bash
 unset ROS_HOSTNAME
-MASTER_IP=<MASTER_IP>
-export ROS_MASTER_URI="http://${MASTER_IP}:11311"
-export ROS_IP="$(ip -4 route get "$MASTER_IP" | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
 catkin_make --pkg ucar_2026 -DCATKIN_ENABLE_TESTING=ON
 catkin_make -DCATKIN_ENABLE_TESTING=ON run_tests
 catkin_test_results --verbose build/test_results/ucar_2026
@@ -259,26 +205,16 @@ wsl --shutdown
 
 这会让 Docker Desktop 临时显示 Stopped，属于正常现象。重启 WSL 后再次复检，合格才继续。
 
-## 5. 启动顺序：五个保持打开的终端
+## 5. 启动顺序：四个保持打开的终端
 
 从这里开始，不要将任一启动命令放入一次性后台 PowerShell/WSL 命令。每个终端保持打开，
 按标题命名，便于发生异常时精确 Ctrl-C。
 
-### 终端 A：WSL 真车 Master（11311）
+### 终端 A：（已退役，不再需要）
 
-```bash
-unset ROS_IP ROS_HOSTNAME ROS_MASTER_URI
-source ~/.config/smartcar/ros_network.sh
-~/start_ros_master.sh
-```
-
-必须出现类似：
-
-```text
-Starting ROS Master at http://192.168.31.252:11311 (ROS_IP=192.168.31.252, XML-RPC=HTTP/1.0)
-```
-
-若出现 `localhost`、`127.0.0.1`、`198.18.*`、`100.*`，按 Ctrl-C 停止，回到第 2.1 节。
+2026-08-14 起主流程 ROS Master 由小车本机托管，`start_2026.sh` 会前台启动并监管小车
+`roscore`；**不要在 WSL 运行真车 Master（11311）**。旧 `start_ros_master.sh` 流程见
+第 1.3 节退役说明。
 
 ### 终端 B：WSL 仿真专用 Master（11312）
 
@@ -332,15 +268,15 @@ simulation bridge listening on 0.0.0.0:11313 (state=waiting)
 
 ### 终端 E：小车先做网络检查，再启动 manual
 
-在小车端运行。`<MASTER_IP>` 必须是终端 A 显示的 WSL WLAN 地址：
+在小车端运行。`<电脑LAN_IP>` 是第 2.1 节查到的电脑 WLAN IPv4：
 
 ```bash
-bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh <MASTER_IP> check
-bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh <MASTER_IP> manual
+bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh <电脑LAN_IP> check
+bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh <电脑LAN_IP> manual
 ```
 
-`check` 必须显示小车自动计算出的 `ROS_IP`，并报告 Master 连接成功。若失败，不得启动
-`manual` 或 `mission`，先按第 9 节排查。
+`check` 会打印小车本机 Master 地址与电脑仿真服务地址，脚本按到电脑的路由自动选择小车
+`ROS_IP` 并验证。若打印失败或地址不对，不得启动 `manual` 或 `mission`，先按第 9 节排查。
 
 ## 6. 进入 mission 前的必要检查（不通过就停止）
 
@@ -372,8 +308,8 @@ rostopic hz /scan
 - 小车到 bridge 的连通性通过：
 
   ```bash
-  timeout 2 bash -c '>/dev/tcp/<MASTER_IP>/11313' && echo BRIDGE_TCP_OK
-  curl -s http://<MASTER_IP>:11313/status
+  timeout 2 bash -c '>/dev/tcp/<电脑LAN_IP>/11313' && echo BRIDGE_TCP_OK
+  curl -s http://<电脑LAN_IP>:11313/status
   ```
 
 如果任何 odom/TF 条目异常：保持不动，先执行第 8 节“紧急停止”，重启导航/底盘里程计链路，
@@ -387,8 +323,11 @@ rostopic hz /scan
 在小车主终端执行：
 
 ```bash
-bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh <MASTER_IP> mission
+bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh <电脑LAN_IP> mission
 ```
+
+脚本会先对 `<电脑LAN_IP>:11313` 做 TCP 预检，不可达会打印排查指引并退出（不进入任务），
+详见 `rosmaster/NETWORK_CONFIGURATION.md` 故障排查。
 
 出现“是否已把车放回起点”时，只有确认真实摆放正确才输入 `yes`。
 
@@ -403,7 +342,9 @@ bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh <MASTER_IP> mission
 
 1. 扫齐二维码，**在前往点 3 前**播报收集结果和物品所属仓库；
 2. 巡航识别，仿真类别即使先发现也只记录，必须先停入并播报实物；
-3. 停入仿真物品后 bridge 收到 `/start`，Gazebo 中开始仿真；小车最多等待 **150 秒**完成；
+3. 停入仿真物品后 bridge 收到 `/start`，Gazebo 中开始仿真；小车最多等待约 **120 秒**
+   （`simulation_done_timeout=120`）。`/start` 失败或状态轮询超时都**不会中止任务**，
+   到时直接继续前往 441（仿真结果视为未确认）；
 4. 仿真完成后前往 441，任务成功会自动交接 lane_proto 巡线至 `STOPPED`。
 
 任务主路线未找到类别时会补跑边界路线；若仍没有，将直接去 441 交接。边界角点的完整原地旋转
@@ -417,7 +358,7 @@ rostopic echo /ucar_2026/task_state
 rostopic echo /ucar_2026/task_result
 
 # WSL 另一终端
-curl -s http://<MASTER_IP>:11313/status
+curl -s http://<电脑LAN_IP>:11313/status
 ```
 
 ## 8. 停止与清理（必须做，不留后台进程）
@@ -427,10 +368,11 @@ curl -s http://<MASTER_IP>:11313/status
 在任意新的小车终端执行：
 
 ```bash
-MASTER_IP=<MASTER_IP> bash ~/ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh
+电脑LAN_IP=<电脑LAN_IP> bash ~/ucar_ws/src/ucar_2026/scripts/stop_2026_task.sh
 ```
 
-该脚本先发布零速度，再停止 `ucar_2026 2026.launch`；不会停止 WSL Master。若已自动交接
+该脚本先发布零速度，再停止 `ucar_2026 2026.launch`；不会停止小车本机 Master（它由
+`start_2026.sh` 前台托管，主流程退出时一并停止）。若已自动交接
 lane_proto，先观察 `/lane_proto/state`，确认要停止的准确 `roslaunch lane_proto` PID 后，
 对该 PID 发送 `kill -INT <PID>`。不要按进程名宽泛杀进程。
 
@@ -439,8 +381,7 @@ lane_proto，先观察 `/lane_proto/state`，确认要停止的准确 `roslaunch
 1. 小车：确认 2026/lane 任务已退出；
 2. 终端 D：bridge 按 Ctrl-C 退出；
 3. 终端 C：`task3_prepare.launch` 按 Ctrl-C 退出，Gazebo/RViz 关闭；
-4. 终端 B：仿真 `roscore` 按 Ctrl-C 退出；
-5. 终端 A：真车 `roscore` 按 Ctrl-C 退出。
+4. 终端 B：仿真 `roscore` 按 Ctrl-C 退出。
 
 最后在 WSL 检查没有本次残留：
 
@@ -454,22 +395,23 @@ pgrep -af 'sim_bridge|task3_prepare|task3_execute|gzserver|gzclient|roscore|rosm
 
 | 现象 | 处理 |
 | --- | --- |
-| 小车 `check` 连不上 Master | 核对终端 A 的 `MASTER_IP` 是 WLAN IPv4，非 127/198.18/100/WSL 虚拟地址；确认同网段、路由器未隔离客户端、Windows 防火墙规则存在。 |
-| 小车能 SSH，但 `rosnode list` 超时 | 多为 ROS 动态 TCPROS 防火墙未放行或小车 `ROS_IP` 取错。重新运行 `start_2026.sh ... check`，检查输出的小车 IP 是否为当前 WLAN 地址。 |
-| bridge `connection refused` / 小车 POST 超时 | 确认终端 D 已显示 `SIMULATION_BRIDGE_READY`，在小车用 `curl http://<MASTER_IP>:11313/status`，再检查 11313 两条防火墙规则。 |
+| 小车 `check` 报错 | 核对传给 `start_2026.sh` 的 `<电脑LAN_IP>` 是 Windows WLAN IPv4，非 127/198.18/100/WSL 虚拟地址；确认同网段、路由器未隔离客户端、Windows 防火墙 11313 规则存在。 |
+| 小车能 SSH，但 `start_2026.sh` 启动失败 | 多为电脑地址填错或小车 `ROS_IP` 取错。重新运行 `start_2026.sh ... check`，检查输出是否为当前 WLAN 网段；Master 在小车本机，与电脑 11311/TCPROS 无关。 |
+| bridge `connection refused` / 小车 POST 超时 | 确认终端 D 已显示 `SIMULATION_BRIDGE_READY`，在小车用 `curl http://<电脑LAN_IP>:11313/status`，再检查 11313 防火墙规则与 WSL2 mirrored/portproxy 配置。 |
 | bridge 一直等 `/map` | 终端 C 没启动成功、未 source Noetic/devel，或 ROS Master 错用了 11311。C/D 必须都是 `127.0.0.1:11312`。先让 `/map` 有数据后重启 bridge。 |
 | bridge 返回 409 `already finished` | bridge 每次只服务一轮。Ctrl-C 结束终端 D，再重新启动 bridge，状态回到 `waiting`。 |
+| 小车报 `No route to host`（/start 连不上） | 电脑 IP 填错（填了 WSL `172.*` 或换 Wi-Fi 后的旧 IP），或 WSL2 NAT 未对 11313 做端口转发。按 `rosmaster/NETWORK_CONFIGURATION.md` 故障排查逐项检查；任务不会中止，120 秒兜底后继续。 |
 | Gazebo/RViz 黑屏、卡顿或标题含 COPY MODE | 立即关闭，不要带病跑；严格按第 4 节 `wsl --terminate` / 必要时 `wsl --shutdown` 后复检。 |
 | 关闭 WSL 窗口后仿真消失 | 不要用一次性后台命令承载 ROS；使用第 5 节的常驻终端，并确认 `.wslconfig` 已设置 `vmIdleTimeout=-1`。 |
 | `/odom_raw` 有 NaN 或 TF_NAN_INPUT | 不运行 mission。使用停止脚本发布零速度，检查电池/CP2102/USB Hub，重启导航和底盘里程计链路，再从 manual 安全检查重新开始。 |
 | 日志出现 CRC16 | USB 音频扬声器不要与 CP2102 同一 Hub；改到独立 USB 口或 3.5 mm 音频。数据链路未恢复前不得行驶。 |
-| 仿真等超过 150 秒 | 小车会按安全策略中止。不要在小车停到加工区后临时补开仿真；先停止、回起点，从第 5 节重新让仿真和 bridge 就绪。 |
+| 仿真等超过 120 秒 | 小车会继续任务（不中止），仿真结果视为未确认；终端保留 `PRODUCTION_SIMULATION_*` 日志供核查。不要在小车停到加工区后临时补开仿真；先停止、回起点，从第 5 节重新让仿真和 bridge 就绪。 |
 | 2026 与 lane_proto 同时抢相机/串口 | 两者不能同时启动。先用停止脚本确保 2026 全部退出，自动交接应自行等待；人工启动 lane 前复核进程表。 |
 
 ## 10. 出发前 30 秒勾选
 
-- [ ] 本次 `MASTER_IP` 是 Windows WLAN IPv4，且小车和电脑同网段。
-- [ ] 终端 A 是 11311，终端 B/C/D 是 11312；没有小车端 roscore。
+- [ ] 本次 `<电脑LAN_IP>` 是 Windows WLAN IPv4，且小车和电脑同网段。
+- [ ] 小车本机 Master 由 `start_2026.sh` 托管；电脑 WSL 不运行真车 roscore；终端 B/C/D 是 11312。
 - [ ] COPY MODE 两项检查合格，Gazebo 与 RViz 可见。
 - [ ] `/map`、Gazebo 服务、bridge `waiting`、小车到 11313 的 curl 均正常。
 - [ ] manual 下 odom、两个 TF、雷达、底盘日志均正常且无 NaN/TF/CRC。

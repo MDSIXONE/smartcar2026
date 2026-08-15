@@ -68,6 +68,32 @@ New-NetFirewallRule -DisplayName 'SimBridge 11313 from UCar' `
   -RemoteAddress LocalSubnet -Action Allow
 ```
 
+## 故障排查：车端 No route to host（/start 连不上仿真）
+
+车端日志出现 `PRODUCTION_SIMULATION_START_RETRY ... error="<urlopen error [Errno 113] No route to
+host>"` 时，是车到 `<电脑LAN_IP>:11313` 网络层不可达，与 bridge 是否就绪无关。按顺序检查：
+
+1. **填错 IP（最常见）**：`start_2026.sh` 的地址必须是电脑的 **Windows 局域网 IP**（在电脑上
+   `ipconfig` 查 Wi-Fi 适配器 IPv4），**不是** WSL 里的 `ip addr` 结果——WSL2 的 `172.x` 是
+   NAT 内部网段，小车在场地 Wi-Fi 网段无法路由到它（网关回 ICMP unreachable 即 Errno 113）。
+   Wi-Fi 环境变化后 IP 会变，每次出发前都要重新确认。
+2. **bridge 未监听**：电脑终端必须显示 `simulation bridge listening on 0.0.0.0:11313`。
+3. **WSL2 网络模式**：NAT 模式下 WSL 内监听的端口对局域网不可见。推荐在
+   `C:\Users\<用户>\.wslconfig` 设置 `networkingMode=mirrored`（Windows 11 22H2+）；或
+   Windows 上用端口代理：
+   `netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=11313 connectaddress=<WSL_IP> connectport=11313`
+   （`<WSL_IP>` 用 WSL 里 `ip addr` 查询），并配下方防火墙规则。
+4. **防火墙**：确认入站规则放行 TCP 11313（`RemoteAddress LocalSubnet`）。
+
+小车侧快速验证（车在场地内）：
+
+```bash
+timeout 2 bash -c "exec 3<>/dev/tcp/<电脑LAN_IP>/11313" && echo TCP_OK
+```
+
+`start_2026.sh` 的 `mission` 模式启动时会先做 TCP 11313 预检，不可达会直接报错退出；不要忽略
+该提示强行出发，否则任务会在仿真区因无法启动仿真而中止。
+
 ## 只读连通性检查
 
 主流程启动后，在小车另一个 shell 中用脚本显示的 `VEHICLE_IP`：

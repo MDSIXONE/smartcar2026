@@ -46,6 +46,22 @@ export SIMULATION_HOST="$simulation_host"
 printf '\n网络检查结果：\n  小车 ROS Master = %s\n  电脑仿真服务 = %s\n\n' \
   "$ROS_MASTER_URI" "$SIMULATION_HOST"
 
+# 预检电脑仿真 bridge 的 TCP 11313 是否可达，避免任务中途才发现网络错误
+if timeout 2 bash -c "exec 3<>/dev/tcp/${simulation_host}/11313" 2>/dev/null; then
+  echo "电脑仿真服务 TCP 11313 可达。"
+else
+  if [[ "$launch_mode" == "mission" ]]; then
+    echo "错误：电脑仿真服务 $simulation_host:11313 不可达。" >&2
+    echo "  请确认：" >&2
+    echo "  1. 电脑上仿真 bridge 已启动，终端显示 listening on 0.0.0.0:11313；" >&2
+    echo "  2. 填的是电脑的 Windows 局域网 IP（在电脑上运行 ipconfig 查 Wi-Fi 适配器 IPv4，不是 WSL 里的 ip addr）；" >&2
+    echo "  3. WSL2 为 mirrored 网络模式，或在 Windows 上对 11313 配置了 netsh portproxy 且防火墙放行（RemoteAddress LocalSubnet）。" >&2
+    exit 2
+  else
+    echo "警告：电脑仿真服务 $simulation_host:11313 当前不可达；非任务模式继续启动。" >&2
+  fi
+fi
+
 if timeout 2 "$python2_runner" /opt/ros/melodic/bin/rosnode list \
   >/dev/null 2>&1; then
   echo "错误：$ROS_MASTER_URI 已有 ROS Master；本脚本只管理自己启动的 Master。" >&2

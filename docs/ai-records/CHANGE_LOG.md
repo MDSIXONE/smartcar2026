@@ -3,6 +3,23 @@
 ## 2026-08-15
 
 - **状态**：改动完成
+- **目标**：三参数试跑——关闭 5Hz 周期性全局重规划、Point 模式转向按 cos² 降速、终点阶段只调朝向不修正位置，用于归因"近障碍突然换路来不及转弯撞击"与"墙边定点来回调整"。
+- **影响文件**：`ucar_ws/src/ucar_nav/config/testnav20260721/move_base_params.yaml`、
+  `ucar_ws/src/cym_planner/config/ucar_cym_planner_params.yaml`、
+  `docs/changes/2026-08-15-replan-once-turn-slowdown-final-yaw-only.md`、
+  `docs/operations.md`。
+- **结果**：`planner_frequency` 5.0→0.0（仅事件驱动重规划）；`mode1_point`
+  `heading_slowdown_min_scale` 1.00→0.00（线速度乘 cos²(航向误差)）；
+  `final_linear_x_gain` 1.0→0.0（0.05m 内只对准朝向）。mode2 与其余参数不动。
+- **验证**：本机两份 YAML UTF-8 解析通过；已 scp 至小车 192.168.8.231，
+  两端 SHA-256 一致；车端 grep 确认 planner_frequency 0.0 /
+  mode1_point heading_slowdown_min_scale 0.00 / final_linear_x_gain 0.0
+  生效，mode2 参数未动。未经实车验证，用户试跑后决定是否保留。
+- **风险**：`planner_frequency=0.0` 仍会被局部判障失败、新目标、守卫取消触发重规划；
+  cos² 降速对 45° 误差仍保留约 50% 线速度，非硬阈值；终点位置精度现仅由任务层
+  `arrival_tolerance=0.15m` 验收。
+
+- **状态**：改动完成
 - **目标**：修复常驻交接漏传 `is_fork:=yolo` 导致交接点黄线被当终点横线、巡线全程跳过。
 - **影响文件**：`ucar_ws/src/ucar_2026/launch/2026.launch`、
   `ucar_ws/src/lane_proto/test/test_lane_runtime.py`、`docs/changes/`、

@@ -84,29 +84,28 @@ import cv2
 import rospy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import Image, Imu
+from sensor_msgs.msg import Imu
 from std_msgs.msg import Bool, String
 from std_srvs.srv import SetBool, SetBoolResponse
-from cv_bridge import CvBridge, CvBridgeError
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from trackseg import TrackSeg, IN_W, IN_H     # noqa: E402
 from lane_common import (load_template, Decider, map_az,  # noqa: E402
                          curve_text, goal_block, yellow_line, yellow_mask)
 
-
 try:
-    text_type = unicode
+    text_type = unicode                    # Python 2
 except NameError:
-    text_type = str
+    text_type = str                        # Python 3
 
 
 def format_ros_log(message, args):
-    """Pre-format Py2 unicode/UTF-8 logs before handing them to rospy.
+    """先把 unicode/UTF-8 混排的消息格式化好, 再交给 rospy。
 
-    rospy/logging formats ``message % args`` a second time.  In Python 2 that
-    raises when a Unicode value and an UTF-8 byte string are mixed.  Formatting
-    here as Unicode first leaves rospy one ASCII-only ``%s`` substitution.
+    rospy/logging 内部会对 ``message % args`` 再做一次格式化。Python 2 下
+    只要格式串或参数里混有 unicode 与含中文的 UTF-8 字节串, 那次格式化
+    就会按 ASCII 解码抛 UnicodeDecodeError。这里先统一成 unicode 格式化,
+    留给 rospy 的只剩一个纯 ASCII 的 ``%s`` 替换, 不会再炸。
     """
     if not isinstance(message, text_type):
         message = message.decode("utf-8", "replace")
@@ -144,9 +143,8 @@ def lane_logerr_throttle(period, message, *args):
     _rospy_logerr_throttle(period, "%s", format_ros_log(message, args))
 
 
-# This node owns the following module-level logging calls.  Keep their text
-# pre-formatted at this boundary; do not pass mixed Unicode/UTF-8 arguments to
-# rospy under Melodic Python 2.
+# 本节点所有日志都走上述包装: Melodic Python 2 下不得把
+# unicode/UTF-8 混排参数直接交给 rospy。调用方写法不变。
 rospy.loginfo = lane_loginfo
 rospy.logwarn = lane_logwarn
 rospy.logerr = lane_logerr
@@ -199,10 +197,29 @@ class FrameGrabber(threading.Thread):
         self.stopped = True
 
 
+def _tri(val, auto):
+    """三态参数: true / false / auto。auto 时返回调用方给的推导值。
+    roslaunch 会把裸的 true/false 自动转成 bool, 所以两种类型都得吃
+    (和 is_fork 那个坑同一个来源: 传字符串必须 <param type="str">)。"""
+    if isinstance(val, bool):
+        return val
+    t = str(val).strip().lower()
+    if t in ("auto", "", "none"):
+        return auto
+    return t in ("1", "true", "yes", "on")
+
+
 class RosFrameGrabber(object):
-    """Keep only the newest frame from the shared ROS camera stream."""
+    """订阅共享相机话题, 只留最新一帧 —— 接口和 FrameGrabber 一样。
+
+    故意**不用 cv_bridge**: 这个节点跑在 venv 里(系统 python 库很脆弱),
+    cv_bridge 在 venv 里 import 不进来是常事, 而 bgr8/rgb8/mono8 的解码
+    本来就是一次 reshape, 没必要为它引一个会炸的依赖。真碰上别的编码
+    才回退到 cv_bridge。
+    """
 
     def __init__(self, topic):
+        from sensor_msgs.msg import CompressedImage, Image
         self.lock = threading.Lock()
         self.frame = None
         self.seq = 0
@@ -210,24 +227,49 @@ class RosFrameGrabber(object):
         self.t_fps = time.time()
         self.n_fps = 0
         self.cam_fps = 0.0
-        self.bridge = CvBridge()
-        self.sub = rospy.Subscriber(topic, Image, self.image_cb, queue_size=1)
+        self._bridge = None
+        self._warned = False
+        self.compressed = topic.endswith("compressed")
+        typ = CompressedImage if self.compressed else Image
+        self.sub = rospy.Subscriber(topic, typ, self._cb, queue_size=1,
+                                    buff_size=2 ** 24)
 
-    def image_cb(self, msg):
+    def _decode(self, msg):
+        if self.compressed:
+            buf = np.frombuffer(msg.data, np.uint8)
+            return cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        enc = msg.encoding.lower()
+        h, w = msg.height, msg.width
+        if enc in ("bgr8", "rgb8"):
+            a = np.frombuffer(msg.data, np.uint8).reshape(h, w, 3)
+            return a if enc == "bgr8" else a[:, :, ::-1].copy()
+        if enc == "mono8":
+            a = np.frombuffer(msg.data, np.uint8).reshape(h, w)
+            return cv2.cvtColor(a, cv2.COLOR_GRAY2BGR)
+        if self._bridge is None:                 # 少见编码才拖 cv_bridge 进来
+            from cv_bridge import CvBridge
+            self._bridge = CvBridge()
+        return self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+
+    def _cb(self, msg):
         if self.stopped:
             return
         try:
-            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-        except CvBridgeError as exc:
-            rospy.logerr_throttle(2.0, "lane_follow ROS image decode failed: %s", exc)
+            f = self._decode(msg)
+        except Exception as e:
+            if not self._warned:
+                self._warned = True
+                rospy.logerr("相机话题解码失败(只报一次): %s", e)
+            return
+        if f is None:
             return
         with self.lock:
-            self.frame = frame
+            self.frame = f
             self.seq += 1
             self.n_fps += 1
-            elapsed = time.time() - self.t_fps
-            if elapsed >= 1.0:
-                self.cam_fps = self.n_fps / elapsed
+            el = time.time() - self.t_fps
+            if el >= 1.0:
+                self.cam_fps = self.n_fps / el
                 self.n_fps = 0
                 self.t_fps = time.time()
 
@@ -239,7 +281,10 @@ class RosFrameGrabber(object):
 
     def stop(self):
         self.stopped = True
-        self.sub.unregister()
+        try:
+            self.sub.unregister()
+        except Exception:
+            pass
 
 
 class DumpWorker(threading.Thread):
@@ -389,11 +434,22 @@ class LaneFollow(object):
         pkg = os.path.dirname(here)
         self.dry_run = bool(gp("~dry_run", True))
         self.device = gp("~video_device", "/dev/video0")
-        self.use_ros_camera = bool(gp("~use_ros_camera", False))
+        # ---- 相机/控制权归属 ----------------------------------------
+        # take_cam_on_start: **单独测试**用的总闸。true = 自己独占 USB 相机、
+        #   起来就跑; false(默认) = 听主流程交接 —— 用共享的 ROS 相机话题,
+        #   先待在 STANDBY, 等 /lane_proto/set_active 被调用才动。
+        # 下面两个是细调, 默认 auto = 跟着总闸走; 单独指定才覆盖。
+        self.take_cam = bool(_tri(gp("~take_cam_on_start", False), False))
+        self.use_ros_camera = _tri(gp("~use_ros_camera", "auto"),
+                                   not self.take_cam)
+        self.start_enabled = _tri(gp("~start_enabled", "auto"), self.take_cam)
         self.image_topic = gp("~image_topic", "/usb_cam/image_raw")
         self.cmd_vel_topic = gp("~cmd_vel_topic", "/cmd_vel")
         self.odom_topic = gp("~odom_topic", "/odom")
-        self.start_enabled = bool(gp("~start_enabled", True))
+        self.exit_on_stop = bool(gp("~exit_on_stop", False))
+        self.allow_size_mismatch = bool(gp("~allow_size_mismatch", False))
+        self._size_checked = False
+        self.enabled = self.start_enabled
         # 该相机输出是水平镜像的(挡板上的字是反的), 必须翻回来, 否则
         # 左右判反 -> 车往错误方向修 -> 直接冲出赛道。
         # 自检: 看 dump/latest.jpg, 挡板上的字正着念得通就对了。
@@ -567,8 +623,10 @@ class LaneFollow(object):
         self.m1, self.m2 = z["m1"], z["m2"]
         self.W, self.H = int(z["W"]), int(z["H"])
         self.dec = Decider(*load_template(tpl_path))
-        # 常驻主流程以 STANDBY 启动时不占用 CUDA。模型会在 set_active(true)
-        # 返回成功前加载，确保随后切换 cmd_vel owner 时巡线已可用。
+        # 分割网**懒加载**: 这里只记路径, 不碰 CUDA。
+        # 为什么: 常驻主流程(2026.launch)会让本节点先以 STANDBY 起着不干活,
+        # 这段时间显存要留给别的节点; 真正要巡线之前再 ensure_seg() 加载。
+        # 独立跑(start_enabled 默认 true)时 run() 开头就会加载, 行为不变。
         self.trackseg_lib = lib
         self.seg = None
         rospy.loginfo("转向映射 %s", curve_text(self.gain, self.dead,
@@ -606,35 +664,17 @@ class LaneFollow(object):
         if self.v == 0.0:
             rospy.loginfo("linear_speed=0 -> 原地只转车体对准, 不前进")
 
-        self.cap = None
-        fcc = str(gp("~fourcc", "")).upper()
         if self.use_ros_camera:
+            self.cap = None
             self.grab = RosFrameGrabber(self.image_topic)
-            rospy.loginfo("lane_follow uses shared ROS camera topic %s",
-                          self.image_topic)
+            rospy.loginfo("相机: 用共享话题 %s (不独占 %s)",
+                          self.image_topic, self.device)
         else:
-            self.cap = cv2.VideoCapture(self.device)
-            assert self.cap.isOpened(), "打不开相机 %s (确认没有别的进程占用)" \
-                % self.device
-            if fcc and fcc != "NONE" and len(fcc) == 4:
-                try:
-                    self.cap.set(cv2.CAP_PROP_FOURCC,
-                                 cv2.VideoWriter_fourcc(*fcc))
-                except Exception as e:
-                    rospy.logwarn("设 fourcc=%s 失败: %s", fcc, e)
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.W)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.H)
-            want_fps = float(gp("~cam_fps", 0.0))
-            if want_fps > 0:
-                self.cap.set(cv2.CAP_PROP_FPS, want_fps)
-            try:
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            except Exception:
-                pass
+            self._open_v4l2(gp)
         if self.dump_dir:
             if not os.path.isdir(self.dump_dir):
                 os.makedirs(self.dump_dir)
-            n_old = 0                     # 每次启动先清空, 免得新旧图混着看
+            n_old = 0
             for fn in os.listdir(self.dump_dir):
                 if fn.lower().endswith((".jpg", ".jpeg", ".png")):
                     try:
@@ -644,41 +684,117 @@ class LaneFollow(object):
                         pass
             rospy.loginfo("诊断图 -> %s/latest.jpg (每 %d 帧一张, 已清掉 %d "
                           "张旧图)", self.dump_dir, self.dump_every, n_old)
-        if self.cap is not None:
-            try:
-                got = int(self.cap.get(cv2.CAP_PROP_FOURCC))
-                fcc_got = "".join(chr((got >> (8 * k)) & 0xFF) for k in range(4))
-                rospy.loginfo("相机协商结果: %dx%d @%.0f fps, 编码 %s "
-                              "(请求 %s; 这里帧率低就别怪 CUDA)",
-                              int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                              int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-                              self.cap.get(cv2.CAP_PROP_FPS), fcc_got,
-                              fcc or "未指定")
-            except Exception:
-                pass
-            self.grab = FrameGrabber(self.cap)
-            self.grab.start()
         if self.dump_dir and self.dump_every > 0 and self.dump_async:
             self.dumper = DumpWorker(self._dump_now)
             self.dumper.start()
 
         self.pub = rospy.Publisher(self.cmd_vel_topic, Twist, queue_size=1)
+        self._init_rest(gp)
+
+    def _open_v4l2(self, gp):
+        # ⚠ 必须显式指定 CAP_V4L2 后端。
+        # 传字符串路径时 OpenCV 自己挑后端, 实测在 Nano 上 cap.set(宽/高)
+        # **被静默忽略** —— 相机停在 1920x1080@25, 而鱼眼标定是在 640x480
+        # 上做的。to_4x3() 会把 16:9 中心裁再缩, 水平视场比原生 4:3 窄一截,
+        # 去畸变映射整个对不上(线的角度/位置、模板触发区全偏), 而且白白多花
+        # ~10ms 缩放。加上 CAP_V4L2 后 set() 才生效, 实测拿到 640x480@30。
+        self.cap = None
+        if hasattr(cv2, "CAP_V4L2"):
+            try:
+                self.cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
+                if not self.cap.isOpened():
+                    self.cap.release()
+                    self.cap = None
+                    rospy.logwarn("CAP_V4L2 打不开 %s, 退回默认后端",
+                                  self.device)
+            except Exception as e:
+                self.cap = None
+                rospy.logwarn("CAP_V4L2 不可用(%s), 退回默认后端", e)
+        if self.cap is None:
+            self.cap = cv2.VideoCapture(self.device)
+        assert self.cap.isOpened(), "打不开相机 %s (确认没有别的进程占用)" \
+            % self.device
+        # ⚠ fourcc 必须在设分辨率**之前**设, 否则很多驱动会忽略它。
+        # 默认 MJPG: 大量 USB 相机在 YUYV 下 640x480 只能出 ~10fps(USB2
+        # 带宽不够, 未压缩), 换 MJPG 才有 30fps —— 这是"fps 上不去"最常见
+        # 的原因, 而且和 CUDA 快慢一点关系都没有。
+        # 想退回"不设"就传 fourcc:=none。
+        fcc = str(gp("~fourcc", "MJPG")).upper()
+        if fcc and fcc != "NONE" and len(fcc) == 4:
+            try:
+                self.cap.set(cv2.CAP_PROP_FOURCC,
+                             cv2.VideoWriter_fourcc(*fcc))
+            except Exception as e:
+                rospy.logwarn("设 fourcc=%s 失败: %s", fcc, e)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.W)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.H)
+        want_fps = float(gp("~cam_fps", 0.0))     # 0 = 不请求, 用驱动默认
+        if want_fps > 0:
+            self.cap.set(cv2.CAP_PROP_FPS, want_fps)
+        try:
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 不支持也没关系, 有取帧线程
+        except Exception:
+            pass
+        try:
+            got = int(self.cap.get(cv2.CAP_PROP_FOURCC))
+            fcc_got = "".join(chr((got >> (8 * k)) & 0xFF) for k in range(4))
+            gw = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            gh = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            rospy.loginfo("相机协商结果: %dx%d @%.0f fps, 编码 %s "
+                          "(请求 %s; 这里帧率低就别怪 CUDA)",
+                          gw, gh, self.cap.get(cv2.CAP_PROP_FPS), fcc_got,
+                          fcc or "未指定")
+            # 协商结果和标定尺寸对不上 = 去畸变映射失配, 必须**吵**。
+            # 之前就是被 to_4x3() 默默兜过去的: 画面看着正常, 实际视场是
+            # 裁出来的, 线的角度和模板触发区全偏, 查了很久才找到。
+            if (gw, gh) != (self.W, self.H):
+                msg = ("相机给的是 %dx%d, 而鱼眼标定/映射表是 %dx%d —— "
+                       "去畸变会失配(to_4x3 只是兜底裁缩, 视场对不上)。"
+                       % (gw, gh, self.W, self.H))
+                if self.allow_size_mismatch:
+                    rospy.logerr("%s 已用 allow_size_mismatch 放行, 结果不可信",
+                                 msg)
+                else:
+                    raise RuntimeError(
+                        msg + " 相机支持哪些模式: v4l2-ctl -d %s "
+                        "--list-formats-ext; 确认要带病跑就传 "
+                        "allow_size_mismatch:=true" % self.device)
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
+        self.grab = FrameGrabber(self.cap)
+        self.grab.start()
+
+    def _init_rest(self, gp):
         self.state_pub = rospy.Publisher("/lane_proto/state", String,
                                          queue_size=1, latch=True)
+        # GOAL=真到终点 / ABORT=兜底停车 / ESTOP=急停 / CONFIG=配置不对。
+        # 主流程只看 state=="STOPPED" 的话, 这四种全是"成功"。
+        self.result_pub = rospy.Publisher("/lane_proto/result", String,
+                                          queue_size=1, latch=True)
         # 里程计量 40cm: 用轮式里程计而不是 IMU —— IMU 要二次积分加速度,
         # 几秒就漂出几十厘米, 量这种短距离完全不能用; /odom 直接给位置。
         self.odom_xy = None
         self.odom_seen = False
-        self.odom_receipt = 0.0
+        self.odom_move_t = 0.0        # 上次"位置真的变了"的时刻
+        self.odom_frozen_warned = False
+        # odom 冻结兜底: 默认**关**。
+        # 车不动的时候底盘根本不发新的 odom, "位置没变"是正常状态而不是
+        # 故障, 之前按 1.5/5.5s 判会误判(队友把阈值改成 100000 就是在关它,
+        # 只是那样连真的 odom 掉线也救不了了)。这里给成显式开关: 确认
+        # odom 会掉线再开, 平时宁可不兜底也不要假测距。
+        self.odom_fallback = bool(gp("~odom_fallback", False))
+        self.odom_frozen_s = float(gp("~odom_frozen_s", 5.5))
+        # 交接模式下主流程可能还没起底盘, odom 迟到很正常; 这个只在
+        # require_fresh_odom:=true 时才当停车条件, 默认只记录不干预。
+        self.odom_recv_t = 0.0
         self.odom_finite = False
         self.require_fresh_odom = bool(gp("~require_fresh_odom", False))
         self.odom_fresh_timeout = float(gp("~odom_fresh_timeout", 0.5))
-        self.exit_on_stop = bool(gp("~exit_on_stop", False))
-        self.odom_move_t = 0.0        # 上次"位置真的变了"的时刻
-        self.odom_frozen_warned = False
+        self._odom_stale_warned = False
         rospy.Subscriber(self.odom_topic, Odometry, self.odom_cb, queue_size=10)
         rospy.Subscriber("/lane_proto/estop", Bool, self.estop_cb, queue_size=1)
-        self.enabled = self.start_enabled
         self.enable_srv = rospy.Service("/lane_proto/set_active", SetBool,
                                         self.set_active)
         self.imu_v = 0.0            # imu 测距模式用: 速度一次积分
@@ -693,15 +809,19 @@ class LaneFollow(object):
         self.goal_hits = 0
         # FOLLOW -> (检出) PAUSE 刹停打点 -> APPROACH 再走N米 -> STOPPED
         # use_lidar=true 时: FOLLOW -> (检出) STOPPED
+        # 交接模式下先待在 STANDBY: 不发速度、不加载 CUDA, 等主流程调
+        # /lane_proto/set_active 再进 FOLLOW。
         self.phase = "FOLLOW" if self.enabled else "STANDBY"
         self._done_announced = False
         self.pause_until = 0.0
         self._segs, self._bseg, self._pl, self._pr = [], None, [], []
+        self._blk = 0.0                 # 扫描带里被红绿灯箱体挡掉的列比例
         self._pause_next = "approach"   # PAUSE 结束后干什么: approach / fork
         self.fork_done = False          # 岔路已经拐过了
         self.fork_yaw0 = None           # 起转时的多圈 yaw
         self.fork_t0 = 0.0
         self._fork_warned = False
+        self.state_pub.publish(String(data=self.phase))   # latch 出起始相位
         # 本次岔路实际要转的角度: fixed 模式=fork_turn_deg, yolo 模式由灯决定
         self.turn_deg = self.fork_turn_deg
         self.yolo = None                # 认灯子进程, 只在 YOLO 相位活着
@@ -725,15 +845,15 @@ class LaneFollow(object):
         self.cool_until = 0.0           # 冷却到这个时刻为止不认横线
         self.mark_xy = None
         self.mark_t = None
-        self.state_pub.publish(String(data=self.phase))
         rospy.on_shutdown(self.stop)
 
     def odom_cb(self, msg):
         p = msg.pose.pose.position
-        self.odom_receipt = time.time()
+        self.odom_recv_t = time.time()
+        # NaN/Inf 的 odom 比没有 odom 更坏: 它会让"位置变了吗"永远成立。
         self.odom_finite = (p.x == p.x and p.y == p.y and
-                            p.x != float("inf") and p.x != float("-inf") and
-                            p.y != float("inf") and p.y != float("-inf"))
+                            abs(p.x) != float("inf") and
+                            abs(p.y) != float("inf"))
         if not self.odom_finite:
             return
         if self.odom_xy is None or \
@@ -743,31 +863,48 @@ class LaneFollow(object):
         self.odom_xy = (p.x, p.y)
         self.odom_seen = True
 
-    def odom_is_fresh(self):
-        return (self.odom_finite and self.odom_receipt > 0.0 and
-                time.time() - self.odom_receipt <= self.odom_fresh_timeout)
-
-    def ensure_segmentation_model(self):
-        """Load the TrackSeg CUDA model once, immediately before following."""
-        if self.seg is not None:
+    def _check_frame_size(self, frame):
+        """共享话题给的尺寸也得和标定表对上 —— 和 V4L2 那条路同一条理由,
+        只是话题是异步的, 只能等第一帧到了再查。"""
+        gh, gw = frame.shape[:2]
+        if (gw, gh) == (self.W, self.H):
+            rospy.loginfo("相机话题首帧 %dx%d, 与标定一致", gw, gh)
             return
-        rospy.loginfo("lane_follow: loading TrackSeg for active handoff")
-        self.seg = TrackSeg(self.trackseg_lib)
-        rospy.loginfo("lane_follow: backend=%s dry_run=%s v=%.2f mirror=%s",
-                      self.seg.backend, self.dry_run, self.v,
-                      "ON(翻转)" if self.mirror else "OFF")
+        msg = ("相机话题给的是 %dx%d, 而鱼眼标定/映射表是 %dx%d —— "
+               "去畸变会失配" % (gw, gh, self.W, self.H))
+        if self.allow_size_mismatch:
+            rospy.logerr("%s; 已用 allow_size_mismatch 放行, 结果不可信", msg)
+        else:
+            rospy.logerr("%s; 停车。确认要带病跑就传 allow_size_mismatch:=true",
+                         msg)
+            self.set_phase("STOPPED", "相机尺寸与标定不符")
 
-    def set_active(self, request):
-        if request.data:
+    def odom_is_fresh(self):
+        return (self.odom_finite and self.odom_recv_t > 0.0 and
+                time.time() - self.odom_recv_t <= self.odom_fresh_timeout)
+
+    def set_active(self, req):
+        """主流程交接控制权: /lane_proto/set_active。
+        true  -> 先把 CUDA 加载好**再**回成功, 保证主流程切 cmd_vel owner
+                 的那一刻巡线已经能出速度了(否则头几百毫秒是空档)。
+        false -> 立刻发一次零速再回 STANDBY。"""
+        if req.data:
             if self.phase == "STOPPED":
-                return SetBoolResponse(False, "lane follower has stopped")
-            self.ensure_segmentation_model()
+                return SetBoolResponse(False, "lane follower already stopped")
+            try:
+                self.ensure_seg()
+            except Exception as e:
+                rospy.logerr("交接失败: 分割网加载不了: %s", e)
+                return SetBoolResponse(False, "trackseg load failed")
             self.enabled = True
             self.set_phase("FOLLOW", "主流程已交接控制权")
             return SetBoolResponse(True, "lane follower active")
         self.enabled = False
-        self.pub.publish(Twist())
-        self.set_phase("STANDBY", "等待主流程交接")
+        try:
+            self.pub.publish(Twist())
+        except Exception:
+            pass
+        self.set_phase("STANDBY", "交回控制权, 待命")
         return SetBoolResponse(True, "lane follower standby")
 
     def imu_cb(self, msg):
@@ -816,12 +953,17 @@ class LaneFollow(object):
             return abs(self.move_cmd)
         if self.phase == "ALIGN":
             return abs(self.align_speed)
+        # 这些相位本来就是停着的(等灯/刹停/原地转/停车)。以前一律返回
+        # self.v, 等于"我在动但 odom 不变" —— 而底盘停着时 odom 本来就
+        # 不更新, 于是必然误判成 odom 冻结。
+        if self.phase in ("YOLO", "PAUSE", "STOPPED", "FORK_TURN", "STANDBY"):
+            return 0.0
         return abs(self.v)
 
     def _dist_src_used(self):
         """当前这一刻实际在用哪个测距源(和 moved_since_mark 同一判断)"""
-        frozen = (self.odom_xy is not None and
-                  time.time() - self.odom_move_t > 100000 and
+        frozen = (self.odom_fallback and self.odom_xy is not None and
+                  time.time() - self.odom_move_t > self.odom_frozen_s and
                   self.speed_now() > 0.01)
         if self.dist_src in ("auto", "odom") and not frozen \
                 and self.mark_xy is not None and self.odom_xy is not None:
@@ -835,8 +977,8 @@ class LaneFollow(object):
         odom **冻结**时(收得到消息但位置不动 —— 编码器没回传就会这样)
         自动退回 速度x时间, 否则 APPROACH 永远走不满距离, 车就停不下来。"""
         src = self.dist_src
-        frozen = (self.odom_xy is not None and
-                  time.time() - self.odom_move_t >100000 and
+        frozen = (self.odom_fallback and self.odom_xy is not None and
+                  time.time() - self.odom_move_t > self.odom_frozen_s and
                   self.speed_now() > 0.01)
         if frozen and not self.odom_frozen_warned:
             self.odom_frozen_warned = True
@@ -1247,6 +1389,20 @@ class LaneFollow(object):
     def set_phase(self, ph, why=""):
         self.phase = ph
         self.state_pub.publish(String(data=ph))
+        if ph == "STOPPED":
+            if "急停" in why:
+                res = "ESTOP"
+            elif "超时" in why or "兜底" in why or "断流" in why:
+                res = "ABORT"
+            elif "尺寸" in why:
+                res = "CONFIG"
+            else:
+                res = "GOAL"
+            try:
+                self.result_pub.publish(String(data=res))
+                rospy.loginfo("/lane_proto/result = %s (%s)", res, why or "-")
+            except Exception:
+                pass
         rospy.loginfo("== %s ==%s", ph, (" " + why) if why else "")
         if (ph == "STOPPED" and not self._done_announced
                 and "急停" not in why and "超时" not in why
@@ -1271,6 +1427,11 @@ class LaneFollow(object):
         "publish() to a closed topic"。"""
         try:
             self.grab.stop()
+        except Exception:
+            pass
+        try:
+            if self.cap is not None:       # 交接模式下没开过 V4L2
+                self.cap.release()
         except Exception:
             pass
         if self.dumper is not None:
@@ -1328,9 +1489,10 @@ class LaneFollow(object):
         latest = os.path.join(self.dump_dir, "latest.jpg")
         cov, lbest, lcnt, gy, hit = g or (0.0, 0.0, 0, -1, False)
         _ = lbest
-        note = "%s  goal cov=%.2f/%.2f line=%.2f/%.2f n=%d/%d %s%s" % (
+        note = ("%s  goal cov=%.2f/%.2f line=%.2f/%.2f n=%d/%d "
+                "blk=%.2f %s%s") % (
             self.phase, cov, self.goal_cover, lbest, self.goal_line_cover,
-            lcnt, self.goal_line_count, "HIT" if hit else "-",
+            lcnt, self.goal_line_count, self._blk, "HIT" if hit else "-",
             ("  y=%d" % gy) if gy >= 0 else "")
         if self.is_fork:
             note += "  fork:%s" % ("done" if self.fork_done else "pending")
@@ -1455,7 +1617,7 @@ class LaneFollow(object):
         cov, lbest, lcnt, gy = 0.0, 0.0, 0, -1
         if self.goal_enable:
             (cov, lbest, lcnt, gy, self._segs, self._bseg,
-             self._pl, self._pr) = goal_block(
+             self._pl, self._pr, self._blk) = goal_block(
                 mask, y_lo=self.goal_y_lo, half=self.goal_half,
                 max_deg=self.goal_max_deg, line_cover=self.goal_line_cover)
         hit = (cov >= self.goal_cover and lbest >= self.goal_line_cover
@@ -1473,7 +1635,23 @@ class LaneFollow(object):
         self.prof.add(name, (now - t0) * 1000.0)
         return now
 
+    def ensure_seg(self):
+        """真正要用分割网之前才把 .so 拉起来(懒加载)。
+        幂等: TrackSeg 内部 ts_init() 有 g_ready 守卫, 重复调也只加载一次。"""
+        if self.seg is not None:
+            return
+        rospy.loginfo("lane_follow: 加载 TrackSeg ...")
+        self.seg = TrackSeg(self.trackseg_lib)
+        rospy.loginfo("lane_follow: backend=%s dry_run=%s v=%.2f mirror=%s",
+                      self.seg.backend, self.dry_run, self.v,
+                      "ON(翻转)" if self.mirror else "OFF")
+
     def run(self):
+        if self.enabled:
+            self.ensure_seg()    # 独立跑: 进循环前就加载, 和以前行为一致
+        else:
+            rospy.loginfo("STANDBY: 等主流程调 /lane_proto/set_active 交接 "
+                          "(单独测试请传 take_cam_on_start:=true)")
         rate = rospy.Rate(self.rate_hz)
         last_seq = -1
         stale = 0
@@ -1481,31 +1659,36 @@ class LaneFollow(object):
         hold = 0
         i = 0
         t0 = time.time()
-        t_start = time.time() if self.enabled else None
+        t_start = None if not self.enabled else time.time()
         t_prev = None            # 上一帧开始的时刻(算循环周期用)
         t_stats = time.time()
-        if self.enabled:
-            self.ensure_segmentation_model()
         while not rospy.is_shutdown():
-            if not self.enabled:
+            if not self.enabled:          # STANDBY: 不取帧不算不发速度
+                t_prev = None
                 rate.sleep()
                 continue
-            if t_start is None:
-                t_start = time.time()
-                last_seq = -1
-                stale = 0
-                self.set_phase("FOLLOW", "主流程已交接控制权")
-            if self.require_fresh_odom and not self.odom_is_fresh():
-                self.set_phase(
-                    "STOPPED",
-                    "里程计无有效新数据超过 %.2fs" %
-                    self.odom_fresh_timeout)
+            if t_start is None:           # 刚被交接: 所有计时从这一刻重新起算
+                t_start = t0 = t_stats = time.time()
+                last_seq, stale, i = -1, 0, 0
+                self.prof.reset()
+            # odom 断流保护(默认关): 主流程那边底盘要是掉了, 巡线还在发速度
+            # 就是瞎开。只在真的在动的时候判, 且只触发一次。
+            if (self.require_fresh_odom and self.phase != "STOPPED"
+                    and self.odom_recv_t > 0.0 and not self.odom_is_fresh()
+                    and self.speed_now() > 0.01):
+                if not self._odom_stale_warned:
+                    self._odom_stale_warned = True
+                    self.set_phase("STOPPED", "里程计断流超过 %.2fs, 兜底停车"
+                                   % self.odom_fresh_timeout)
             if self.max_runtime > 0 and time.time() - t_start > self.max_runtime \
                     and self.phase != "STOPPED":
                 self.set_phase("STOPPED", "运行超过 %.0fs 上限, 兜底停车"
                                % self.max_runtime)
             t_grab = time.time()
             frame, seq = self.grab.latest()
+            if frame is not None and not self._size_checked:
+                self._size_checked = True
+                self._check_frame_size(frame)
             if frame is None or seq == last_seq:      # 还没有新帧
                 stale += 1
                 if stale > self.rate_hz * 3:
@@ -1641,7 +1824,10 @@ class LaneFollow(object):
             if not self.dry_run:
                 self.pub.publish(tw)
 
+            # 交接模式下跑完一趟就退出进程, 让主流程接着走下一步;
+            # 独立测试时默认 false, 停在 STOPPED 里等你 Ctrl-C 看日志。
             if self.phase == "STOPPED" and self.exit_on_stop:
+                rospy.loginfo("exit_on_stop: 已到 STOPPED, 退出节点")
                 break
 
             if i % int(max(1, self.rate_hz)) == 0:    # 每秒一行

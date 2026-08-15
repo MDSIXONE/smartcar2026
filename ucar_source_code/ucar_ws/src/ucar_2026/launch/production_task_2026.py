@@ -7,23 +7,15 @@ Flow:
   2. From 52, face QR observation points 262, 232, and 295 in order.
      If a fresh QR is not decoded while facing a point, turn slowly for at
      most one complete revolution while scanning.
-  3. After both QR items are classified, announce their collection before
-     moving to point 3; then disable QR decoding and start the Python 3 OCR
-     helper.  In the default configuration the helper consumes frames saved
-     from the ROS usb_cam topic.
+  3. Disable QR decoding and start the Python 3 OCR helper.  In the default
+     configuration the helper consumes frames saved from the ROS usb_cam topic.
   4. Lock CymPlanner in front-lookahead point mode for the whole mission.
   5. Navigate each configured production target.  After arrival, turn at most
      one full revolution while querying OCR.  A candidate stops the turn,
      passes a fresh-odometry stop gate, then aligns the box and reads the front
      lidar distance.  A full turn without a candidate proceeds immediately to
      the next target.
-  6. If the primary route misses a requested category, scan the configured
-     fallback perimeter route once.  If a required category remains absent,
-     release OCR and continue directly to the 441 handoff destination.
-  7. Save every attempt plus the three strongest distinct wall observations.
-  8. On SUCCEEDED, activate the already-resident lane follower and switch
-     the single chassis-command owner.  The shared ROS camera and chassis
-     driver stay alive, eliminating the old launch restart pause.
+  6. Save every attempt plus the three strongest distinct wall observations.
 
 The node never drives to the QR edge points: they lie on the field boundary.
 They are gaze targets while the chassis remains at centre 52.
@@ -36,11 +28,8 @@ import math
 import os
 import select
 import subprocess
-import sys
 import threading
 import time
-import httplib
-import urllib2
 
 import actionlib
 import cv2
@@ -55,11 +44,9 @@ from nav_msgs.srv import GetPlan
 from rosgraph_msgs.msg import Log
 from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import Int8, String
-from std_srvs.srv import Empty, SetBool
+from std_srvs.srv import Empty
 
 from production_task_geometry import (
-    DEFAULT_FALLBACK_PRODUCTION_OBSERVATION_HEADINGS_DEG,
-    DEFAULT_FALLBACK_PRODUCTION_ROUTE,
     DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG,
     DEFAULT_PRODUCTION_ROUTE,
     TaskDefinitionError,
@@ -67,14 +54,12 @@ from production_task_geometry import (
     is_finite,
     load_numbered_points,
     load_middle_target_guard_points,
-    load_middle_zone_geometry,
     load_wall_reference_points,
     needs_recenter,
     normalize_angle,
     position_error,
     positive_turn_increment,
     require_points,
-    stop_point_for_wall_point,
 )
 from production_task_perception import (
     alignment_angular_speed,
@@ -92,21 +77,6 @@ from production_task_perception import (
 
 class MissionAbort(RuntimeError):
     pass
-
-
-# Warehouse names announced after QR classification.  The wording matches the
-# OCR workshop signs on the field; the electronics sign reads
-# "电子产品生产车间" (production, not 加工).
-PRODUCTION_WAREHOUSE_NAMES = {
-    u"食品": u"食品加工车间",
-    u"日用品": u"日用品加工车间",
-    u"电子产品": u"电子产品生产车间",
-}
-
-# The microphone listener emits one of these categories for each slot in its
-# fixed sentence.  The QR scanner still supplies the actual item name, which
-# is retained for QR matching, announcements, result records and simulation.
-VOICE_REQUEST_CATEGORIES = frozenset(PRODUCTION_WAREHOUSE_NAMES.keys())
 
 
 class ProductionTask2026(object):
@@ -130,88 +100,12 @@ class ProductionTask2026(object):
                 "~production_observation_headings_deg",
                 DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG)
         ]
-        self.fallback_production_route_numbers = [
-            int(value) for value in
-            rospy.get_param(
-                "~fallback_production_route_numbers",
-                DEFAULT_FALLBACK_PRODUCTION_ROUTE)
-        ]
-        self.fallback_production_observation_headings = [
-            math.radians(float(value)) for value in
-            rospy.get_param(
-                "~fallback_production_observation_headings_deg",
-                DEFAULT_FALLBACK_PRODUCTION_OBSERVATION_HEADINGS_DEG)
-        ]
         self.destination_point_number = int(
             rospy.get_param("~destination_point_number", 170))
         self.destination_heading_point_number = int(
             rospy.get_param("~destination_heading_point_number", 319))
-        self.destination_midpoint_point_numbers = [
-            int(value) for value in
-            rospy.get_param(
-                "~destination_midpoint_point_numbers", "").split(",")
-            if value.strip()
-        ]
-        self.processing_dwell_seconds = float(rospy.get_param(
-            "~processing_dwell_seconds", 3.0))
-        # The simulation HTTP server is on the PC.  It is deliberately
-        # independent of ROS_MASTER_URI: the ROS Master runs on the vehicle.
-        self.simulation_port = int(rospy.get_param(
-            "~simulation_port", 11313))
-        self.simulation_host = str(
-            rospy.get_param("~simulation_host", ""))
-        self.simulation_start_timeout = float(rospy.get_param(
-            "~simulation_start_timeout", 30.0))
-        self.simulation_start_retries = max(
-            1, int(rospy.get_param("~simulation_start_retries", 3)))
-        self.simulation_done_timeout = float(rospy.get_param(
-            "~simulation_done_timeout", 120.0))
-        self.simulation_poll_period = float(rospy.get_param(
-            "~simulation_poll_period", 2.0))
-        self.speak_wait_timeout = float(rospy.get_param(
-            "~speak_wait_timeout", 60.0))
-        # lane_proto is resident from launch time.  At the destination this
-        # node only activates it and switches the sole /cmd_vel owner; it
-        # never tears down and restarts another launch.
-        self.lane_handoff_enabled = bool(
-            rospy.get_param("~lane_handoff_enabled", True))
-        self.lane_activate_service = str(rospy.get_param(
-            "~lane_activate_service", "/lane_proto/set_active"))
-        self.lane_owner_service = str(rospy.get_param(
-            "~lane_owner_service", "/cmd_vel_owner/set_lane_mode"))
-        self.lane_state_topic = str(rospy.get_param(
-            "~lane_state_topic", "/lane_proto/state"))
-        self.lane_handoff_timeout = float(rospy.get_param(
-            "~lane_handoff_timeout", 360.0))
-        self.tf_lookup_retry_seconds = float(rospy.get_param(
-            "~tf_lookup_retry_seconds", 0.5))
-        self.tts_enabled = bool(
-            rospy.get_param("~tts_enabled", True))
-        self.tts_python = str(rospy.get_param(
-            "~tts_python", "/usr/bin/python3"))
-        self.tts_helper_path = str(rospy.get_param(
-            "~tts_helper_path", "/home/ucar/wake/tts_say.py"))
-        # Voice input is intentionally category based: wake_listen.py returns
-        # a JSON object with the two requested production categories.  The QR
-        # phase resolves those categories to the actual field item names.
-        self.item_input_mode = str(rospy.get_param(
-            "~item_input_mode", "voice")).strip().lower()
-        if self.item_input_mode not in ("voice", "stdin"):
-            raise TaskDefinitionError(
-                "item_input_mode must be voice or stdin, got %s" %
-                self.item_input_mode)
-        self.voice_listener_python = str(rospy.get_param(
-            "~voice_listener_python", "/usr/bin/python3"))
-        self.voice_listener_path = str(rospy.get_param(
-            "~voice_listener_path", "/home/ucar/wake/micarray/wake_listen.py"))
-        self.voice_wake_word = rospy.get_param(
-            "~voice_wake_word", u"小飞小飞")
-        self.voice_input_timeout = float(rospy.get_param(
-            "~voice_input_timeout", 0.0))
         self.post_qr_waypoint_number = int(
             rospy.get_param("~post_qr_waypoint_number", 3))
-        self.post_qr_waypoint_heading_point_number = int(
-            rospy.get_param("~post_qr_waypoint_heading_point_number", 0))
 
         self.start_delay = float(rospy.get_param("~start_delay", 2.0))
         self.resume_production_only = bool(
@@ -301,7 +195,7 @@ class ProductionTask2026(object):
         self.ocr_capture_timeout = float(
             rospy.get_param("~ocr_capture_timeout", 12.0))
         self.ocr_scan_rotation_speed = abs(float(rospy.get_param(
-            "~ocr_scan_rotation_speed", 0.30)))
+            "~ocr_scan_rotation_speed", 0.18)))
         self.ocr_scan_poll_period = float(rospy.get_param(
             "~ocr_scan_poll_period",
             rospy.get_param("~navigation_ocr_poll_period", 0.20)))
@@ -355,7 +249,7 @@ class ProductionTask2026(object):
             rospy.get_param(
                 "~straight_segment_angle_tolerance_deg", 1.0)))
         self.stop_confirmation_timeout = float(
-            rospy.get_param("~stop_confirmation_timeout", 4.0))
+            rospy.get_param("~stop_confirmation_timeout", 2.0))
         self.stopped_odom_speed_epsilon = float(
             rospy.get_param("~stopped_odom_speed_epsilon", 0.02))
         self.stopped_odom_samples = max(
@@ -395,62 +289,12 @@ class ProductionTask2026(object):
 
         if self.qr_rotation_speed <= 0.0:
             raise TaskDefinitionError("qr_rotation_speed must be positive")
-        if (not is_finite(self.processing_dwell_seconds) or
-                self.processing_dwell_seconds < 0.0):
-            raise TaskDefinitionError(
-                "processing_dwell_seconds must be finite and non-negative")
-        simulation_timing_values = (
-            self.simulation_start_timeout,
-            self.simulation_done_timeout,
-            self.simulation_poll_period,
-            self.speak_wait_timeout,
-        )
-        if (not all(is_finite(value)
-                    for value in simulation_timing_values) or
-                self.simulation_start_timeout <= 0.0 or
-                self.simulation_done_timeout <= 0.0 or
-                self.simulation_poll_period <= 0.0 or
-                self.speak_wait_timeout <= 0.0 or
-                not (1 <= self.simulation_port <= 65535)):
-            raise TaskDefinitionError(
-                "simulation communication parameters are invalid")
-        if (not is_finite(self.lane_handoff_timeout) or
-                self.lane_handoff_timeout <= 0.0):
-            raise TaskDefinitionError(
-                "lane_handoff_timeout must be finite and positive")
-        if (self.lane_handoff_enabled and not all((
-                self.lane_activate_service.strip(),
-                self.lane_owner_service.strip(),
-                self.lane_state_topic.strip()))):
-            raise TaskDefinitionError(
-                "lane activation, owner, and state endpoints must be set")
-        self.simulation_host = self.resolve_simulation_host()
-        rospy.loginfo(
-            "PRODUCTION_TASK_SIMULATION_HOST host=%s port=%d",
-            self.simulation_host, self.simulation_port)
-        if (not is_finite(self.tf_lookup_retry_seconds) or
-                self.tf_lookup_retry_seconds < 0.0):
-            raise TaskDefinitionError(
-                "tf_lookup_retry_seconds must be finite and non-negative")
-        if self.tts_enabled:
-            if not self.tts_python.strip() or not self.tts_helper_path.strip():
-                raise TaskDefinitionError(
-                    "tts_python and tts_helper_path must be set when "
-                    "tts_enabled")
         if (
                 len(self.production_route_numbers) !=
                 len(self.production_observation_headings)):
             raise TaskDefinitionError(
                 "production route and observation headings have different "
                 "lengths")
-        if (
-                len(self.fallback_production_route_numbers) !=
-                len(self.fallback_production_observation_headings)):
-            raise TaskDefinitionError(
-                "fallback production route and observation headings have "
-                "different lengths")
-        if not self.fallback_production_route_numbers:
-            raise TaskDefinitionError("fallback production route is empty")
         if self.ocr_alignment_max_speed <= 0.0:
             raise TaskDefinitionError(
                 "ocr_alignment_max_speed must be positive")
@@ -508,23 +352,15 @@ class ProductionTask2026(object):
                 self.target_guard_scan_max_age <= 0.0):
             raise TaskDefinitionError(
                 "target guard scan parameters must be finite and positive")
-        if len(self.destination_midpoint_point_numbers) not in (0, 2):
-            raise TaskDefinitionError(
-                "destination_midpoint_point_numbers must list exactly two "
-                "point numbers or stay empty")
 
         all_required_numbers = (
             [self.staging_point_number] +
             self.qr_observation_numbers +
             self.production_route_numbers +
-            self.fallback_production_route_numbers +
             [self.destination_point_number,
              self.destination_heading_point_number] +
-            self.destination_midpoint_point_numbers +
             ([self.post_qr_waypoint_number]
-             if self.post_qr_waypoint_number else []) +
-            ([self.post_qr_waypoint_heading_point_number]
-             if self.post_qr_waypoint_heading_point_number else []))
+             if self.post_qr_waypoint_number else []))
         self.points = load_numbered_points(self.grid_path)
         require_points(self.points, all_required_numbers)
         self.production_navigation_legs = [
@@ -532,23 +368,10 @@ class ProductionTask2026(object):
         ] + list(zip(
             self.production_route_numbers[:-1],
             self.production_route_numbers[1:]))
-        self.fallback_navigation_legs = [
-            (self.production_route_numbers[-1],
-             self.fallback_production_route_numbers[0])
-        ] + list(zip(
-            self.fallback_production_route_numbers[:-1],
-            self.fallback_production_route_numbers[1:]))
         self.target_guard_points = load_middle_target_guard_points(
             self.grid_path, self.production_route_numbers)
         self.wall_reference_points = load_wall_reference_points(
             self.grid_path)
-        (self.middle_zone_x_min, self.middle_zone_x_max,
-         self.middle_zone_y_min, self.middle_zone_y_max,
-         self.middle_zone_square_side) = load_middle_zone_geometry(
-            self.grid_path)
-        self.middle_zone_bounds = (
-            self.middle_zone_x_min, self.middle_zone_x_max,
-            self.middle_zone_y_min, self.middle_zone_y_max)
 
         self.move_base = actionlib.SimpleActionClient(
             "move_base", MoveBaseAction)
@@ -556,10 +379,8 @@ class ProductionTask2026(object):
         self.tf_listener = tf.TransformListener()
         self.cv_bridge = CvBridge()
 
-        self.cmd_vel_topic = str(rospy.get_param(
-            "~cmd_vel_topic", "/cmd_vel/navigation"))
         self.cmd_vel_pub = rospy.Publisher(
-            self.cmd_vel_topic, Twist, queue_size=10)
+            "/cmd_vel", Twist, queue_size=10)
         self.qr_enable_pub = rospy.Publisher(
             "/qrcode_start_flag", Int8, queue_size=1, latch=True)
         self.navigation_mode_pub = rospy.Publisher(
@@ -588,37 +409,18 @@ class ProductionTask2026(object):
         self.latest_qr_text = ""
         self.used_qr_codes = set()
         self.qr_event = threading.Event()
-        # QR codes on the real field carry a URL; qrcode_scanner resolves the
-        # item name through the API and publishes it on /qr_api_result.  The
-        # scan matcher consumes this API-resolved stream.
-        self.api_sequence = 0
-        self.latest_api_text = ""
-        self.api_event = threading.Event()
         self.mission_started = False
         self.mission_finished = False
         self.ocr_process = None
         self.ocr_log_handle = None
         self.spark_process = None
         self.spark_log_handle = None
-        self.voice_input_process = None
-        self.requested_real_category = None
-        self.requested_sim_category = None
         self.qr_classifications = []
         self.observations = []
         self.target_scan_events = []
         self.target_guard_events = []
         self.run_directory = None
         self.capture_sequence = 0
-        self.expected_item_text = u""
-        self.expected_production_category = None
-        self.expected_real_item_text = u""
-        self.expected_sim_item_text = u""
-        self.expected_real_category = None
-        self.expected_sim_category = None
-        self.served_wall_points = set()
-        self._ocr_turn_stop_flag = False
-        self.lane_state = ""
-        self.lane_state_event = threading.Event()
 
         rospy.Subscriber(
             "/odom_raw", Odometry, self.odom_cb, queue_size=20)
@@ -633,11 +435,7 @@ class ProductionTask2026(object):
         rospy.Subscriber(
             "/qr_result", String, self.qr_result_cb, queue_size=20)
         rospy.Subscriber(
-            "/qr_api_result", String, self.qr_api_result_cb, queue_size=20)
-        rospy.Subscriber(
             "/rosout_agg", Log, self.rosout_cb, queue_size=100)
-        rospy.Subscriber(
-            self.lane_state_topic, String, self.lane_state_cb, queue_size=10)
         rospy.on_shutdown(self.shutdown)
 
         self.publish_state("WAITING_START")
@@ -652,14 +450,6 @@ class ProductionTask2026(object):
         payload = {
             "success": bool(success),
             "reason": str(reason),
-            "items": [self.expected_real_item_text,
-                      self.expected_sim_item_text],
-            "target_categories": {
-                self.expected_real_item_text: self.expected_real_category,
-                self.expected_sim_item_text: self.expected_sim_category,
-            },
-            "item_text": self.expected_item_text,
-            "target_category": self.expected_production_category,
             "qr_codes": sorted(self.used_qr_codes),
             "qr_classifications": self.qr_classifications,
             "recognized_categories": select_three_processing_observations(
@@ -736,11 +526,6 @@ class ProductionTask2026(object):
             self.latest_camera_receipt = rospy.Time.now()
             self.camera_sequence += 1
 
-    def lane_state_cb(self, message):
-        with self.lock:
-            self.lane_state = message.data.strip()
-        self.lane_state_event.set()
-
     def qr_result_cb(self, message):
         text = message.data.strip()
         if not text:
@@ -752,47 +537,8 @@ class ProductionTask2026(object):
         rospy.loginfo("PRODUCTION_QR_EVENT sequence=%d value=%s",
                       self.qr_sequence, self.log_safe_text(text))
 
-    def qr_api_result_cb(self, message):
-        """Consume the API-resolved item name from qrcode_scanner.
-
-        Real-field QR codes carry a URL (http://192.168.8.1:3663/<key>);
-        qrcode_scanner queries the API and publishes
-        ``{"ok": true, "response": {"code": 200, "result": "<item>"}}`` on
-        /qr_api_result.  Only ok=true results with a non-empty item name
-        feed the scan matcher (api_sequence / latest_api_text).
-        """
-        raw = message.data
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8", "replace")
-        try:
-            payload = json.loads(raw)
-        except ValueError:
-            rospy.logwarn(
-                "PRODUCTION_QR_API_BAD_JSON %s", self.log_safe_text(raw))
-            return
-        if not payload.get("ok"):
-            return
-        response = payload.get("response")
-        if not isinstance(response, dict):
-            return
-        item = self.normalize_qr_text(response.get("result", ""))
-        if not item:
-            return
-        with self.lock:
-            self.api_sequence += 1
-            self.latest_api_text = item
-        self.api_event.set()
-        rospy.loginfo(
-            "PRODUCTION_QR_API_EVENT sequence=%d item=%s",
-            self.api_sequence, self.log_safe_text(item))
-
     def rosout_cb(self, message):
         text = message.msg.lower()
-        if "crc16" in text and "ahrs" in text:
-            rospy.logwarn_throttle(
-                5.0, "PRODUCTION_AHRS_CRC_IGNORED %s",
-                self.log_safe_text(message.msg))
-            return
         critical_markers = (
             "crc16",
             "head_len",
@@ -851,20 +597,6 @@ class ProductionTask2026(object):
                 self.mission_finished = True
 
     def run_mission(self):
-        # Unit tests and a few maintenance tools construct this class via
-        # object.__new__ instead of __init__; preserve their historical stdin
-        # behaviour when the new launch parameter is absent.
-        input_mode = getattr(self, "item_input_mode", "stdin")
-        self.publish_state("WAITING_FOR_ITEM")
-        if input_mode == "voice":
-            # Do not run the microphone while the asynchronous start message
-            # is still playing through the speaker: it can be recognised as a
-            # command.  speak_wait has a bounded timeout and never aborts.
-            self.speak_wait(
-                u"初始化完成。请说小飞小飞后下达双物品指令")
-        else:
-            self.speak(u"初始化完成，准备开始任务")
-        real_request, sim_request = self.wait_for_item_inputs()
         self.publish_state("WAITING_SAFE_START")
         if not self.move_base.wait_for_server(
                 rospy.Duration(self.move_base_ready_timeout)):
@@ -875,19 +607,10 @@ class ProductionTask2026(object):
         self.switch_to_point_mode()
 
         if self.resume_production_only:
-            if input_mode == "voice":
-                raise MissionAbort(
-                    "voice category input requires the QR phase; "
-                    "resume_production_only is unsupported")
             self.qr_enable_pub.publish(Int8(data=0))
             rospy.logwarn(
                 "PRODUCTION_TASK_RESUME production-only route=%s",
                 self.production_route_numbers)
-            self.classify_qr_text(0, real_request.encode("utf-8"))
-            self.classify_qr_text(0, sim_request.encode("utf-8"))
-            real_item = real_request
-            sim_item = sim_request
-            collected = {real_item: 0, sim_item: 0}
         else:
             staging = self.points[self.staging_point_number]
             first_observation = self.points[self.qr_observation_numbers[0]]
@@ -902,71 +625,23 @@ class ProductionTask2026(object):
             self.wait_for_qr_scanner()
             self.start_ros_camera_and_wait("QR sequence")
             self.qr_enable_pub.publish(Int8(data=1))
-            if input_mode == "voice":
-                collected_by_category = self.collect_target_qr_codes_by_category(
-                    set([real_request, sim_request]))
-                if len(collected_by_category) < 2:
-                    raise MissionAbort(
-                        "not all requested voice categories were collected "
-                        "after 2 full QR rounds")
-                real_item = collected_by_category[real_request]["item"]
-                sim_item = collected_by_category[sim_request]["item"]
-                self.set_expected_item_texts(real_item, sim_item)
-                collected = {
-                    real_item: collected_by_category[real_request][
-                        "observation"],
-                    sim_item: collected_by_category[sim_request][
-                        "observation"],
-                }
-            else:
-                real_item = real_request
-                sim_item = sim_request
-                collected = self.collect_target_qr_codes(
-                    set([real_item, sim_item]))
+            for observation_number in self.qr_observation_numbers:
+                self.scan_observation_point(observation_number)
             self.qr_enable_pub.publish(Int8(data=0))
-            if len(collected) < 2:
-                raise MissionAbort(
-                    "not all target QR codes were collected after 2 "
-                    "full rounds")
-            if input_mode != "voice":
-                self.classify_qr_text(
-                    collected[real_item], real_item.encode("utf-8"))
-                self.classify_qr_text(
-                    collected[sim_item], sim_item.encode("utf-8"))
             self.stop_qr_classifier()
             self.stop_ros_camera_streaming(required=True)
 
-            # This must happen while the car is still at the QR area: the
-            # operator receives confirmation only after both QR item names
-            # and their categories are known, but before the point-3 leg.
-            real_category, sim_category = self.set_target_categories_from_qr(
-                collected, real_item, sim_item)
-            self.announce_qr_collection(real_item, sim_item)
-            self.announce_item_destinations(
-                real_item, real_category, sim_item, sim_category)
-
             if self.post_qr_waypoint_number:
                 waypoint = self.points[self.post_qr_waypoint_number]
-                waypoint_yaw = 0.0
-                if self.post_qr_waypoint_heading_point_number:
-                    heading_point = self.points[
-                        self.post_qr_waypoint_heading_point_number]
-                    waypoint_yaw = bearing(waypoint, heading_point)
                 rospy.loginfo(
                     "PRODUCTION_POST_QR_WAYPOINT %d (no rotation)",
                     self.post_qr_waypoint_number)
                 self.publish_state(
                     "WAYPOINT_%d" % self.post_qr_waypoint_number)
                 self.navigate_coordinates(
-                    waypoint[0], waypoint[1], waypoint_yaw,
+                    waypoint[0], waypoint[1], 0.0,
                     "post-QR waypoint %d" % self.post_qr_waypoint_number,
                     require_plan=True)
-
-        if self.resume_production_only:
-            real_category, sim_category = self.set_target_categories_from_qr(
-                collected, real_item, sim_item)
-            self.announce_item_destinations(
-                real_item, real_category, sim_item, sim_category)
 
         self.prepare_result_directory()
         if self.use_ros_camera_for_ocr:
@@ -978,394 +653,47 @@ class ProductionTask2026(object):
             self.release_ros_camera()
         self.start_native_ocr()
 
-        # Cruise for the real category while also recording a simulation
-        # category encountered first.  The latter is only a location record:
-        # the real item must be parked and announced before the vehicle ever
-        # parks for, or starts, the simulation item.
-        categories_to_record = set([real_category, sim_category])
         rospy.loginfo(
-            "PRODUCTION_TARGET_LEGS %s arrival_ocr_turn=360deg "
-            "real_category=%s record_categories=%s",
-            self.production_navigation_legs,
-            self.log_safe_text(real_category),
-            self.log_safe_text(sorted(categories_to_record)))
-        self.publish_state("PRODUCTION_CRUISE_1")
-        found_leg_index = self.cruise_production_route(
-            self.production_navigation_legs, 1, real_category, real_item,
-            record_categories=categories_to_record)
-        active_legs = self.production_navigation_legs
-        active_headings = self.production_observation_headings
-        active_route_name = "primary"
-        if found_leg_index is None:
-            rospy.loginfo(
-                "PRODUCTION_FALLBACK_TARGET_LEGS %s target_category=%s",
-                self.fallback_navigation_legs,
-                self.log_safe_text(real_category))
-            self.publish_state("PRODUCTION_FALLBACK_CRUISE_1")
-            found_leg_index = self.cruise_production_route(
-                self.fallback_navigation_legs, 1, real_category, real_item,
-                observation_headings=
-                self.fallback_production_observation_headings,
-                record_categories=categories_to_record,
-                route_name="fallback")
-            active_legs = self.fallback_navigation_legs
-            active_headings = self.fallback_production_observation_headings
-            active_route_name = "fallback"
-        if found_leg_index is None:
-            self.finish_after_route_exhausted(
-                [category for category in categories_to_record
-                 if not self.production_category_recorded(category)])
-            return
-
-        self.park_at_recorded_production_category(
-            real_item, real_category, announce=True)
-
-        # If simulation OCR was seen before the real item, its location is
-        # already stored but we deliberately have not driven to it yet.  When
-        # it was not seen, continue from the next unvisited leg only after the
-        # real-item announcement has completed.
-        if not self.production_category_recorded(sim_category):
-            second_legs = active_legs[found_leg_index + 1:]
-            if second_legs:
+            "PRODUCTION_TARGET_LEGS %s arrival_ocr_turn=360deg",
+            self.production_navigation_legs)
+        for segment_index, (start_number, end_number) in enumerate(
+                self.production_navigation_legs, 1):
+            self.navigate_target_and_scan(
+                segment_index, start_number, end_number,
+                target_yaw=self.production_observation_headings[
+                    segment_index - 1])
+            if len(select_three_processing_observations(
+                    self.observations)) >= 3:
                 rospy.loginfo(
-                    "PRODUCTION_SIM_LEGS route=%s start_leg_index=%d "
-                    "legs=%s target_category=%s",
-                    active_route_name, found_leg_index + 1, second_legs,
-                    self.log_safe_text(sim_category))
-                self.publish_state("PRODUCTION_CRUISE_2")
-                self.cruise_production_route(
-                    second_legs, found_leg_index + 2, sim_category, sim_item,
-                    observation_headings=active_headings,
-                    record_categories=set([sim_category]),
-                    route_name=active_route_name)
-        if (not self.production_category_recorded(sim_category) and
-                active_route_name == "primary"):
-            rospy.loginfo(
-                "PRODUCTION_FALLBACK_SIM_LEGS %s target_category=%s",
-                self.fallback_navigation_legs,
-                self.log_safe_text(sim_category))
-            self.publish_state("PRODUCTION_FALLBACK_CRUISE_2")
-            self.cruise_production_route(
-                self.fallback_navigation_legs, 1, sim_category, sim_item,
-                observation_headings=self.fallback_production_observation_headings,
-                record_categories=set([sim_category]),
-                route_name="fallback")
-        if not self.production_category_recorded(sim_category):
-            self.finish_after_route_exhausted([sim_category])
-            return
-
-        # This is intentionally after the real-item announcement above.
-        self.park_at_recorded_production_category(
-            sim_item, sim_category, announce=False)
+                    "PRODUCTION_CATEGORIES_COMPLETE count=3 "
+                    "early_stop_at_route_point=%d", end_number)
+                break
 
         self.stop_native_ocr()
         self.ensure_ros_camera_released()
+        selected = select_three_processing_observations(self.observations)
         self.save_observation_summary()
-
-        self.publish_state("SIMULATION_START")
-        # /start 失败时也进入 /status 兜底轮询，simulation_done_timeout（120s）到期后继续任务（与 08-14 的超时继续语义一致）
-        self.simulation_request_start(sim_item, sim_category)
-        self.publish_state("SIMULATION_WAIT_DONE")
-        simulation_completed = self.simulation_wait_done()
-        if simulation_completed:
-            self.publish_state("SIMULATION_DONE")
-            rospy.loginfo(
-                "PRODUCTION_SIMULATION_FINISHED item=%s category=%s",
-                self.log_safe_text(sim_item),
-                self.log_safe_text(sim_category))
-            self.speak_wait(
-                u"仿真任务已完成，已将%s放入%s" % (sim_item, sim_category))
-        else:
-            self.publish_state("SIMULATION_TIMEOUT_CONTINUE")
-            rospy.logwarn(
-                "PRODUCTION_SIMULATION_TIMEOUT_CONTINUE timeout=%.1f",
-                self.simulation_done_timeout)
-            self.speak_wait(
-                u"仿真任务已完成，已将%s放入%s" % (sim_item, sim_category))
-
-        self.finish_at_destination(
-            "recognized both target categories; announced processing "
-            "stops; simulation completed")
-
-    def finish_after_route_exhausted(self, missing_categories):
-        """Release OCR and continue to 441 after both cruise routes miss."""
-        missing_categories = sorted(set(missing_categories))
-        rospy.logwarn(
-            "PRODUCTION_ROUTE_EXHAUSTED missing_categories=%s; "
-            "continuing to destination",
-            self.log_safe_text(missing_categories))
-        self.stop_native_ocr()
-        self.ensure_ros_camera_released()
-        self.save_observation_summary()
-        self.publish_state("PRODUCTION_ROUTE_EXHAUSTED")
-        self.finish_at_destination(
-            "production routes exhausted before categories %s were located; "
-            "continued to destination" %
-            self.log_safe_text(missing_categories))
-
-    def finish_at_destination(self, reason):
-        """Navigate to the handoff point, publish success, and start lane mode."""
-        if self.destination_midpoint_point_numbers:
-            first = self.points[
-                self.destination_midpoint_point_numbers[0]]
-            second = self.points[
-                self.destination_midpoint_point_numbers[1]]
-            destination = (
-                (first[0] + second[0]) / 2.0,
-                (first[1] + second[1]) / 2.0)
-            destination_label = "midpoint %d-%d" % tuple(
-                self.destination_midpoint_point_numbers)
-        else:
-            destination = self.points[self.destination_point_number]
-            destination_label = "point %d" % self.destination_point_number
+        if len(selected) < 3:
+            raise MissionAbort(
+                "only %d/3 distinct processing categories were recognized" %
+                len(selected))
+        destination = self.points[self.destination_point_number]
         heading_point = self.points[self.destination_heading_point_number]
         destination_yaw = bearing(destination, heading_point)
         self.publish_state(
-            "DESTINATION_%s" %
-            "_".join(str(value)
-                     for value in self.destination_midpoint_point_numbers)
-            if self.destination_midpoint_point_numbers
-            else "DESTINATION_%d" % self.destination_point_number)
+            "DESTINATION_%d" % self.destination_point_number)
         self.navigate_coordinates(
             destination[0], destination[1], destination_yaw,
-            "destination %s" % destination_label,
+            "destination point %d" % self.destination_point_number,
             require_plan=True)
+        self.stop_motion()
         self.publish_state("SUCCEEDED")
         self.publish_result(
-            True, "%s; arrived at destination %s" % (reason, destination_label))
-        # The successful navigation action is the boundary.  Do not add a
-        # parking command here: activate the already-warm lane node and
-        # switch command ownership directly.
-        self.handoff_to_lane()
-        rospy.signal_shutdown("lane following completed")
+            True,
+            "saved three processing categories; arrived at destination point %d" %
+            self.destination_point_number)
 
-    @staticmethod
-    def normalize_qr_text(value):
-        """Decode a QR-derived text to unicode for item-name comparison.
-
-        /qr_result and the /qr_api_result item name carry UTF-8 bytes on
-        Python 2; item names are unicode.
-        """
-        if isinstance(value, bytes):
-            try:
-                return value.decode("utf-8")
-            except UnicodeDecodeError:
-                return value.decode("utf-8", "replace")
-        return value
-
-    def _reject_qr_code(self, detected, observation_number):
-        """Remember a published code (first occurrence only) and keep going."""
-        self.used_qr_codes.add(detected)
-        rospy.loginfo(
-            "PRODUCTION_QR_IGNORED observation=%s value=%s",
-            observation_number, self.log_safe_text(detected))
-
-    def collect_target_qr_codes(self, targets, rounds=2):
-        """Scan the QR faces until every target code is collected once.
-
-        Each round runs in two stages.  Stage 1 faces every fixed
-        observation direction (navigate-face / fresh-wait skeleton) without
-        any revolution fallback, so the vehicle searches all three
-        directions by face-first only.  Only when every fixed direction has
-        been searched and the targets are still not all collected does stage
-        2 revisit each direction with the full 360-degree revolution
-        fallback (fresh events are accepted while turning); stage 2 stops as
-        soon as every target is collected.  A fresh code is accepted only
-        when it is one of ``targets`` and has not been collected yet.
-        Non-target codes and repeat publications are ignored (they still
-        enter used_qr_codes at their first publication).
-        Returns {item_name: observation_number}.
-        """
-        collected = {}
-
-        def accept_text(raw_text):
-            text = self.normalize_qr_text(raw_text)
-            return text in targets and text not in collected
-
-        for round_index in range(1, rounds + 1):
-            if len(collected) >= len(targets):
-                break
-            rospy.loginfo(
-                "PRODUCTION_QR_ROUND %d/%d collected=%d/%d",
-                round_index, rounds, len(collected), len(targets))
-            for observation_number in self.qr_observation_numbers:
-                if len(collected) >= len(targets):
-                    break
-                detected = self.scan_observation_point(
-                    observation_number, accept_text, allow_revolution=False)
-                if detected is None:
-                    continue
-                text = self.normalize_qr_text(detected)
-                if text in targets and text not in collected:
-                    collected[text] = int(observation_number)
-                    rospy.loginfo(
-                        "PRODUCTION_QR_COLLECTED observation=%d "
-                        "value=%s collected=%d/%d",
-                        observation_number, self.log_safe_text(text),
-                        len(collected), len(targets))
-            if len(collected) < len(targets):
-                for observation_number in self.qr_observation_numbers:
-                    if len(collected) >= len(targets):
-                        break
-                    rospy.loginfo(
-                        "PRODUCTION_QR_REVOLUTION_FALLBACK observation=%d",
-                        observation_number)
-                    detected = self.scan_observation_point(
-                        observation_number, accept_text, allow_revolution=True)
-                    if detected is None:
-                        continue
-                    text = self.normalize_qr_text(detected)
-                    if text in targets and text not in collected:
-                        collected[text] = int(observation_number)
-                        rospy.loginfo(
-                            "PRODUCTION_QR_COLLECTED observation=%d "
-                            "value=%s collected=%d/%d",
-                            observation_number, self.log_safe_text(text),
-                            len(collected), len(targets))
-        return collected
-
-    def collect_target_qr_codes_by_category(
-            self, requested_categories, rounds=2):
-        """Resolve voice-requested categories to real QR item names.
-
-        ``wake_listen.py --json`` emits the requested production categories,
-        not the text printed by field QR codes.  This collector accepts each
-        distinct QR item once, classifies it immediately, and retains the
-        first item for every requested category.  Thus the mission never
-        pretends a category name is a QR item name, while the later simulation
-        request and announcements still carry the actual item.
-
-        Each round runs in two stages, like collect_target_qr_codes: stage 1
-        faces every fixed observation direction without any revolution
-        fallback; only when all fixed directions have been searched and the
-        requested categories are still not all collected does stage 2 revisit
-        each direction with the 360-degree revolution fallback (stopping as
-        soon as every category is collected).
-        """
-        requested_categories = set(requested_categories)
-        invalid = requested_categories.difference(VOICE_REQUEST_CATEGORIES)
-        if invalid:
-            raise MissionAbort(
-                "voice input requested unsupported categories: %s" %
-                self.log_safe_text(sorted(invalid)))
-        collected = {}
-        seen_items = set()
-
-        def accept_text(raw_text):
-            text = self.normalize_qr_text(raw_text)
-            return bool(text) and text not in seen_items
-
-        for round_index in range(1, rounds + 1):
-            if len(collected) >= len(requested_categories):
-                break
-            rospy.loginfo(
-                "PRODUCTION_VOICE_QR_ROUND %d/%d collected=%d/%d",
-                round_index, rounds, len(collected),
-                len(requested_categories))
-            for observation_number in self.qr_observation_numbers:
-                if len(collected) >= len(requested_categories):
-                    break
-                detected = self.scan_observation_point(
-                    observation_number, accept_text, allow_revolution=False)
-                if detected is None:
-                    continue
-                item_text = self.normalize_qr_text(detected)
-                if not item_text or item_text in seen_items:
-                    continue
-                seen_items.add(item_text)
-                self.classify_qr_text(
-                    observation_number, item_text.encode("utf-8"))
-                category = self.qr_classification_category_for_item(
-                    observation_number, item_text)
-                if category not in requested_categories:
-                    rospy.loginfo(
-                        "PRODUCTION_VOICE_QR_IGNORED observation=%d "
-                        "item=%s category=%s",
-                        observation_number, self.log_safe_text(item_text),
-                        self.log_safe_text(category))
-                    continue
-                if category in collected:
-                    rospy.loginfo(
-                        "PRODUCTION_VOICE_QR_DUPLICATE_CATEGORY "
-                        "observation=%d item=%s category=%s",
-                        observation_number, self.log_safe_text(item_text),
-                        self.log_safe_text(category))
-                    continue
-                collected[category] = {
-                    "item": item_text,
-                    "observation": int(observation_number),
-                }
-                rospy.loginfo(
-                    "PRODUCTION_VOICE_QR_COLLECTED observation=%d "
-                    "item=%s category=%s collected=%d/%d",
-                    observation_number, self.log_safe_text(item_text),
-                    self.log_safe_text(category), len(collected),
-                    len(requested_categories))
-            if len(collected) < len(requested_categories):
-                for observation_number in self.qr_observation_numbers:
-                    if len(collected) >= len(requested_categories):
-                        break
-                    rospy.loginfo(
-                        "PRODUCTION_VOICE_QR_REVOLUTION_FALLBACK "
-                        "observation=%d", observation_number)
-                    detected = self.scan_observation_point(
-                        observation_number, accept_text, allow_revolution=True)
-                    if detected is None:
-                        continue
-                    item_text = self.normalize_qr_text(detected)
-                    if not item_text or item_text in seen_items:
-                        continue
-                    seen_items.add(item_text)
-                    self.classify_qr_text(
-                        observation_number, item_text.encode("utf-8"))
-                    category = self.qr_classification_category_for_item(
-                        observation_number, item_text)
-                    if category not in requested_categories:
-                        rospy.loginfo(
-                            "PRODUCTION_VOICE_QR_IGNORED observation=%d "
-                            "item=%s category=%s",
-                            observation_number, self.log_safe_text(item_text),
-                            self.log_safe_text(category))
-                        continue
-                    if category in collected:
-                        rospy.loginfo(
-                            "PRODUCTION_VOICE_QR_DUPLICATE_CATEGORY "
-                            "observation=%d item=%s category=%s",
-                            observation_number, self.log_safe_text(item_text),
-                            self.log_safe_text(category))
-                        continue
-                    collected[category] = {
-                        "item": item_text,
-                        "observation": int(observation_number),
-                    }
-                    rospy.loginfo(
-                        "PRODUCTION_VOICE_QR_COLLECTED observation=%d "
-                        "item=%s category=%s collected=%d/%d",
-                        observation_number, self.log_safe_text(item_text),
-                        self.log_safe_text(category), len(collected),
-                        len(requested_categories))
-        return collected
-
-    def scan_observation_point(self, observation_number, accept_text=None,
-                               allow_revolution=True):
-        """Face one QR observation point; return the first accepted code.
-
-        ``accept_text`` decides whether a freshly decoded code is kept; the
-        default keeps the first distinct code (legacy behaviour).  A fresh
-        code that is rejected is recorded in used_qr_codes and the scan
-        continues.  The vehicle faces the point and waits up to
-        qr_search_timeout.  If a QR code is seen but rejected (for example,
-        it names an item outside the input targets), this face is complete:
-        return None so the collection loop advances to the next fixed face.
-
-        ``allow_revolution=False`` makes this face do nothing but "face the
-        point and wait for a scan" -- no 360-degree revolution fallback.  In
-        that mode a face that still yields nothing returns None and the
-        collection loop advances to the next fixed direction; the
-        full-revolution fallback is triggered by the caller only after every
-        fixed direction has been searched.  The full-revolution fallback is
-        otherwise reserved for a face where no QR code was seen at all.
-        """
+    def scan_observation_point(self, observation_number):
         staging = self.points[self.staging_point_number]
         observation = self.points[observation_number]
         observation_yaw = bearing(staging, observation)
@@ -1373,55 +701,33 @@ class ProductionTask2026(object):
         # Capture the sequence before turning so a code acquired while the
         # chassis is settling at this new face is accepted immediately.
         with self.lock:
-            baseline = self.api_sequence
+            baseline = self.qr_sequence
         self.navigate_coordinates(
             staging[0], staging[1], observation_yaw,
             "QR face point %d" % observation_number,
             require_plan=False)
 
-        detected, rejected = self.accepted_qr_after(
-            baseline, accept_text, observation_number,
-            report_rejection=True)
-        if detected is None and not rejected:
-            detected, wait_rejected = self.wait_for_fresh_qr(
-                baseline, self.qr_search_timeout, accept_text,
-                observation_number, report_rejection=True)
-            rejected = rejected or wait_rejected
+        detected = self.fresh_qr_after(baseline)
         if detected is None:
-            if rejected:
-                rospy.loginfo(
-                    "PRODUCTION_QR_FACE_REJECTED observation=%d "
-                    "advance_to_next_face=true",
-                    observation_number)
-                return None
-            if not allow_revolution:
-                return None
+            detected = self.wait_for_fresh_qr(
+                baseline, self.qr_search_timeout)
+        if detected is None:
             self.publish_state("QR_SEARCH_TURN_%d" % observation_number)
             detected = self.rotate_full_revolution(
                 "QR observation point %d" % observation_number,
                 self.qr_rotation_speed,
                 stop_for_qr=True,
-                qr_baseline=baseline,
-                qr_accept=accept_text,
-                qr_observation_number=observation_number)
+                qr_baseline=baseline)
         if detected is None:
-            return None
+            raise MissionAbort(
+                "no fresh QR detected for observation point %d after one "
+                "complete search turn" % observation_number)
         self.used_qr_codes.add(detected)
         rospy.loginfo(
-            "PRODUCTION_QR_ACCEPTED observation=%d value=%s",
-            observation_number, self.log_safe_text(detected))
-        return detected
-
-    def accepted_qr_after(self, baseline, accept_text, observation_number,
-                          report_rejection=False):
-        """Inspect the first fresh QR; optionally report a rejection."""
-        detected = self.fresh_qr_after(baseline)
-        if detected is None:
-            return (None, False) if report_rejection else None
-        if accept_text is None or accept_text(detected):
-            return (detected, False) if report_rejection else detected
-        self._reject_qr_code(detected, observation_number)
-        return (None, True) if report_rejection else None
+            "PRODUCTION_QR_ACCEPTED observation=%d value=%s count=%d/%d",
+            observation_number, self.log_safe_text(detected),
+            len(self.used_qr_codes), len(self.qr_observation_numbers))
+        self.classify_qr_text(observation_number, detected)
 
     def wait_for_qr_scanner(self):
         deadline = (
@@ -1434,41 +740,24 @@ class ProductionTask2026(object):
             rospy.sleep(0.1)
         raise MissionAbort("QR scanner did not connect to /qrcode_start_flag")
 
-    def wait_for_fresh_qr(self, baseline, timeout, accept_text=None,
-                          observation_number=None, report_rejection=False):
+    def wait_for_fresh_qr(self, baseline, timeout):
         deadline = rospy.Time.now() + rospy.Duration(timeout)
-        search_baseline = baseline
-        rejected = False
         while not rospy.is_shutdown() and rospy.Time.now() < deadline:
             self.require_safe()
-            detected = self.fresh_qr_after(search_baseline)
+            detected = self.fresh_qr_after(baseline)
             if detected is not None:
-                if accept_text is None or accept_text(detected):
-                    return (
-                        (detected, rejected)
-                        if report_rejection else detected)
-                self._reject_qr_code(detected, observation_number)
-                if report_rejection:
-                    return None, True
-                rejected = True
-                with self.lock:
-                    search_baseline = self.api_sequence
+                return detected
             # Wait on the subscription callback instead of imposing a fixed
             # observation delay.  The bounded wait still lets safety state
             # and ROS shutdown be checked when no QR is visible.
-            self.api_event.wait(0.05)
-            self.api_event.clear()
-        return (None, rejected) if report_rejection else None
+            self.qr_event.wait(0.05)
+            self.qr_event.clear()
+        return None
 
     def fresh_qr_after(self, baseline):
-        """First API-resolved item name published at or after the baseline.
-
-        ``baseline`` is the api_sequence captured before facing a QR point;
-        the returned value is the resolved item name (never the raw URL).
-        """
         with self.lock:
-            sequence = self.api_sequence
-            text = self.latest_api_text
+            sequence = self.qr_sequence
+            text = self.latest_qr_text
         if sequence <= baseline or not text:
             return None
         if self.require_distinct_qr_codes and text in self.used_qr_codes:
@@ -1837,53 +1126,6 @@ class ProductionTask2026(object):
                 task["capture_requested_pose_map"])
         return response
 
-    def capture_ocr_while_turning(
-            self, signed_speed, capture_label, attempt):
-        """Capture one fresh OCR frame while continuously turning in place.
-
-        The OCR helper runs in a worker while this supervisor keeps publishing
-        a bounded angular command at ``rotation_control_rate``.  A successful
-        return deliberately leaves the command active: the caller either
-        immediately requests the next frame with an updated speed or sends
-        zero after the image is aligned.  Any failure path stops first.
-        """
-        speed = float(signed_speed)
-        if speed == 0.0:
-            raise MissionAbort("continuous OCR alignment has zero turn speed")
-        direction = 1.0 if speed > 0.0 else -1.0
-        if abs(speed) < self.ocr_alignment_min_speed:
-            speed = self.ocr_alignment_min_speed * direction
-        command = Twist()
-        command.angular.z = speed
-        task = None
-        completed = False
-        try:
-            # Publish before asking the worker for the next image so its
-            # exposure belongs to the continuous turn rather than the prior
-            # parked pose.  The loop below keeps refreshing the command.
-            self.require_safe()
-            self.cmd_vel_pub.publish(command)
-            task = self.start_async_motion_ocr(
-                "%s_moving_%02d" % (capture_label, attempt))
-            deadline = time.time() + self.ocr_capture_timeout + 2.0
-            rate = rospy.Rate(self.rotation_control_rate)
-            while not task["done"].is_set():
-                self.require_safe()
-                if time.time() >= deadline:
-                    raise MissionAbort(
-                        "continuous OCR capture %s timed out" %
-                        capture_label)
-                self.cmd_vel_pub.publish(command)
-                rate.sleep()
-            response = self.finish_async_motion_ocr(task)
-            completed = True
-            return response
-        finally:
-            if not completed:
-                self.stop_motion()
-                if task is not None:
-                    self.cleanup_async_motion_ocr(task)
-
     def cleanup_async_motion_ocr(self, task):
         if task is None:
             return
@@ -2043,546 +1285,6 @@ class ProductionTask2026(object):
         if isinstance(value, str):
             return value
         return json.dumps(value, ensure_ascii=True)
-
-    @staticmethod
-    def print_terminal(text):
-        """Print a human-facing UTF-8 line to the launch terminal.
-
-        rospy log lines must stay ASCII (Python 2 crash lesson 2026-08-06),
-        so Chinese meant for the operator goes straight to stdout instead.
-        The task node runs with output="screen", so this appears in the
-        mission terminal.  Text arrives as unicode and is encoded to UTF-8
-        bytes before printing.
-        """
-        if isinstance(text, unicode):
-            text = text.encode("utf-8")
-        print(text)
-        sys.stdout.flush()
-
-    def speak(self, text):
-        """Play one TTS announcement asynchronously; never aborts the task."""
-        if not self.tts_enabled:
-            return
-        try:
-            payload = text
-            if isinstance(payload, bytes):
-                payload = payload.decode("utf-8", "replace")
-            rospy.loginfo(
-                "PRODUCTION_TTS_SPEAK text=%s",
-                self.log_safe_text(payload))
-            self.print_terminal(u"[播报] %s" % payload)
-            argv = [
-                self.tts_python, self.tts_helper_path,
-                payload.encode("utf-8")]
-            devnull = open(os.devnull, "wb")
-            try:
-                subprocess.Popen(argv, stdout=devnull, stderr=devnull)
-            finally:
-                devnull.close()
-        except (OSError, IOError, ValueError) as exc:
-            rospy.logwarn("PRODUCTION_TASK_TTS_FAILED %s", exc)
-
-    def warehouse_name_for_category(self, category):
-        """Warehouse name announced for a production category.
-
-        The wording matches the OCR workshop signs on the field; the
-        electronics sign reads "电子产品生产车间" (production, not 加工).
-        An unknown category falls back to "<category>加工车间" so the
-        announcement still plays, with a warning logged.
-        """
-        name = PRODUCTION_WAREHOUSE_NAMES.get(category)
-        if name is None:
-            rospy.logwarn(
-                "PRODUCTION_TTS_WAREHOUSE_UNKNOWN category=%s",
-                self.log_safe_text(category))
-            return u"%s加工车间" % category
-        return name
-
-    def set_target_categories_from_qr(self, collected, real_item, sim_item):
-        """Resolve and persist both QR item categories before production OCR."""
-        real_category = self.qr_classification_category_for_item(
-            collected[real_item], real_item)
-        if real_category is None:
-            raise MissionAbort(
-                "QR item category was not recognised for observation %d" %
-                collected[real_item])
-        sim_category = self.qr_classification_category_for_item(
-            collected[sim_item], sim_item)
-        if sim_category is None:
-            raise MissionAbort(
-                "QR item category was not recognised for observation %d" %
-                collected[sim_item])
-        self.expected_real_category = real_category
-        self.expected_sim_category = sim_category
-        self.expected_production_category = real_category
-        rospy.loginfo(
-            "PRODUCTION_TASK_TARGET_CATEGORIES real=%s sim=%s",
-            self.log_safe_text(real_category),
-            self.log_safe_text(sim_category))
-        return real_category, sim_category
-
-    def announce_qr_collection(self, real_item, sim_item):
-        """Confirm the complete QR collection before leaving the QR area."""
-        self.publish_state("QR_ITEMS_ANNOUNCE")
-        self.speak_wait(
-            u"二维码识别完成，已获取%s和%s" % (real_item, sim_item))
-
-    def announce_item_destinations(
-            self, real_item, real_category, sim_item, sim_category):
-        """Announce the two resolved category-to-workshop assignments."""
-        real_warehouse = self.warehouse_name_for_category(real_category)
-        sim_warehouse = self.warehouse_name_for_category(sim_category)
-        self.speak_wait(
-            u"取得*%s*属于*%s*应放置在*%s" % (
-                real_item, real_category, real_warehouse))
-        self.speak_wait(
-            u"仿真环境中取得*%s*属于*%s*应放置在*%s" % (
-                sim_item, sim_category, sim_warehouse))
-
-    def speak_wait(self, text, timeout=None):
-        """Play one TTS announcement synchronously; timeout never aborts.
-
-        The helper process exits only after the audio finished playing, so
-        waiting for its exit means the announcement is complete.  A timeout
-        terminates the helper, logs a warning and continues the mission.
-        """
-        if not self.tts_enabled:
-            return
-        if timeout is None:
-            timeout = self.speak_wait_timeout
-        try:
-            payload = text
-            if isinstance(payload, bytes):
-                payload = payload.decode("utf-8", "replace")
-            rospy.loginfo(
-                "PRODUCTION_TTS_SPEAK text=%s",
-                self.log_safe_text(payload))
-            self.print_terminal(u"[播报] %s" % payload)
-            argv = [
-                self.tts_python, self.tts_helper_path,
-                payload.encode("utf-8")]
-            devnull = open(os.devnull, "wb")
-            try:
-                process = subprocess.Popen(argv, stdout=devnull,
-                                           stderr=devnull)
-            finally:
-                devnull.close()
-        except (OSError, IOError, ValueError) as exc:
-            rospy.logwarn("PRODUCTION_TASK_TTS_FAILED %s", exc)
-            return
-        deadline = time.time() + float(timeout)
-        while (process.poll() is None and time.time() < deadline and
-                not rospy.is_shutdown()):
-            time.sleep(0.1)
-        if process.poll() is not None:
-            rospy.loginfo(
-                "PRODUCTION_TASK_TTS_WAIT_FINISHED code=%d",
-                process.returncode)
-            return
-        process.terminate()
-        time.sleep(0.2)
-        if process.poll() is None:
-            process.kill()
-        rospy.logwarn(
-            "PRODUCTION_TASK_TTS_TIMEOUT seconds=%.1f text=%s",
-            float(timeout), self.log_safe_text(text))
-
-    def resolve_simulation_host(self):
-        """Return the explicitly configured reachable PC simulation host."""
-        host = self.simulation_host.strip()
-        if not host:
-            raise MissionAbort(
-                "simulation_host must be explicitly configured; "
-                "ROS_MASTER_URI points at the vehicle")
-        return host
-
-    def handoff_to_lane(self):
-        """Activate resident lane following without an intermediate stop."""
-        if not self.lane_handoff_enabled:
-            return
-        self.set_ros_camera_streaming(True, required=True)
-        try:
-            rospy.wait_for_service(self.lane_activate_service, timeout=10.0)
-            rospy.wait_for_service(self.lane_owner_service, timeout=10.0)
-            activate_lane = rospy.ServiceProxy(
-                self.lane_activate_service, SetBool)
-            activation = activate_lane(True)
-            if not activation.success:
-                raise MissionAbort(
-                    "lane activation rejected: %s" % activation.message)
-            set_lane_owner = rospy.ServiceProxy(
-                self.lane_owner_service, SetBool)
-            owner_result = set_lane_owner(True)
-            if not owner_result.success:
-                raise MissionAbort(
-                    "lane command ownership rejected: %s" %
-                    owner_result.message)
-        except (rospy.ROSException, rospy.ServiceException) as exc:
-            raise MissionAbort("lane handoff service failed: %s" % exc)
-
-        self.publish_state("LANE_ACTIVE")
-        deadline = time.time() + self.lane_handoff_timeout
-        while not rospy.is_shutdown() and time.time() < deadline:
-            with self.lock:
-                lane_state = self.lane_state
-            if lane_state == "STOPPED":
-                rospy.loginfo("PRODUCTION_LANE_HANDOFF_COMPLETED")
-                return
-            self.lane_state_event.wait(0.10)
-            self.lane_state_event.clear()
-        raise MissionAbort(
-            "lane following did not reach STOPPED within %.1f s" %
-            self.lane_handoff_timeout)
-
-    def simulation_request_start(self, item_name, category):
-        """Ask the local simulation to start; retries then falls back.
-
-        POST /start with the item name and its category.  A 2xx reply with
-        ``accepted`` returns; HTTP 409 means the simulation is already
-        running and aborts immediately; other failures retry up to
-        simulation_start_retries before returning False, letting the caller
-        fall back to /status polling in simulation_wait_done (whose
-        simulation_done_timeout of 120 s keeps the mission moving).
-        """
-        url = "http://%s:%d/start" % (
-            self.simulation_host, self.simulation_port)
-        body = json.dumps({
-            "item_name": item_name,
-            "category": category,
-        }).encode("utf-8")
-        last_error = "unknown"
-        for attempt in range(1, self.simulation_start_retries + 1):
-            self.require_safe()
-            try:
-                request = urllib2.Request(
-                    url, data=body,
-                    headers={"Content-Type": "application/json"})
-                response = urllib2.urlopen(
-                    request, timeout=self.simulation_start_timeout)
-                try:
-                    payload = json.loads(response.read())
-                finally:
-                    response.close()
-            except urllib2.HTTPError as exc:
-                if exc.code == 409:
-                    raise MissionAbort("simulation already running")
-                last_error = "http=%d" % exc.code
-                rospy.logwarn(
-                    "PRODUCTION_SIMULATION_START_RETRY attempt=%d/%d "
-                    "http=%d",
-                    attempt, self.simulation_start_retries, exc.code)
-            except (urllib2.URLError, IOError) as exc:
-                last_error = str(exc)
-                rospy.logwarn(
-                    "PRODUCTION_SIMULATION_START_RETRY attempt=%d/%d "
-                    "error=%s",
-                    attempt, self.simulation_start_retries,
-                    self.log_safe_text(str(exc)))
-            except ValueError:
-                last_error = "non-json reply"
-                rospy.logwarn(
-                    "PRODUCTION_SIMULATION_START_RETRY attempt=%d/%d "
-                    "non-json reply",
-                    attempt, self.simulation_start_retries)
-            else:
-                if not payload.get("accepted"):
-                    raise MissionAbort(
-                        "simulation /start was not accepted: %s" % payload)
-                rospy.loginfo(
-                    "PRODUCTION_SIMULATION_START_ACCEPTED item=%s "
-                    "category=%s",
-                    self.log_safe_text(item_name),
-                    self.log_safe_text(category))
-                return True
-            if attempt < self.simulation_start_retries:
-                time.sleep(2.0)
-        rospy.logwarn(
-            "PRODUCTION_SIMULATION_START_FAILED_CONTINUE item=%s error=%s",
-            self.log_safe_text(item_name), self.log_safe_text(last_error))
-        return False
-
-    def simulation_wait_done(self):
-        """Poll /status until the simulation reports done; safety stays on.
-
-        Every poll opens a new HTTP connection, so transport failures retry
-        on the next period.  The vehicle continues after the configured
-        timeout whether the simulator reports running, failed, or no status.
-        """
-        url = "http://%s:%d/status" % (
-            self.simulation_host, self.simulation_port)
-        deadline = time.time() + self.simulation_done_timeout
-        while not rospy.is_shutdown() and time.time() < deadline:
-            self.require_safe()
-            try:
-                response = urllib2.urlopen(url, timeout=10.0)
-                try:
-                    payload = json.loads(response.read())
-                finally:
-                    response.close()
-            except (urllib2.URLError, IOError, httplib.HTTPException) as exc:
-                rospy.logwarn_throttle(
-                    2.0, "PRODUCTION_SIMULATION_STATUS_RECONNECT error=%s",
-                    self.log_safe_text(str(exc)))
-                time.sleep(self.simulation_poll_period)
-                continue
-            except ValueError:
-                rospy.logwarn_throttle(
-                    2.0, "PRODUCTION_SIMULATION_STATUS_BAD_JSON")
-                time.sleep(self.simulation_poll_period)
-                continue
-            state = payload.get("state")
-            if state == "done":
-                rospy.loginfo(
-                    "PRODUCTION_SIMULATION_STATUS_DONE %s",
-                    json.dumps(payload, ensure_ascii=True))
-                return True
-            if state == "failed":
-                rospy.logwarn_throttle(
-                    2.0, "PRODUCTION_SIMULATION_STATUS_FAILED_WAITING %s",
-                    self.log_safe_text(str(payload.get("detail", payload))))
-            time.sleep(self.simulation_poll_period)
-        if rospy.is_shutdown():
-            raise MissionAbort("ROS shutdown while waiting for simulation")
-        rospy.logwarn(
-            "PRODUCTION_SIMULATION_WAIT_TIMEOUT_CONTINUE timeout=%.1f",
-            self.simulation_done_timeout)
-        return False
-
-    def wait_for_item_inputs(self):
-        """Wait for the two task requests from voice or standard input.
-
-        Voice mode receives the two requested categories from the microphone
-        listener.  QR scanning resolves those categories to actual field item
-        names before the production route begins.  ``stdin`` remains an
-        explicit development fallback and receives the two actual item names.
-        """
-        if getattr(self, "item_input_mode", "stdin") == "voice":
-            real_category, sim_category = self.wait_for_voice_item_categories()
-            self.requested_real_category = real_category
-            self.requested_sim_category = sim_category
-            return real_category, sim_category
-        real_item = self._read_item_input(
-            u"PRODUCTION_TASK_INPUT_PROMPT: 请输入现实物品名称后回车")
-        sim_item = self._read_item_input(
-            u"PRODUCTION_TASK_INPUT_PROMPT: 请输入仿真物品名称后回车")
-        if real_item == sim_item:
-            raise MissionAbort("real and simulation items must be different")
-        self.set_expected_item_texts(real_item, sim_item)
-        return real_item, sim_item
-
-    def set_expected_item_texts(self, real_item, sim_item):
-        """Store the real QR item names used by the rest of the mission."""
-        self.expected_real_item_text = real_item
-        self.expected_sim_item_text = sim_item
-        self.expected_item_text = real_item
-        rospy.loginfo(
-            "PRODUCTION_TASK_ITEMS real=%s sim=%s",
-            self.log_safe_text(real_item), self.log_safe_text(sim_item))
-
-    def wait_for_voice_item_categories(self):
-        """Run wake_listen until it emits one valid dual-category JSON line.
-
-        The listener stays in ``--loop`` mode, so an ASR failure or incomplete
-        sentence simply leads to another wake-word attempt.  Its human-facing
-        progress logs share stdout with JSON; only an ``ok=true`` JSON object
-        with both supported, distinct slots is accepted.  The process is
-        always stopped before returning so it cannot retain the microphone or
-        receive later TTS audio.
-        """
-        listener_path = self.voice_listener_path
-        if not os.path.isfile(listener_path):
-            raise MissionAbort(
-                "voice listener does not exist: %s" % listener_path)
-        wake_word = self.normalize_qr_text(self.voice_wake_word)
-        if not wake_word:
-            raise MissionAbort("voice wake word is empty")
-        command = [
-            self.voice_listener_python, "-u", listener_path,
-            "--loop", "--asr", "--set-wake", wake_word.encode("utf-8"),
-            "--json",
-        ]
-        try:
-            self.voice_input_process = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                bufsize=0)
-        except (IOError, OSError) as exc:
-            self.voice_input_process = None
-            raise MissionAbort("cannot start voice listener: %s" % exc)
-        rospy.loginfo(
-            "PRODUCTION_VOICE_INPUT_STARTED listener=%s wake_word=%s",
-            listener_path, self.log_safe_text(wake_word))
-        rospy.loginfo(
-            "PRODUCTION_VOICE_WAITING waiting for wake word and "
-            "dual-category command")
-
-        timeout = float(self.voice_input_timeout)
-        deadline = time.time() + timeout if timeout > 0.0 else None
-        buffered = b""
-        try:
-            while not rospy.is_shutdown():
-                if deadline is not None and time.time() >= deadline:
-                    raise MissionAbort(
-                        "voice input timed out after %.1f s" % timeout)
-                process = self.voice_input_process
-                if process is None or process.poll() is not None:
-                    raise MissionAbort(
-                        "voice listener exited before a valid command")
-                readable, _writable, _errors = select.select(
-                    [process.stdout], [], [], 0.1)
-                if not readable:
-                    continue
-                chunk = os.read(process.stdout.fileno(), 4096)
-                if not chunk:
-                    continue
-                buffered += chunk
-                lines = buffered.split(b"\n")
-                buffered = lines.pop()
-                for raw_line in lines:
-                    decoded_line = raw_line
-                    if isinstance(decoded_line, bytes):
-                        decoded_line = decoded_line.decode(
-                            "utf-8", "replace")
-                    decoded_line = decoded_line.strip()
-                    if decoded_line:
-                        display_line = decoded_line
-                        if u"\r" in display_line:
-                            display_line = display_line.split(
-                                u"\r")[-1].strip()
-                        if display_line.startswith(u"音量"):
-                            display_line = u""
-                        try:
-                            json.loads(decoded_line)
-                        except ValueError:
-                            if display_line:
-                                self.print_terminal(
-                                    u"[语音] %s" % display_line)
-                    parsed = self.parse_voice_listener_message(raw_line)
-                    if parsed is None:
-                        continue
-                    real_category, sim_category = parsed
-                    if real_category == sim_category:
-                        rospy.logwarn(
-                            "PRODUCTION_VOICE_INPUT_REJECTED "
-                            "duplicate_category=%s; please repeat command",
-                            self.log_safe_text(real_category))
-                        continue
-                    rospy.loginfo(
-                        "PRODUCTION_VOICE_INPUT_ACCEPTED real_category=%s "
-                        "sim_category=%s",
-                        self.log_safe_text(real_category),
-                        self.log_safe_text(sim_category))
-                    return real_category, sim_category
-            raise MissionAbort("ROS shutdown while waiting for voice input")
-        finally:
-            self.stop_voice_listener()
-
-    def parse_voice_listener_message(self, raw_line):
-        """Return two validated categories from one wake_listen output line."""
-        if isinstance(raw_line, bytes):
-            raw_line = raw_line.decode("utf-8", "replace")
-        raw_line = raw_line.strip()
-        if not raw_line:
-            return None
-        try:
-            message = json.loads(raw_line)
-        except ValueError:
-            # wake_listen prints setup/progress text too; it is not a command.
-            return None
-        if not isinstance(message, dict) or not message.get("ok"):
-            return None
-        slots = message.get("slots")
-        if not isinstance(slots, dict):
-            rospy.logwarn("PRODUCTION_VOICE_INPUT_REJECTED missing slots")
-            return None
-        real_category = self.normalize_qr_text(slots.get(u"取件类别", ""))
-        sim_category = self.normalize_qr_text(slots.get(u"仿真类别", ""))
-        if (real_category not in VOICE_REQUEST_CATEGORIES or
-                sim_category not in VOICE_REQUEST_CATEGORIES):
-            rospy.logwarn(
-                "PRODUCTION_VOICE_INPUT_REJECTED unsupported real=%s sim=%s",
-                self.log_safe_text(real_category),
-                self.log_safe_text(sim_category))
-            return None
-        return real_category, sim_category
-
-    def stop_voice_listener(self):
-        """Release the microphone-listener process without leaving it behind."""
-        process = getattr(self, "voice_input_process", None)
-        self.voice_input_process = None
-        if process is None:
-            return
-        if process.poll() is None:
-            process.terminate()
-            deadline = time.time() + 3.0
-            while process.poll() is None and time.time() < deadline:
-                time.sleep(0.05)
-            if process.poll() is None:
-                process.kill()
-        try:
-            process.wait()
-        except OSError:
-            pass
-        try:
-            process.stdout.close()
-        except (AttributeError, IOError, OSError):
-            pass
-        rospy.loginfo("PRODUCTION_VOICE_INPUT_STOPPED")
-
-    def _read_item_input(self, prompt):
-        if sys.version_info[0] < 3:
-            sys.stdout.write(prompt.encode("utf-8"))
-        else:
-            sys.stdout.write(prompt)
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-        raw_line = sys.stdin.readline()
-        if isinstance(raw_line, bytes):
-            text = raw_line.decode("utf-8", "replace")
-        else:
-            text = raw_line
-        item_text = text.strip()
-        if not item_text:
-            raise MissionAbort("no item text was provided on standard input")
-        rospy.loginfo("PRODUCTION_TASK_ITEM %s", self.log_safe_text(item_text))
-        return item_text
-
-    def qr_classification_entry(self, observation_number):
-        for entry in self.qr_classifications:
-            if (entry.get("observation") == int(observation_number) and
-                    entry.get("category")):
-                return entry
-        return None
-
-    def qr_classification_category(self, observation_number):
-        entry = self.qr_classification_entry(observation_number)
-        if entry is None:
-            return None
-        category = entry.get("category")
-        if category is None or category == "null":
-            return None
-        return category
-
-    def qr_classification_category_for_item(self, observation_number,
-                                            item_text):
-        """Category classified for one item name at its observation face."""
-        for entry in self.qr_classifications:
-            if (entry.get("observation") == int(observation_number) and
-                    entry.get("qr_text") == item_text):
-                category = entry.get("category")
-                if category is None or category == "null":
-                    return None
-                return category
-        return None
-
-    def production_category_recorded(self, category):
-        return self.last_recorded_observation(category) is not None
-
-    def last_recorded_observation(self, category):
-        for observation in reversed(self.observations):
-            if (observation.get("processing_category") == category and
-                    observation.get("wall_point_number") is not None):
-                return observation
-        return None
 
     def classify_qr_text(self, observation_number, qr_text):
         """Classify one QR result; records the outcome, never aborts."""
@@ -2850,20 +1552,15 @@ class ProductionTask2026(object):
             label, end_number, error, status)
 
     def navigate_target_and_scan(
-            self, leg_index, start_number, end_number, target_yaw,
-            target_category=None, record_categories=None,
-            route_name="primary", route_leg_count=None,
-            next_target_number=None):
+            self, leg_index, start_number, end_number, target_yaw):
         """Guard one target leg, then scan only if that target was reached."""
         target = self.points[end_number]
         label = "PRODUCTION_TARGET_%03d" % end_number
-        if route_leg_count is None:
-            route_leg_count = len(self.production_navigation_legs)
         self.publish_state(label)
         rospy.loginfo(
-            "PRODUCTION_TARGET_GOAL route=%s index=%d/%d start=%d end=%d "
+            "PRODUCTION_TARGET_GOAL index=%d/%d start=%d end=%d "
             "target=(%.3f, %.3f) yaw=%.3f",
-            route_name, leg_index, route_leg_count,
+            leg_index, len(self.production_navigation_legs),
             start_number, end_number, target[0], target[1], target_yaw)
         monitor = self.new_target_guard_monitor(end_number)
         guard_number = self.wait_for_target_guard_precheck(monitor)
@@ -2872,7 +1569,7 @@ class ProductionTask2026(object):
             self.wait_for_chassis_stop(label + " target guard before goal")
             self.record_target_guard_skip(
                 leg_index, start_number, end_number, guard_number,
-                "before_goal", monitor, route_name, next_target_number)
+                "before_goal", monitor)
             return "target_guard_skipped"
 
         navigation_guard = {"number": None, "scan_unavailable": False}
@@ -2893,8 +1590,7 @@ class ProductionTask2026(object):
         if navigation_guard["number"] is not None:
             self.record_target_guard_skip(
                 leg_index, start_number, end_number,
-                navigation_guard["number"], "during_navigation", monitor,
-                route_name, next_target_number)
+                navigation_guard["number"], "during_navigation", monitor)
             return "target_guard_skipped"
         if navigation_guard["scan_unavailable"]:
             raise MissionAbort(
@@ -2902,105 +1598,18 @@ class ProductionTask2026(object):
                 label)
         if not reached:
             raise MissionAbort("%s did not reach target" % label)
-        self.scan_production_point(
-            leg_index, start_number, end_number, label,
-            target_category=target_category,
-            record_categories=record_categories)
-
-    def cruise_production_route(self, legs, start_segment_index,
-                                target_category, target_item,
-                                observation_headings=None,
-                                record_categories=None,
-                                route_name="primary"):
-        """Run ``legs`` until target_category is recorded during this round.
-
-        Returns the 0-based leg index (into production_navigation_legs) of
-        the leg that first recorded the category this round, or None when
-        the route ends without a match.  ``start_segment_index`` keeps the
-        1-based global leg numbering used by guard auditing and headings.
-        """
-        if observation_headings is None:
-            observation_headings = self.production_observation_headings
-        base_observation_count = len(self.observations)
-        for local_leg_index, (start_number, end_number) in enumerate(legs):
-            segment_index = start_segment_index + local_leg_index
-            next_target_number = (
-                legs[local_leg_index + 1][1]
-                if local_leg_index + 1 < len(legs) else None)
-            self.navigate_target_and_scan(
-                segment_index, start_number, end_number,
-                target_yaw=observation_headings[segment_index - 1],
-                target_category=target_category,
-                record_categories=record_categories,
-                route_name=route_name, route_leg_count=len(legs),
-                next_target_number=next_target_number)
-            if (len(self.observations) > base_observation_count and
-                    self.production_category_recorded(target_category)):
-                rospy.loginfo(
-                    "PRODUCTION_TARGET_CATEGORY_FOUND route_point=%d "
-                    "category=%s item=%s leg_index=%d",
-                    end_number, self.log_safe_text(target_category),
-                    self.log_safe_text(target_item), segment_index - 1)
-                return segment_index - 1
-        return None
-
-    def park_at_recorded_production_category(self, item, category,
-                                             announce=False):
-        """Park at one recorded category wall, optionally confirming delivery."""
-        self.stop_motion()
-        self.wait_for_chassis_stop("stop before processing area stop")
-        observation = self.last_recorded_observation(category)
-        if observation is None:
-            raise MissionAbort(
-                "recorded production category is unavailable: %s" %
-                self.log_safe_text(category))
-        wall_number = observation["wall_point_number"]
-        wall_coordinate = observation["wall_point_coordinate"]
-        intersection = observation.get(
-            "forward_ray_wall_intersection_map", wall_coordinate)
-        stop_x, stop_y = stop_point_for_wall_point(
-            intersection, self.middle_zone_square_side,
-            self.middle_zone_bounds)
-        parking_yaw = normalize_angle(
-            bearing((stop_x, stop_y), intersection) + math.pi)
-        self.publish_state("PROCESSING_STOP_%03d" % wall_number)
-        rospy.loginfo(
-            "PRODUCTION_PROCESSING_STOP wall_point=%d wall_coordinate=%s "
-            "intersection=%s stop=%.3f,%.3f item=%s",
-            wall_number, wall_coordinate, intersection, stop_x, stop_y,
-            self.log_safe_text(item))
-        self.navigate_coordinates(
-            stop_x, stop_y, parking_yaw,
-            "processing stop point %d" % wall_number,
-            require_plan=True)
-        self.stop_motion()
-        if announce:
-            self.publish_state("PROCESSING_ANNOUNCE_%03d" % wall_number)
-            rospy.loginfo(
-                "PRODUCTION_PROCESSING_ANNOUNCE wall_point=%d item=%s "
-                "category=%s",
-                wall_number, self.log_safe_text(item),
-                self.log_safe_text(category))
-            self.speak_wait(u"已将%s放入%s" % (item, category))
-        return observation
+        self.scan_production_point(leg_index, start_number, end_number, label)
 
     def new_target_guard_monitor(self, target_number):
         """Start a new guard epoch; old scans may not affect a new target."""
         target_number = int(target_number)
-        guard_enabled = target_number in self.target_guard_points
-        if not guard_enabled:
-            # The four-point static guard is defined only for inner production
-            # cells.  Perimeter fallback cells keep the normal task safety
-            # gate and move_base obstacle layers, but cannot be projected onto
-            # non-existent middle-line endpoint labels.
-            rospy.logwarn(
-                "PRODUCTION_TARGET_GUARD_UNAVAILABLE target=%d "
-                "using navigation safety layers", target_number)
+        if target_number not in self.target_guard_points:
+            raise MissionAbort("target %d has no guard point mapping" %
+                               target_number)
         with self.lock:
             sequence = self.target_guard_scan_sequence
         return {
             "target_number": target_number,
-            "guard_enabled": guard_enabled,
             "last_sequence": sequence,
             "usable_scan_seen": False,
             "clean_scan_seen": False,
@@ -3019,8 +1628,6 @@ class ProductionTask2026(object):
 
     def poll_target_guard(self, monitor):
         """Return a confirmed guard number from one distinct dynamic scan."""
-        if not monitor.get("guard_enabled", True):
-            return None
         with self.lock:
             scan = self.latest_target_guard_scan
             receipt = self.latest_target_guard_scan_receipt
@@ -3097,8 +1704,6 @@ class ProductionTask2026(object):
 
     def target_guard_scan_expired(self, monitor):
         """True if navigation lost the last TF-projected guard scan."""
-        if not monitor.get("guard_enabled", True):
-            return False
         last_usable_receipt = monitor.get("last_usable_receipt")
         if last_usable_receipt is None:
             return True
@@ -3108,8 +1713,6 @@ class ProductionTask2026(object):
 
     def wait_for_target_guard_precheck(self, monitor):
         """Use fresh pre-goal evidence without delaying a clean target leg."""
-        if not monitor.get("guard_enabled", True):
-            return None
         deadline = (
             rospy.Time.now() +
             rospy.Duration(self.target_guard_precheck_timeout))
@@ -3136,18 +1739,19 @@ class ProductionTask2026(object):
 
     def record_target_guard_skip(
             self, leg_index, start_number, end_number, guard_number, phase,
-            monitor, route_name="primary", next_target_number=None):
+            monitor):
         """Audit a guard decision before the outer route advances one leg."""
+        next_target = (
+            self.production_navigation_legs[leg_index][1]
+            if leg_index < len(self.production_navigation_legs) else None)
         stamp = monitor.get("last_scan_stamp")
         event = {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "target_point_number": int(end_number),
             "guard_point_number": int(guard_number),
             "guard_point_numbers": sorted(self.target_guard_points[end_number]),
-            "route_name": str(route_name),
             "segment_index": int(leg_index),
             "segment_start_point_number": int(start_number),
-            "next_target_point_number": next_target_number,
             "phase": str(phase),
             "scan_match_error_m": float(
                 monitor["last_errors"].get(guard_number, float("inf"))),
@@ -3159,63 +1763,34 @@ class ProductionTask2026(object):
             "target_point_number": int(end_number),
             "outcome": "target_guard_skipped",
             "guard_point_number": int(guard_number),
-            "route_name": str(route_name),
             "phase": str(phase),
         })
         self.publish_state(
             "TARGET_GUARD_SKIP_%03d_%03d" % (end_number, guard_number))
         rospy.logwarn(
-            "PRODUCTION_TARGET_GUARD_SKIP route=%s target=%d guard_point=%d "
+            "PRODUCTION_TARGET_GUARD_SKIP target=%d guard_point=%d "
             "phase=%s next_target=%s",
-            route_name, end_number, guard_number, phase,
-            (str(next_target_number)
-             if next_target_number is not None else "none"))
+            end_number, guard_number, phase,
+            str(next_target) if next_target is not None else "none")
         self.save_observation_summary()
 
     def scan_production_point(
-            self, leg_index, start_number, point_number, target_label,
-            target_category=None, record_categories=None):
-        """Complete one stationary 360-degree scan and record new classes.
-
-        ``record_categories`` limits which categories may be persisted.  The
-        optional ``target_category`` is the category that stops the scan and
-        its enclosing cruise; other recordable categories continue scanning.
-        A (category, wall_point_number) pair already in served_wall_points is
-        never recorded again, so a category can be stopped at once per wall.
-        """
+            self, leg_index, start_number, point_number, target_label):
+        """Complete one stationary 360-degree scan and record new classes."""
         scan_label = "PRODUCTION_OCR_TURN_%03d" % point_number
         self.publish_state(scan_label)
         if self.use_ros_camera_for_ocr:
             self.start_ros_camera_and_wait(scan_label)
         try:
+            recorded_categories = set(
+                item["processing_category"]
+                for item in select_three_processing_observations(
+                    self.observations))
+
             def handle_candidate(response, turn_progress):
                 detection = response["detection"]
                 category = normalize_production_category(detection.get("text"))
-                if category is None:
-                    return False
-                if (record_categories is not None and
-                        category not in record_categories):
-                    rospy.loginfo(
-                        "PRODUCTION_CATEGORY_IGNORED category=%s "
-                        "record_categories=%s route_point=%d",
-                        category.encode("utf-8"),
-                        self.log_safe_text(sorted(record_categories)),
-                        point_number)
-                    return False
-                # A category already recorded during this cruise (first pass
-                # pre-record of the simulation category) must not trigger the
-                # full stop/align/range cycle again: that repeated the same
-                # wall point forever at route point 13 / wall 448 and never
-                # advanced the turn.  Skip such candidates and keep turning.
-                # (2026-08-11: ALREADY_SERVED infinite turn loop fix, round 2.)
-                if (category != target_category and
-                        self.production_category_recorded(category)):
-                    rospy.loginfo(
-                        "PRODUCTION_CATEGORY_SKIP_RECORDED category=%s "
-                        "route_point=%d text=%s",
-                        category.encode("utf-8"), point_number,
-                        json.dumps(detection.get("text"),
-                                   ensure_ascii=True))
+                if category is None or category in recorded_categories:
                     return False
                 self.stop_motion()
                 self.wait_for_chassis_stop(scan_label + " candidate")
@@ -3249,76 +1824,23 @@ class ProductionTask2026(object):
                     "observation_aligned": bool(observation["aligned"]),
                     "wall_point_number": observation.get("wall_point_number"),
                 }
-                if (observation["aligned"] and
-                        observation.get("wall_point_number") is not None):
-                    served_key = (
-                        category, observation["wall_point_number"])
-                    if served_key in self.served_wall_points:
-                        # First pass pre-records the simulation category
-                        # (seen while hunting the real category) into
-                        # served_wall_points without stopping.  When the
-                        # second pass returns to the same wall hunting that
-                        # category, the pre-record must not block the real
-                        # stop; re-record it as the current target stop.
-                        # (2026-08-11: infinite ALREADY_SERVED turn loop at
-                        # route point 13 / wall 448 was fixed this way.)
-                        if category == target_category:
-                            if not any(
-                                    existing.get("processing_category") ==
-                                    category and
-                                    existing.get("wall_point_number") ==
-                                    observation["wall_point_number"]
-                                    for existing in self.observations):
-                                self.observations.append(observation)
-                            self._ocr_turn_stop_flag = True
-                            event["outcome"] = (
-                                "processing_category_recorded")
-                            rospy.loginfo(
-                                "PRODUCTION_CATEGORY_RECORDED category=%s "
-                                "route_point=%d wall_point=%d "
-                                "coordinate=(%.3f,%.3f) text=%s "
-                                "(second-pass stop overriding pre-record)",
-                                category.encode("utf-8"), point_number,
-                                observation["wall_point_number"],
-                                observation["wall_point_coordinate"][0],
-                                observation["wall_point_coordinate"][1],
-                                json.dumps(
-                                    observation["text"], ensure_ascii=True))
-                        else:
-                            event["outcome"] = (
-                                "processing_category_already_served")
-                            rospy.loginfo(
-                                "PRODUCTION_CATEGORY_ALREADY_SERVED "
-                                "category=%s wall_point=%d route_point=%d",
-                                category.encode("utf-8"),
-                                observation["wall_point_number"],
-                                point_number)
-                    else:
-                        self.served_wall_points.add(served_key)
-                        self.observations.append(observation)
-                        # During the first pass, a simulation category may be
-                        # recorded before the real category.  Keep turning in
-                        # that case so the real location can still be found;
-                        # its physical announcement remains first.
-                        if (target_category is None or
-                                category == target_category):
-                            self._ocr_turn_stop_flag = True
-                        event["outcome"] = "processing_category_recorded"
-                        rospy.loginfo(
-                            "PRODUCTION_CATEGORY_RECORDED category=%s "
-                            "route_point=%d wall_point=%d "
-                            "coordinate=(%.3f,%.3f) text=%s",
-                            category.encode("utf-8"), point_number,
-                            observation["wall_point_number"],
-                            observation["wall_point_coordinate"][0],
-                            observation["wall_point_coordinate"][1],
-                            json.dumps(
-                                observation["text"], ensure_ascii=True))
+                if observation["aligned"] and observation.get("wall_point_number") is not None:
+                    recorded_categories.add(category)
+                    self.observations.append(observation)
+                    event["outcome"] = "processing_category_recorded"
+                    rospy.loginfo(
+                        "PRODUCTION_CATEGORY_RECORDED category=%s route_point=%d "
+                        "wall_point=%d coordinate=(%.3f,%.3f) text=%s",
+                        category.encode("utf-8"), point_number,
+                        observation["wall_point_number"],
+                        observation["wall_point_coordinate"][0],
+                        observation["wall_point_coordinate"][1],
+                        json.dumps(observation["text"], ensure_ascii=True))
                 else:
                     event["outcome"] = "processing_category_rejected"
                     rospy.logwarn(
-                        "PRODUCTION_CATEGORY_REJECTED category=%s "
-                        "route_point=%d aligned=%s range_residual=%s",
+                        "PRODUCTION_CATEGORY_REJECTED category=%s route_point=%d "
+                        "aligned=%s range_residual=%s",
                         category.encode("utf-8"), point_number,
                         observation["aligned"],
                         str(observation.get("range_residual_m")))
@@ -3329,7 +1851,6 @@ class ProductionTask2026(object):
                 # remaining revolution covers fresh wall angles.
                 return True
 
-            self._ocr_turn_stop_flag = False
             _response, turn_progress = self.rotate_full_revolution_for_ocr(
                 scan_label, candidate_handler=handle_candidate)
             event = {
@@ -3344,8 +1865,8 @@ class ProductionTask2026(object):
             self.save_observation_summary()
             rospy.loginfo(
                 "PRODUCTION_OCR_TURN_COMPLETE target=%d progress=%.3f "
-                "served_wall_points=%d",
-                point_number, turn_progress, len(self.served_wall_points))
+                "categories=%d",
+                point_number, turn_progress, len(recorded_categories))
             return None
         finally:
             if self.use_ros_camera_for_ocr:
@@ -3425,11 +1946,6 @@ class ProductionTask2026(object):
                             label + " candidate resume")
                         if not handled:
                             self.discard_unmatched_motion_frame(response)
-                        if self._ocr_turn_stop_flag:
-                            self.stop_motion()
-                            self.wait_for_chassis_stop(
-                                label + " target category found")
-                            return response, progress
                     else:
                         self.discard_unmatched_motion_frame(response)
                     next_capture = (
@@ -3458,8 +1974,6 @@ class ProductionTask2026(object):
                             deadline += rospy.Time.now() - paused_at
                             if not handled:
                                 self.discard_unmatched_motion_frame(response)
-                            if self._ocr_turn_stop_flag:
-                                return response, progress
                         else:
                             self.discard_unmatched_motion_frame(response)
                     rospy.loginfo(
@@ -3711,14 +2225,12 @@ class ProductionTask2026(object):
     def observe_wall(
             self, route_point_number, observation_label=None,
             candidate_wall_points=None):
-        """Continuously OCR-align, then range and match after a full stop."""
+        """Capture, OCR-align, range, and match after a proven full stop."""
         if observation_label is None:
             observation_label = "point_%03d" % route_point_number
         self.stop_motion()
-        self.wait_for_chassis_stop(observation_label + " alignment start")
         previous_error = None
         previous_capture_time = None
-        alignment_speed = None
         divergence_count = 0
         best_detection = None
         best_path = ""
@@ -3728,11 +2240,7 @@ class ProductionTask2026(object):
 
         for attempt in range(1, self.ocr_alignment_attempts + 1):
             self.require_safe()
-            if alignment_speed is None:
-                response = self.capture_ocr(observation_label, attempt)
-            else:
-                response = self.capture_ocr_while_turning(
-                    alignment_speed, observation_label, attempt)
+            response = self.capture_ocr(observation_label, attempt)
             # Python 2.7 on the vehicle has no time.monotonic().  The PD
             # derivative only needs elapsed time between adjacent parked
             # captures; ROS wall time is sufficient and Python 2-compatible.
@@ -3742,12 +2250,6 @@ class ProductionTask2026(object):
             image_width = int(response["width"])
             detection = response.get("detection")
             if detection is None:
-                # We cannot steer safely without a current text box.  Return
-                # to a stationary capture before the next attempt.
-                self.stop_motion()
-                self.wait_for_chassis_stop(
-                    observation_label + " OCR empty")
-                alignment_speed = None
                 rospy.logwarn(
                     "PRODUCTION_OCR_EMPTY point=%d attempt=%d/%d",
                     route_point_number, attempt,
@@ -3764,9 +2266,6 @@ class ProductionTask2026(object):
                 detection["confidence"], error)
             if abs(error) <= self.ocr_alignment_tolerance_px:
                 aligned = True
-                self.stop_motion()
-                self.wait_for_chassis_stop(
-                    observation_label + " OCR aligned")
                 break
             if (previous_error is not None and
                     abs(error) > abs(previous_error) * 1.35):
@@ -3781,17 +2280,8 @@ class ProductionTask2026(object):
             elapsed = (
                 capture_time - previous_capture_time
                 if previous_capture_time is not None else None)
-            alignment_speed = alignment_angular_speed(
-                error, self.ocr_alignment_kp, self.ocr_alignment_kd,
-                self.ocr_alignment_max_speed, self.camera_mirror,
-                previous_error, elapsed)
-            if abs(alignment_speed) < self.ocr_alignment_min_speed:
-                alignment_speed = self.ocr_alignment_min_speed * (
-                    1.0 if alignment_speed >= 0.0 else -1.0)
-            rospy.loginfo(
-                "PRODUCTION_OCR_ALIGNMENT_CONTINUOUS point=%d "
-                "attempt=%d speed=%.3f error_px=%.1f",
-                route_point_number, attempt, alignment_speed, error)
+            self.rotate_for_pixel_error(
+                error, observation_label, previous_error, elapsed)
             previous_error = error
             previous_capture_time = capture_time
 
@@ -3809,9 +2299,6 @@ class ProductionTask2026(object):
                 list(best_detection["bbox"]) if best_detection else []),
         }
         if not aligned:
-            self.stop_motion()
-            self.wait_for_chassis_stop(
-                observation_label + " OCR alignment incomplete")
             rospy.logwarn(
                 "PRODUCTION_OCR_NOT_ALIGNED point=%d text=%s",
                 route_point_number,
@@ -3883,28 +2370,15 @@ class ProductionTask2026(object):
         frame = scan.header.frame_id
         if not frame:
             raise MissionAbort("front scan has no frame_id")
-        # A fresh scan stamp may briefly outrun the TF clock (observed ~9 ms
-        # jitter on the real vehicle).  Retry that transient extrapolation
-        # instead of aborting; any other TF failure stays fatal.
-        retry_deadline = time.time() + self.tf_lookup_retry_seconds
-        while True:
-            try:
-                translation, rotation = self.tf_listener.lookupTransform(
-                    "map", frame, scan.header.stamp)
-                yaw = tf.transformations.euler_from_quaternion(rotation)[2]
-                return translation[0], translation[1], yaw
-            except tf.ExtrapolationException:
-                if time.time() >= retry_deadline:
-                    raise MissionAbort(
-                        "map pose for lidar frame %s at scan stamp "
-                        "unavailable after %.1f s: %s" %
-                        (frame, self.tf_lookup_retry_seconds,
-                         "TF still extrapolating into the future"))
-                time.sleep(0.01)
-            except tf.Exception as exc:
-                raise MissionAbort(
-                    "map pose for lidar frame %s at scan stamp unavailable: %s" %
-                    (frame, exc))
+        try:
+            translation, rotation = self.tf_listener.lookupTransform(
+                "map", frame, scan.header.stamp)
+            yaw = tf.transformations.euler_from_quaternion(rotation)[2]
+            return translation[0], translation[1], yaw
+        except tf.Exception as exc:
+            raise MissionAbort(
+                "map pose for lidar frame %s at scan stamp unavailable: %s" %
+                (frame, exc))
 
     def save_observation_summary(self):
         if self.run_directory is None:
@@ -3912,22 +2386,12 @@ class ProductionTask2026(object):
         payload = {
             "route": self.production_route_numbers,
             "target_legs": self.production_navigation_legs,
-            "fallback_route": getattr(
-                self, "fallback_production_route_numbers", []),
-            "fallback_target_legs": getattr(
-                self, "fallback_navigation_legs", []),
             "target_guard_points": dict(
                 (str(number), sorted(points))
                 for number, points in self.target_guard_points.items()),
             "target_guard_events": self.target_guard_events,
             "target_scan_events": self.target_scan_events,
             "observations": self.observations,
-            "items": [self.expected_real_item_text,
-                      self.expected_sim_item_text],
-            "categories": {
-                self.expected_real_item_text: self.expected_real_category,
-                self.expected_sim_item_text: self.expected_sim_category,
-            },
             "qr_classifications": self.qr_classifications,
             "recognized_categories": select_three_processing_observations(
                 self.observations),
@@ -4240,15 +2704,7 @@ class ProductionTask2026(object):
             (label, self.plan_timeout))
 
     def rotate_full_revolution(
-            self, label, speed, stop_for_qr, qr_baseline,
-            qr_accept=None, qr_observation_number=None):
-        """In-place full revolution with an optional QR stop condition.
-
-        Used as the QR scan fallback: after a face waits qr_search_timeout
-        without an accepted code, the vehicle turns one full revolution;
-        fresh codes are accepted while turning (stop_for_qr + qr_accept
-        filter, used_qr_codes dedup preserved).
-        """
+            self, label, speed, stop_for_qr, qr_baseline):
         self.move_base.cancel_all_goals()
         self.stop_motion()
         self.require_safe()
@@ -4269,14 +2725,11 @@ class ProductionTask2026(object):
             if stop_for_qr:
                 detected = self.fresh_qr_after(qr_baseline)
                 if detected is not None:
-                    if qr_accept is None or qr_accept(detected):
-                        self.stop_motion()
-                        rospy.loginfo(
-                            "PRODUCTION_TASK_TURN_QR label=%s "
-                            "progress=%.3f value=%s",
-                            label, progress, self.log_safe_text(detected))
-                        return detected
-                    self._reject_qr_code(detected, qr_observation_number)
+                    self.stop_motion()
+                    rospy.loginfo(
+                        "PRODUCTION_TASK_TURN_QR label=%s progress=%.3f "
+                        "value=%s", label, progress, detected)
+                    return detected
 
             current_yaw = self.current_odom_yaw(label)
             progress += positive_turn_increment(
@@ -4325,10 +2778,6 @@ class ProductionTask2026(object):
             pass
         try:
             self.stop_qr_classifier()
-        except Exception:
-            pass
-        try:
-            self.stop_voice_listener()
         except Exception:
             pass
         try:

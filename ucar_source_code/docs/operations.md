@@ -15,6 +15,9 @@
 bash ~/ucar_ws/src/ucar_2026/scripts/start_2026.sh <电脑LAN_IP> mission
 ```
 
+`mission` 模式会在启动时对 `<电脑LAN_IP>:11313` 做 TCP 预检，不可达会提示原因并报错退出
+（详见 [NETWORK_CONFIGURATION.md 故障排查](../rosmaster/NETWORK_CONFIGURATION.md)）。
+
 脚本动态选择小车 `ROS_IP`，启动小车本机 `roscore` 并前台监管；任务退出或用下列命令
 停止时不会遗留 Master：
 
@@ -1739,8 +1742,14 @@ roslaunch yolo2025 2026.launch full_task_enabled:=true
   生产路线和 OCR 复拍导航均锁定在这一模式；
 - `mode2_body_projection/*`：真实车体实验和手工回退模式；当前自动任务不会发布它。
 
-当前前视点回退沿用 `mode1_point` 已有速度，未借此改动速度参数。若以后明确要调整
-自动任务速度，应调整模式 1 的 `max_vel_x`、`max_vel_theta`，并重新验证门洞；模式 2 的
+当前前视点回退沿用 `mode1_point` 已有速度。2026-08-15 起（三参数试跑，
+详见 `docs/changes/2026-08-15-replan-once-turn-slowdown-final-yaw-only.md`）：
+`mode1_point.heading_slowdown_min_scale=0.00` 让线速度按 `cos²(航向误差)` 缩放，
+换路后大角度对准先转向、基本不前进；`mode1_point.final_linear_x_gain=0.0` 让
+终点阶段（距目标 < 0.05 m）只调朝向、不做前后位置修正；
+`move_base_params.yaml` 的 `planner_frequency=0.0` 关闭周期性全局重规划，只在
+CymPlanner 前视判障失败时事件驱动重规划。若以后明确要调整自动任务速度，应调整
+模式 1 的 `max_vel_x`、`max_vel_theta`，并重新验证门洞；模式 2 的
 `heading_slowdown_min_scale` 与 `command_sweep_*` 不在当前自动任务控制链上。YAML 修改后
 必须重启 move_base 才会加载。
 `command_sweep_time` 和 `command_sweep_step` 控制候选 Twist 的未来车体扫掠，
@@ -2241,9 +2250,11 @@ catkin_test_results --verbose build/test_results/ucar_2026
   仓库中作为旧版本记录，主流程不再调用它。
 - lane_proto 只能以 Melodic Python2 运行（其 `cv_bridge_boost` 是 Python2 二进制）。launch
   已强制使用 `run_melodic_python2.sh`；不要通过默认 `python` 直接执行 `lane_follow.py`。
-- 若看到 Python2 `logging` 栈停在 `record.getMessage` / `msg = msg % self.args`，确认启动的是
-  已部署的 lane_follow；该版本会先在节点内完成 UTF-8 日志格式化。重启**下一次** lane_follow
-  即可生效，不要手工改用 Python3。
+- 若看到 Python2 `logging` 栈停在 `record.getMessage` / `msg = msg % self.args`
+  （`UnicodeDecodeError: 'ascii' codec can't decode byte 0xe7`），是 `lane_follow.py`
+  丢失了安全日志包装（`format_ros_log` / `lane_loginfo` 等，2026-08-16 已重新恢复并部署）。
+  该包装会在节点内先完成 UTF-8 日志格式化，再交给 rospy；重启**下一次** lane_follow
+  即可生效，不要手工改用 Python3。详见 `docs/changes/2026-08-16-lane-follow-py2-log-unicode.md`。
 - 共享 ROS 相机的性能行会显示图像回调的实际 `cam_fps`；若看到
   `RosFrameGrabber ... has no attribute 'cam_fps'`，说明仍是 2026-08-14 前的旧脚本，更新后
   随下一次 lane_follow 启动加载即可，无需以重启整个主流程来处理该属性错误。
