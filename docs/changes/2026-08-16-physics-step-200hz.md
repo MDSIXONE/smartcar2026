@@ -37,8 +37,14 @@
   （含新的 `test_world_uses_200hz_physics_step`）。
 - `test_grasp_attach_state.py` 的 world 哈希已按测试归一化规则重算并更新
   （模型相关断言不受影响；该文件需在 WSL ROS 环境运行完整验证）。
-- 尚未实跑 Gazebo；预期实时率从约 0.25 提升到接近 1，实跑后需观察
-  碰撞/接触稳定性与抓取效果。
+- WSL 部署（`/home/car/smartcar2026-simulation`）实跑 `task3_prepare.launch`
+  （GUI + RViz + 导航全负载）验证：
+  - 21 项回归测试全部通过（test_task3_realtime_budget + test_grasp_attach_state）；
+  - `/clock` 实测发布频率 **200.000 Hz**，即实时率 RTF ≈ **1.0**
+    （官方 1000 Hz 参数下本机 RTF 约 0.25，仿真时间慢 4 倍的问题消除）；
+  - 机械臂初始姿态平滑到位（2 阶段，约 6.9 仿真秒），`/odom` 正常发布；
+  - 启动日志无新增错误（既有 `cannot set gravity on car3::arm_link6`
+    警告为历史行为，不影响任务）。
 
 ## 已知限制
 
