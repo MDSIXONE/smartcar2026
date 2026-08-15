@@ -873,6 +873,9 @@ class ProductionTask2026(object):
                 self.move_base_ready_timeout)
         self.wait_for_safe_start()
         self.switch_to_point_mode()
+        # The Spark QR classifier writes into result_directory during the QR
+        # phase; create it before any classification (also covers resume).
+        self.prepare_result_directory()
 
         if self.resume_production_only:
             if input_mode == "voice":
@@ -968,7 +971,6 @@ class ProductionTask2026(object):
             self.announce_item_destinations(
                 real_item, real_category, sim_item, sim_category)
 
-        self.prepare_result_directory()
         if self.use_ros_camera_for_ocr:
             self.publish_state("OPEN_ROS_IMAGE_OCR")
             rospy.loginfo(
@@ -2124,8 +2126,7 @@ class ProductionTask2026(object):
     def announce_qr_collection(self, real_item, sim_item):
         """Confirm the complete QR collection before leaving the QR area."""
         self.publish_state("QR_ITEMS_ANNOUNCE")
-        self.speak_wait(
-            u"二维码识别完成，已获取%s和%s" % (real_item, sim_item))
+        # 按用户要求不再播报"二维码识别完成，已获取XX和XX"
 
     def announce_item_destinations(
             self, real_item, real_category, sim_item, sim_category):

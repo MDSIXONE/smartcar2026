@@ -638,6 +638,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.staging_point_number = 52
         self.task.qr_observation_numbers = [262]
         self.task.points = {52: (-1.75, 2.25), 262: (-2.50, 2.25)}
+        self.task.prepare_result_directory = lambda: None
 
         def navigate_to(*_args, **_kwargs):
             events.append("staging_navigation")
@@ -805,7 +806,6 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
             events,
             ["item_input", "safe_start", "point_mode", "STAGING_52",
              "qr_scan", "qr_scan",
-             ("announce", u"二维码识别完成，已获取苹果和手机"),
              ("announce", u"取得*苹果*属于*日用品*应放置在*日用品加工车间"),
              ("announce", u"仿真环境中取得*手机*属于*日用品*应放置在*日用品加工车间"),
              ("navigate", "post-QR waypoint 3"), "ocr_start",
@@ -1654,6 +1654,7 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         self.task.start_ros_camera_and_wait = lambda _context: None
         self.task.qr_enable_pub = QrPublisher()
         self.task.navigate_to = lambda *_args, **_kwargs: None
+        self.task.prepare_result_directory = lambda: None
         self.task.scan_observation_point = (
             lambda _observation_number, _accept_text=None,
                    allow_revolution=True: None)
@@ -1793,7 +1794,6 @@ class ProductionTaskDualItemTest(unittest.TestCase):
 
         self.assertEqual(events, [
             "item_input",
-            ("announce", u"二维码识别完成，已获取苹果和手机"),
             ("announce", u"取得*苹果*属于*日用品*应放置在*日用品加工车间"),
             ("announce", u"仿真环境中取得*手机*属于*电子产品*应放置在*电子产品生产车间"),
             ("nav", 1, 52, 12, u"日用品", set([u"日用品", u"电子产品"])),
