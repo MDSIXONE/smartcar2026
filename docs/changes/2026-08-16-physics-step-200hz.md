@@ -46,8 +46,10 @@
   - 21 项回归测试全部通过（test_task3_realtime_budget + test_grasp_attach_state）；
   - 200 Hz 步长（0.005）阶段实测 `/clock` **200.000 Hz**（RTF ≈ 1.0），
     任务速度过快翻车，经负责人确认改为 0.003 / 200（RTF ≈ 0.6）；
-  - 333 Hz 步长（0.003）阶段 `/clock` 实测约 200.000 Hz、RTF ≈ 0.6，
-    机械臂初始姿态平滑到位，`/odom` 正常发布；
+  - 333 Hz 步长（0.003）阶段：RTF 探针 6 秒窗口实测
+    `clock_rate=190.7 Hz`、**RTF=0.572**（钳制在 0.6 目标附近；启动初期
+    Gazebo 追赶仿真时间时 `/clock` 瞬时可达 333 Hz）；机械臂初始姿态
+    平滑到位，`/odom` 正常发布；
   - 启动日志无新增错误（既有 `cannot set gravity on car3::arm_link6`
     警告为历史行为，不影响任务）。
 
