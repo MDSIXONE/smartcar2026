@@ -114,6 +114,19 @@ class ProductionTask2026(object):
         self.grid_path = rospy.get_param("~grid_path")
         self.staging_point_number = int(
             rospy.get_param("~staging_point_number", 52))
+        self.sprint_enabled = bool(
+            rospy.get_param("~sprint_enabled", False))
+        self.sprint_start_point_number = int(
+            rospy.get_param("~sprint_start_point_number", 70))
+        self.sprint_end_point_number = int(
+            rospy.get_param("~sprint_end_point_number", 288))
+        self.sprint_end_x = rospy.get_param("~sprint_end_x", "")
+        self.sprint_end_y = rospy.get_param("~sprint_end_y", "")
+        self.sprint_end_xy = None
+        if (str(self.sprint_end_x).strip() and
+                str(self.sprint_end_y).strip()):
+            self.sprint_end_xy = (
+                float(self.sprint_end_x), float(self.sprint_end_y))
         self.qr_observation_numbers = [
             int(value) for value in
             rospy.get_param("~qr_observation_numbers", [262, 232, 295])
@@ -525,6 +538,9 @@ class ProductionTask2026(object):
              if self.post_qr_waypoint_number else []) +
             ([self.post_qr_waypoint_heading_point_number]
              if self.post_qr_waypoint_heading_point_number else []))
+        if self.sprint_enabled:
+            all_required_numbers += [self.sprint_start_point_number,
+                                     self.sprint_end_point_number]
         self.points = load_numbered_points(self.grid_path)
         require_points(self.points, all_required_numbers)
         self.production_navigation_legs = [
@@ -895,8 +911,45 @@ class ProductionTask2026(object):
             staging = self.points[self.staging_point_number]
             first_observation = self.points[self.qr_observation_numbers[0]]
             staging_yaw = bearing(staging, first_observation)
-            self.navigate_to(
-                self.staging_point_number, staging_yaw, "STAGING_52")
+            sprint_enabled = bool(getattr(self, "sprint_enabled", False))
+            if sprint_enabled:
+                sprint_start = self.points[self.sprint_start_point_number]
+                if getattr(self, "sprint_end_xy", None) is not None:
+                    sprint_end = self.sprint_end_xy
+                    sprint_end_label = (
+                        "sprint end midpoint (%.3f, %.3f)" % sprint_end)
+                else:
+                    sprint_end = self.points[self.sprint_end_point_number]
+                    sprint_end_label = "sprint end point %d" % (
+                        self.sprint_end_point_number)
+                # 180 deg: after arriving at the start point the chassis
+                # faces the y=1.75 corridor used for the sprint leg.
+                sprint_yaw = math.pi
+                self.publish_state(
+                    "STAGING_%d" % self.sprint_start_point_number)
+                self.navigate_coordinates(
+                    sprint_start[0], sprint_start[1], sprint_yaw,
+                    "sprint start point %d" % self.sprint_start_point_number,
+                    require_plan=True)
+                rospy.loginfo(
+                    "PRODUCTION_SPRINT_LEG %d -> %d yaw=%.3f",
+                    self.sprint_start_point_number,
+                    self.sprint_end_point_number, sprint_yaw)
+                self.publish_state(
+                    "SPRINT_%d_%d" % (
+                        self.sprint_start_point_number,
+                        self.sprint_end_point_number))
+                self.switch_navigation_mode("sprint")
+                self.navigate_coordinates(
+                    sprint_end[0], sprint_end[1], sprint_yaw,
+                    sprint_end_label,
+                    require_plan=True)
+                self.switch_navigation_mode("point")
+                self.navigate_to(
+                    self.staging_point_number, staging_yaw, "STAGING_52")
+            else:
+                self.navigate_to(
+                    self.staging_point_number, staging_yaw, "STAGING_52")
 
             self.publish_state("QR_SEQUENCE")
             self.move_base.cancel_all_goals()
@@ -3944,7 +3997,19 @@ class ProductionTask2026(object):
 
     def switch_to_point_mode(self):
         """Lock all task navigation legs to CymPlanner's front point mode."""
-        self.publish_state("SET_POINT_NAVIGATION_MODE")
+        self.switch_navigation_mode("point")
+
+    def switch_navigation_mode(self, mode):
+        """Switch the CymPlanner parameter set at runtime.
+
+        Supports "point" and "sprint" (the national 70->288 acceleration
+        leg).  The latched command is repeated so delivery is observable and
+        robust to a connection that completed at the edge of the wait loop.
+        """
+        if mode not in ("point", "sprint"):
+            raise TaskDefinitionError(
+                "unsupported navigation mode %r" % mode)
+        self.publish_state("SET_%s_NAVIGATION_MODE" % mode.upper())
         deadline = (
             rospy.Time.now() + rospy.Duration(
                 self.navigation_mode_connect_timeout))
@@ -3956,14 +4021,11 @@ class ProductionTask2026(object):
         if self.navigation_mode_pub.get_num_connections() <= 0:
             raise MissionAbort(
                 "CymPlanner is not connected to /ucar/navigation_mode")
-        # Repeat the latched command so the delivery is observable and robust
-        # to a connection that completed at the edge of the wait loop.
         for _index in range(3):
-            self.navigation_mode_pub.publish(
-                String(data="point"))
+            self.navigation_mode_pub.publish(String(data=mode))
             rospy.sleep(0.1)
         rospy.loginfo(
-            "PRODUCTION_TASK navigation mode locked to point for all legs")
+            "PRODUCTION_TASK navigation mode switched to %s", mode)
 
     def wait_for_safe_start(self):
         deadline = rospy.Time.now() + rospy.Duration(self.safe_start_timeout)

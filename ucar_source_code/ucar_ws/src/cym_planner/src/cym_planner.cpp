@@ -118,7 +118,7 @@ cym_planner::PlannerTuning pointDefaults()
     tuning.max_vel_theta = 1.0;
     tuning.final_yaw_gain = 2.0;
     tuning.final_yaw_max_vel = 1.0;
-    tuning.final_yaw_tolerance = 0.10;
+    tuning.final_yaw_tolerance = 0.05;
     tuning.final_linear_x_gain = 1.0;
     tuning.obstacle_lookahead_distance = 0.25;
     tuning.obstacle_cost_threshold = 253;
@@ -148,6 +148,30 @@ cym_planner::PlannerTuning bodyProjectionDefaults()
     tuning.heading_slowdown_min_scale = 0.15;
     tuning.command_sweep_time = 0.40;
     tuning.command_sweep_step = 0.025;
+    return tuning;
+}
+
+cym_planner::PlannerTuning sprintDefaults()
+{
+    cym_planner::PlannerTuning tuning;
+    tuning.linear_x_gain = 5.0;
+    tuning.linear_x_kd = 0.5;
+    tuning.angular_gain = 10.0;
+    tuning.angular_kd = 0.4;
+    tuning.max_vel_x = 1.20;
+    tuning.max_vel_theta = 0.80;
+    tuning.final_yaw_gain = 2.0;
+    tuning.final_yaw_max_vel = 1.0;
+    tuning.final_yaw_tolerance = 0.05;
+    tuning.final_linear_x_gain = 0.6;
+    tuning.obstacle_lookahead_distance = 0.25;
+    tuning.obstacle_cost_threshold = 253;
+    tuning.carry_speed_scale = 1.0;
+    tuning.heading_slowdown_min_scale = 0.0;
+    tuning.command_sweep_time = 0.0;
+    tuning.command_sweep_step = 0.025;
+    tuning.approach_decel_distance = 1.0;
+    tuning.approach_min_vel_x = 0.12;
     return tuning;
 }
 
@@ -216,6 +240,14 @@ void readTuning(
                      prefix + "/command_sweep_step",
                      tuning.command_sweep_step,
                      defaults.command_sweep_step);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/approach_decel_distance",
+                     tuning.approach_decel_distance,
+                     defaults.approach_decel_distance);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/approach_min_vel_x",
+                     tuning.approach_min_vel_x,
+                     defaults.approach_min_vel_x);
 }
 
 void sanitizeTuning(cym_planner::PlannerTuning& tuning)
@@ -255,6 +287,10 @@ void sanitizeTuning(cym_planner::PlannerTuning& tuning)
     }
     tuning.command_sweep_step =
         clampValue(tuning.command_sweep_step, 0.005, 0.05);
+    tuning.approach_decel_distance =
+        clampValue(tuning.approach_decel_distance, 0.0, 2.0);
+    tuning.approach_min_vel_x =
+        clampValue(tuning.approach_min_vel_x, 0.0, 1.0);
 }
 
 }  // namespace
@@ -283,6 +319,7 @@ CymPlanner::CymPlanner()
       goal_reached_(false),
       carry_mode_(false),
       body_projection_enabled_(false),
+      sprint_enabled_(false),
       elastic_active_(false),
       elastic_end_plan_index_(-1),
       elastic_last_side_(0),
@@ -341,8 +378,12 @@ void CymPlanner::initialize(std::string name, tf2_ros::Buffer* /* tf */,
         planner_nh, canonical_nh, legacy_nh,
         "mode2_body_projection", bodyProjectionDefaults(),
         body_projection_tuning_);
+    readTuning(
+        planner_nh, canonical_nh, legacy_nh,
+        "mode3_sprint", sprintDefaults(), sprint_tuning_);
     sanitizeTuning(point_tuning_);
     sanitizeTuning(body_projection_tuning_);
+    sanitizeTuning(sprint_tuning_);
     if(body_projection_tuning_.command_sweep_time <= 0.0)
     {
         ROS_ERROR(
@@ -458,6 +499,8 @@ void CymPlanner::initialize(std::string name, tf2_ros::Buffer* /* tf */,
         escape_enabled_ ? "enabled" : "disabled",
         elastic_enabled_ ? "enabled" : "disabled",
         elastic_max_lateral_offset_);
+    ROS_WARN("cym_planner mode3 sprint max %.2f m/s %.2f rad/s",
+             sprint_tuning_.max_vel_x, sprint_tuning_.max_vel_theta);
 }
 
 void CymPlanner::carryModeCallback(const std_msgs::Bool::ConstPtr& message)
@@ -480,26 +523,36 @@ void CymPlanner::navigationModeCallback(const std_msgs::String::ConstPtr& messag
                    });
 
     bool requested_body_mode = body_projection_enabled_;
+    bool requested_sprint_mode = sprint_enabled_;
     if(mode == "body" || mode == "body_projection" || mode == "footprint" ||
        mode == "laser_avoidance")
     {
         requested_body_mode = true;
+        requested_sprint_mode = false;
     }
     else if(mode == "point" || mode == "path_point" || mode == "direct_line" ||
             mode == "main" || mode == "main_legacy")
     {
         requested_body_mode = false;
+        requested_sprint_mode = false;
+    }
+    else if(mode == "sprint" || mode == "fast")
+    {
+        requested_body_mode = false;
+        requested_sprint_mode = true;
     }
     else
     {
         ROS_WARN("cym_planner: unsupported navigation mode '%s'; "
-                 "use point or body_projection", message->data.c_str());
+                 "use point, body_projection or sprint", message->data.c_str());
         return;
     }
 
-    if(requested_body_mode == body_projection_enabled_)
+    if(requested_body_mode == body_projection_enabled_ &&
+       requested_sprint_mode == sprint_enabled_)
         return;
     body_projection_enabled_ = requested_body_mode;
+    sprint_enabled_ = requested_sprint_mode;
     resetControllerState();
     resetEscapeRecovery();
     clearElasticPlan();
@@ -508,8 +561,9 @@ void CymPlanner::navigationModeCallback(const std_msgs::String::ConstPtr& messag
     ROS_WARN(
         "cym_planner switched to %s | linear P/D %.2f/%.2f "
         "angular P/D %.2f/%.2f max %.2f m/s %.2f rad/s",
-        body_projection_enabled_ ?
-            "mode2_body_projection" : "mode1_point",
+        sprint_enabled_ ? "mode3_sprint" :
+            (body_projection_enabled_ ?
+                "mode2_body_projection" : "mode1_point"),
         tuning.linear_x_gain, tuning.linear_x_kd,
         tuning.angular_gain, tuning.angular_kd,
         tuning.max_vel_x, tuning.max_vel_theta);
@@ -527,6 +581,8 @@ void CymPlanner::resetControllerState()
 
 const PlannerTuning& CymPlanner::activeTuning() const
 {
+    if(sprint_enabled_)
+        return sprint_tuning_;
     return selectPlannerTuning(
         body_projection_enabled_,
         point_tuning_,
@@ -1766,9 +1822,19 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     linear_derivative_initialized_ = true;
     const double turn_speed_scale = headingSpeedScale(
         heading_error, tuning.heading_slowdown_min_scale);
+    double approach_max_vel = tuning.max_vel_x;
+    if(tuning.approach_decel_distance > 0.0 &&
+       std::isfinite(final_distance) &&
+       final_distance < tuning.approach_decel_distance)
+    {
+        const double scale = std::max(
+            0.0, final_distance / tuning.approach_decel_distance);
+        approach_max_vel = std::max(
+            tuning.approach_min_vel_x, tuning.max_vel_x * scale);
+    }
     const double maximum_linear_velocity =
-        (elastic_active_ ? std::min(tuning.max_vel_x, elastic_max_vel_x_) :
-         tuning.max_vel_x) * motion_scale;
+        (elastic_active_ ? std::min(approach_max_vel, elastic_max_vel_x_) :
+         approach_max_vel) * motion_scale;
     cmd_vel.linear.x = clampValue(
         (linear_error * tuning.linear_x_gain +
          linear_derivative * tuning.linear_x_kd) *

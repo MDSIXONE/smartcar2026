@@ -39,7 +39,9 @@ struct PlannerTuning
           carry_speed_scale(1.0),
           heading_slowdown_min_scale(1.0),
           command_sweep_time(0.0),
-          command_sweep_step(0.025)
+          command_sweep_step(0.025),
+          approach_decel_distance(0.0),
+          approach_min_vel_x(0.0)
     {
     }
 
@@ -59,6 +61,8 @@ struct PlannerTuning
     double heading_slowdown_min_scale;
     double command_sweep_time;
     double command_sweep_step;
+    double approach_decel_distance;
+    double approach_min_vel_x;
 };
 
 inline const PlannerTuning& selectPlannerTuning(

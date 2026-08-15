@@ -13,6 +13,9 @@ cym_planner/CymPlanner:
   #   按 cos²(航向误差) 缩放，换路后大角度对准先转向、基本不前进；
   #   final_linear_x_gain 1.0→0.0 —— 终点阶段只对准朝向，不做前后位置
   #   修正，消除墙边定点来回调整。
+  # 2026-08-16（国赛 sprint 调参）：final_yaw_tolerance 0.15→0.05 ——
+  #   到达点（含起点→70 的 180° 朝向）后朝向容差严格到 ±2.9°，
+  #   保证冲刺出发时车头正对 y=1.75 走廊。
   mode1_point:
     linear_x_gain: 1.5
     linear_x_kd: 0.5
@@ -25,7 +28,7 @@ cym_planner/CymPlanner:
     command_sweep_step: 0.025
     final_yaw_gain: 2.0
     final_yaw_max_vel: 1.00
-    final_yaw_tolerance: 0.15
+    final_yaw_tolerance: 0.05
     final_linear_x_gain: 0.0
     obstacle_lookahead_distance: 0.25
     obstacle_cost_threshold: 253
@@ -48,6 +51,47 @@ cym_planner/CymPlanner:
     final_yaw_gain: 1.5
     final_yaw_max_vel: 0.25
     final_yaw_tolerance: 0.10
+    final_linear_x_gain: 0.6
+    obstacle_lookahead_distance: 0.25
+    obstacle_cost_threshold: 253
+    carry_speed_scale: 1.0
+
+  # 模式 3：sprint —— 国赛"起点→52"途中 70→288 加速段专用参数集。
+  # 点模式稳态速度 = 前视距离(0.20m) × linear_x_gain；2026-08-16 实车：
+  # 先翻倍 max_vel_x（0.60→1.20）仍慢，根因是 gain 1.5 时稳态只有 ~0.3 m/s
+  # （max_vel_x 只是上限，PD 输出顶不到）。把 linear_x_gain 提为 5.0，
+  # 稳态 ≈1.0 m/s，接近 1.20 上限。其余保持点模式语义（终点只对朝向、
+  # 无命令扫掠、保留前视判障）。需要更快/更慢只改本段 linear_x_gain 与
+  # max_vel_x。任务节点在 70→288 段经 /ucar/navigation_mode 发布
+  # "sprint" 切换，到达 288 后切回 "point"。
+  # 2026-08-16：航向环 P 翻倍（angular_gain 2.5→5.0），直线段航向收敛
+  #   更快，速度不因 cos² 缩放掉；final_yaw_tolerance 0.15→0.05，
+  #   到达 288 时朝向同样严格（与 mode1_point 一致）。
+  # 2026-08-16（第三轮）：航向环 P 再翻倍（angular_gain 5.0→10.0），
+  #   角速度输出仍受 max_vel_theta 0.80 钳制，只加快小角度误差收敛。
+  # 2026-08-16（第四轮）：冲刺终点提前到坡顶中点 (0.875, 1.75)（由任务
+  #   节点 sprint_end_x/y 指定），新增接近目标自动减速（approach_decel
+  #   _distance 1.0 m 起速度上限线性压到 approach_min_vel_x 0.12），
+  #   防止 1.0 m/s 冲刺惯性冲过坡顶刹不住；final_linear_x_gain 0.0→0.6
+  #   允许终点阶段位置回拉修正（轻微冲过头时倒回）。
+  mode3_sprint:
+    linear_x_gain: 5.0
+    linear_x_kd: 0.5
+    max_vel_x: 1.20
+    angular_gain: 10.0
+    angular_kd: 0.4
+    max_vel_theta: 0.80
+    heading_slowdown_min_scale: 0.00
+    command_sweep_time: 0.00
+    command_sweep_step: 0.025
+    # 接近目标自动减速：距终点 1.0m 起速度上限线性压到 0.12 m/s，
+    # 防止 1.0 m/s 冲刺惯性冲过坡顶/停车点；final_linear_x_gain 0.6
+    # 允许终点位置回拉修正（轻微冲过头时倒回）。
+    approach_decel_distance: 1.0
+    approach_min_vel_x: 0.12
+    final_yaw_gain: 2.0
+    final_yaw_max_vel: 1.00
+    final_yaw_tolerance: 0.05
     final_linear_x_gain: 0.6
     obstacle_lookahead_distance: 0.25
     obstacle_cost_threshold: 253

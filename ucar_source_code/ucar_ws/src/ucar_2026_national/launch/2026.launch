@@ -180,6 +180,19 @@
             <param name="ocr_helper_ready_timeout" value="90"/>
             <param name="ocr_capture_timeout" value="24"/>
             <param name="staging_point_number" value="52"/>
+            <!-- 国赛：起点→52 拆三段（起点→70→288→52），其中 70→288 为
+                 sprint 加速段，CymPlanner 切换至 mode3_sprint 参数集；
+                 到达 288 后切回 point。sprint_enabled=false 时保持原
+                 起点→52 直航。
+                 冲刺终点默认 288；2026-08-16 第四轮：70→288 之间有坡，
+                 终点提前到坡顶 67 与 290 连线中点 (0.875, 1.75)，
+                 配合 CymPlanner 接近目标自动减速防冲坡。
+                 sprint_end_x/sprint_end_y 非空时优先于编号点。 -->
+            <param name="sprint_enabled" value="true"/>
+            <param name="sprint_start_point_number" value="70"/>
+            <param name="sprint_end_point_number" value="288"/>
+            <param name="sprint_end_x" value="0.875"/>
+            <param name="sprint_end_y" value="1.75"/>
             <rosparam param="qr_observation_numbers">[262, 232, 295]</rosparam>
             <!-- Each target is reached before one OCR search revolution.  A
                  candidate is centred/ranged; once both requested categories
