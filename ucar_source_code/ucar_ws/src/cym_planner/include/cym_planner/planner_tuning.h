@@ -41,7 +41,9 @@ struct PlannerTuning
           command_sweep_time(0.0),
           command_sweep_step(0.025),
           approach_decel_distance(0.0),
-          approach_min_vel_x(0.0)
+          approach_min_vel_x(0.0),
+          lateral_gain(0.0),
+          max_vel_y(0.0)
     {
     }
 
@@ -63,6 +65,8 @@ struct PlannerTuning
     double command_sweep_step;
     double approach_decel_distance;
     double approach_min_vel_x;
+    double lateral_gain;
+    double max_vel_y;
 };
 
 inline const PlannerTuning& selectPlannerTuning(

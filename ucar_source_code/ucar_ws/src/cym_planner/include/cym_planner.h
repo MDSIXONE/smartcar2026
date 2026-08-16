@@ -169,6 +169,7 @@ private:
     bool carry_mode_;
     bool body_projection_enabled_;
     bool sprint_enabled_;
+    bool transverse_enabled_;
     bool elastic_active_;
     int elastic_end_plan_index_;
     int elastic_last_side_;

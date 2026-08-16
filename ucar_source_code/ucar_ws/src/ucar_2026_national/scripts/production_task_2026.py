@@ -127,6 +127,14 @@ class ProductionTask2026(object):
                 str(self.sprint_end_y).strip()):
             self.sprint_end_xy = (
                 float(self.sprint_end_x), float(self.sprint_end_y))
+        # 冲刺段朝向（度）：起点→70 的到达朝向与 70→冲刺终点的运动方向。
+        # 实车 2026-08-16 反馈 180° 偏一点，改 175 微调。
+        self.sprint_yaw_deg = float(
+            rospy.get_param("~sprint_yaw_deg", 180.0))
+        # 冲刺段横向平移实验：true 时切换 CymPlanner transverse 模式
+        # （车头保持 90°，linear.y 横向平移过坡），false 走原前进冲刺。
+        self.sprint_transverse_enabled = bool(
+            rospy.get_param("~sprint_transverse_enabled", False))
         self.qr_observation_numbers = [
             int(value) for value in
             rospy.get_param("~qr_observation_numbers", [262, 232, 295])
@@ -924,7 +932,8 @@ class ProductionTask2026(object):
                         self.sprint_end_point_number)
                 # 180 deg: after arriving at the start point the chassis
                 # faces the y=1.75 corridor used for the sprint leg.
-                sprint_yaw = math.pi
+                sprint_yaw = math.radians(
+                    float(getattr(self, "sprint_yaw_deg", 180.0)))
                 self.publish_state(
                     "STAGING_%d" % self.sprint_start_point_number)
                 self.navigate_coordinates(
@@ -939,7 +948,10 @@ class ProductionTask2026(object):
                     "SPRINT_%d_%d" % (
                         self.sprint_start_point_number,
                         self.sprint_end_point_number))
-                self.switch_navigation_mode("sprint")
+                if bool(getattr(self, "sprint_transverse_enabled", False)):
+                    self.switch_navigation_mode("transverse")
+                else:
+                    self.switch_navigation_mode("sprint")
                 self.navigate_coordinates(
                     sprint_end[0], sprint_end[1], sprint_yaw,
                     sprint_end_label,
@@ -4006,7 +4018,7 @@ class ProductionTask2026(object):
         leg).  The latched command is repeated so delivery is observable and
         robust to a connection that completed at the edge of the wait loop.
         """
-        if mode not in ("point", "sprint"):
+        if mode not in ("point", "sprint", "transverse"):
             raise TaskDefinitionError(
                 "unsupported navigation mode %r" % mode)
         self.publish_state("SET_%s_NAVIGATION_MODE" % mode.upper())

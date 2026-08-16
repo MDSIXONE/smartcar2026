@@ -75,15 +75,31 @@ cym_planner/CymPlanner:
   # 2026-08-16（第六轮）：加到 2.0——linear_x_gain 8.0→10.0
   #   （稳态 0.20×10=2.0 m/s）、max_vel_x 1.60→2.0，稳态顶满 2.0；
   #   底盘裁剪上限 linear_speed_max 3.0 仍有余量。
+  # 2026-08-16（第七轮）：速度加到 2.5——linear_x_gain 10.0→12.5
+  #   （稳态 0.20×12.5=2.5 m/s）、max_vel_x 2.0→2.5；冲刺朝向实车
+  #   偏一点，任务节点 sprint_yaw_deg 改为 175（见 2026.launch）。
+  # 2026-08-16（第八轮）：快速上不去（2.5 m/s 高增益控制不稳），反向
+  #   操作——PD 改回省赛（mode1_point）温和值（linear_x_gain 1.5、
+  #   angular_gain 2.5、final_linear_x_gain 0.0），max_vel_x 取省赛
+  #   0.35 的一半 0.175 试跑验证稳定性；approach 自动减速机制保留。
+  # 2026-08-16（第九轮）：实车证明慢速麦轮上不了坡（0.175 无惯性冲坡），
+  #   改回第七轮快速配置——linear_x_gain 12.5、max_vel_x 2.5、
+  #   angular_gain 10.0、final_linear_x_gain 0.6（坡顶回拉兜底）；
+  #   冲刺靠惯性冲坡，approach 自动减速（1.0m 起压到 0.12）在坡顶前刹停。
   # 2026-08-16（第四轮）：冲刺终点提前到坡顶中点 (0.875, 1.75)（由任务
   #   节点 sprint_end_x/y 指定），新增接近目标自动减速（approach_decel
   #   _distance 1.0 m 起速度上限线性压到 approach_min_vel_x 0.12），
   #   防止 1.0 m/s 冲刺惯性冲过坡顶刹不住；final_linear_x_gain 0.0→0.6
   #   允许终点阶段位置回拉修正（轻微冲过头时倒回）。
+  # 2026-08-16（第十轮）：横向平移过坡实验——冲刺段改 transverse 模式，
+  #   车头保持 90°（对齐路径终点朝向），横向误差×lateral_gain 驱动
+  #   linear.y 沿 -x 方向横移过坡（麦轮底盘支持 linear.y）；
+  #   max_vel_y 横向速度上限，与 max_vel_x 同量级；接近自动减速同样
+  #   作用于横向速度。任务节点 sprint_transverse_enabled=true 时切换。
   mode3_sprint:
-    linear_x_gain: 10.0
+    linear_x_gain: 12.5
     linear_x_kd: 0.5
-    max_vel_x: 2.0
+    max_vel_x: 2.5
     angular_gain: 10.0
     angular_kd: 0.4
     max_vel_theta: 0.80
@@ -95,6 +111,10 @@ cym_planner/CymPlanner:
     # 允许终点位置回拉修正（轻微冲过头时倒回）。
     approach_decel_distance: 1.0
     approach_min_vel_x: 0.12
+    # 横向平移（transverse 模式）：横向误差×lateral_gain 驱动 linear.y，
+    # 航向锁定路径终点朝向（90°）；max_vel_y 横向速度上限。
+    lateral_gain: 12.5
+    max_vel_y: 2.5
     final_yaw_gain: 2.0
     final_yaw_max_vel: 1.00
     final_yaw_tolerance: 0.05

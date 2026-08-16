@@ -1277,8 +1277,8 @@ roslaunch ucar_2026_national 2026.launch task_enabled:=true
 
 2026-08-16 起，国赛版 `2026.launch` 默认开启 `sprint_enabled=true`：起点→52
 拆为 起点→70→288→52 三段，其中 70→288 沿 y=1.75 直线（朝向 180°）以
-CymPlanner 新增的 `mode3_sprint` 参数集（`linear_x_gain: 10.0`、
-`max_vel_x: 2.0`、`angular_gain: 10.0`）通过，到达 288
+CymPlanner 新增的 `mode3_sprint` 参数集（`linear_x_gain: 12.5`、
+`max_vel_x: 2.5`、`angular_gain: 10.0`）通过，到达 288
 后切回 `point` 再进 52。`sprint_enabled=false` 时保持原起点→52 直航。
 2026-08-16 第四轮：70→288 之间有坡，冲刺终点提前到坡顶中点
 (0.875, 1.75)（launch 的 `sprint_end_x/y`，非空时优先于编号点 288；
@@ -1286,6 +1286,17 @@ CymPlanner 新增的 `mode3_sprint` 参数集（`linear_x_gain: 10.0`、
 label），并启用接近目标自动减速（`approach_decel_distance: 1.0` 起
 速度上限线性压到 `approach_min_vel_x: 0.12`），`final_linear_x_gain: 0.6`
 允许终点位置回拉修正。
+2026-08-16 第十轮：冲刺段改为横向平移过坡——`sprint_yaw_deg` 90（车头
+朝 +y）、`sprint_transverse_enabled=true` 时任务节点切换 CymPlanner
+`transverse` 模式（navigation_mode 第四态，与 point/body/sprint 互斥）：
+车头锁定路径终点朝向 90°，横向误差（target_pose.y）× `lateral_gain: 12.5`
+驱动 linear.y 沿 -x 横移过坡，`max_vel_y: 2.5` 横向速度上限（approach
+自动减速同样作用于横向上限）；`sprint_transverse_enabled=false` 走原
+前进冲刺。
+2026-08-16 第十一轮：实车验证横向平移过坡不行，换回前进冲刺——
+`sprint_yaw_deg` 90→175、`sprint_transverse_enabled` true→false；
+transverse 模式代码与 `lateral_gain/max_vel_y` 参数保留（如需再试，
+launch 置 true + `sprint_yaw_deg=90` 即可，无需重编译）。
 
 调速注意：点模式稳态速度 ≈ 前视距离（0.20 m）× `linear_x_gain`，`max_vel_x`
 只是上限、PD 输出顶不到它。2026-08-16 实车先翻倍 `max_vel_x`（0.60→1.20）
@@ -1303,12 +1314,28 @@ approach 自动减速兜底。
 2026-08-16 第六轮：加到 2.0——`linear_x_gain` 8.0→10.0（稳态
 0.20×10=2.0 m/s）、`max_vel_x` 1.60→2.0，稳态顶满 2.0；底盘裁剪上限
 `linear_speed_max` 3.0 仍有余量。
+2026-08-16 第七轮：速度加到 2.5——`linear_x_gain` 10.0→12.5（稳态
+0.20×12.5=2.5 m/s）、`max_vel_x` 2.0→2.5；冲刺朝向实车偏一点，
+任务节点新增 `sprint_yaw_deg` 参数（launch 设为 175，原 180）。
+2026-08-16 第八轮（反向操作）：2.5 m/s 高增益"快速上不去"（控制不稳），
+PD 改回省赛（mode1_point）温和值——`linear_x_gain` 1.5、`angular_gain`
+2.5、`final_linear_x_gain` 0.0；`max_vel_x` 取省赛 0.35 的一半
+`0.175` 试跑验证稳定性；approach 自动减速机制保留。
+2026-08-16 第九轮：实车证明慢速麦轮上不了坡（0.175 无惯性冲坡），
+改回快速配置——`linear_x_gain` 12.5、`max_vel_x` 2.5、`angular_gain`
+10.0、`final_linear_x_gain` 0.6（坡顶回拉兜底）；冲刺靠惯性冲坡，
+approach 自动减速（1.0 m 起压到 0.12）在坡顶前刹停。
 2026-08-16 第四轮：接近目标自动减速在 CymPlanner 主循环内生效——距终点
 `approach_decel_distance` 以内时速度上限按剩余距离线性压降
 （`max(approach_min_vel_x, max_vel_x × 剩余距离/approach_decel_distance)`）；
 `approach_decel_distance=0.0`（默认）即禁用，point/body 模式不受影响。
 减速区间按 global_plan 终点相对车体的距离计算；`final_linear_x_gain 0.6`
 的终点回拉仍受 `max_vel_x` 钳制。
+2026-08-16 第十轮：transverse 横向平移模式——`lateral_gain 12.5`（稳态
+0.20×12.5=2.5 m/s 横向，与 max_vel_x 同量级）、`max_vel_y 2.5`（sanitize
+上限 3.0）；横向分支在 pose_adjusting 之后、heading 计算之前，linear.x
+置 0、linear.y 由横向误差驱动、angular.z 锁定 final_pose_yaw；该分支
+不经过 commandSweepIsSafe 与 elastic 带选择，碰撞保护只剩前视判障。
 
 部署步骤（小车 Ubuntu 18.04；按当次网络发现的小车地址同步，不写死旧 IP；
 不在小车端创建备份）：
@@ -1334,14 +1361,17 @@ roslaunch ucar_2026_national 2026.launch task_enabled:=true
 
 4. 验证：
    - `rosparam get /move_base/cym_planner/CymPlanner/mode3_sprint/linear_x_gain`
-      应返回 `5.0`；
+      应返回 `12.5`；
    - `rosparam get /move_base/cym_planner/CymPlanner/mode3_sprint/approach_decel_distance`
       应返回 `1.0`、`approach_min_vel_x` 返回 `0.12`、
       `final_linear_x_gain` 返回 `0.6`；
+   - `rosparam get /move_base/cym_planner/CymPlanner/mode3_sprint/lateral_gain`
+      应返回 `12.5`、`max_vel_y` 返回 `2.5`；
    - 任务日志应出现 `PRODUCTION_SPRINT_LEG 70 -> 288`，以及导航模式切换
-      日志（`cym_planner switched to mode3_sprint` 与切回
+      日志（`cym_planner switched to mode3_sprint (transverse)` 与切回
      `mode1_point`）；CymPlanner 启动日志应含
-     `cym_planner mode3 sprint max 1.20 m/s 0.80 rad/s`；
+     `cym_planner mode3 sprint max 2.50 m/s 0.80 rad/s` 与
+     `cym_planner mode3 sprint lateral max 2.50 m/s`；
    - 冲刺终点应停在坡顶中点 (0.875, 1.75) 附近（导航日志 label
      `sprint end midpoint`）。
 

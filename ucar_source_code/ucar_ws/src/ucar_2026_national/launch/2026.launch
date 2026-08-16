@@ -193,6 +193,13 @@
             <param name="sprint_end_point_number" value="288"/>
             <param name="sprint_end_x" value="0.875"/>
             <param name="sprint_end_y" value="1.75"/>
+            <!-- 冲刺朝向（度）：前进冲刺 175（实车验证 180 偏一点）；
+                 横向平移实验用车头 90°，已保留（sprint_transverse_enabled
+                 置 true + sprint_yaw_deg=90 即可切换）。 -->
+            <param name="sprint_yaw_deg" value="175"/>
+            <!-- 横向平移实验：false 走前进冲刺（默认）；true 走
+                 CymPlanner transverse 模式（车头 90° 横向 -x 平移）。 -->
+            <param name="sprint_transverse_enabled" value="false"/>
             <rosparam param="qr_observation_numbers">[262, 232, 295]</rosparam>
             <!-- Each target is reached before one OCR search revolution.  A
                  candidate is centred/ranged; once both requested categories
