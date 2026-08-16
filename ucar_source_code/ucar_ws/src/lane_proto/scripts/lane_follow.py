@@ -535,7 +535,9 @@ class LaneFollow(object):
         # 认灯的唯一出口是**认出方向**: left/right/straight 里某个攒够
         # min_votes 票就定案。stop(红灯) 和 什么都没认出来 是同一种处理 ——
         # 都不投票、都继续等下一帧(车停在起点不动), 等到方向灯亮为止。
-        self.yolo_min_votes = int(gp("~yolo_min_votes", 2))
+        # 2026-08-16: 默认 2 -> 1。现场连续两帧太严, 灯切向/抖动时容易
+        # 漏认卡住, 改成一帧认出方向就定案(误检风险由 yolo_conf 兜底)。
+        self.yolo_min_votes = int(gp("~yolo_min_votes", 1))
         # 兜底上限: 等这么久还没方向就按 fallback 走(0=一直等)。真等到这里
         # 说明灯坏了/没对准, 至少别让车傻站着。
         self.yolo_wait_max = float(gp("~yolo_wait_max", 60.0))
