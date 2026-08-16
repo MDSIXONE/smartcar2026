@@ -133,18 +133,13 @@ test -f src/car3/models/sign/meshes/wall_Food.obj
 1. Gazebo 目标仿真时间比例在 `src/car3/world/math.world` 的 `<physics>` 段：
 
    ```xml
-   <max_step_size>0.003</max_step_size>
+   <max_step_size>0.001</max_step_size>
    <real_time_factor>1</real_time_factor>
-   <real_time_update_rate>200</real_time_update_rate>
+   <real_time_update_rate>1000</real_time_update_rate>
    ```
 
-   `real_time_factor=1` 表示目标为 1 秒墙钟时间推进 1 秒仿真时间。该 world
-   的模型部分属于官方基线，禁止修改；`<physics>` 段的时间参数由负责人授权
-   可按需调整（当前为 333 Hz 物理步长 + 200 上限更新率，把本机实时率从
-   约 0.25 提升并钳制到约 0.6；RTF 1.0 时任务过快会翻车）。调整时间参数
-   必须同步更新 `test_grasp_attach_state.py` 的 world 哈希与
-   `test_task3_realtime_budget.py` 的物理断言；需要官方验收时改回
-   `0.001/1000` 并同步两个回归测试。
+   `real_time_factor=1` 表示目标为 1 秒墙钟时间推进 1 秒仿真时间。该 world 属于
+   官方基线，本项目禁止修改；需要官方验收时必须保留上述值。
 
 2. 任务允许的最低实测 RTF 在
    `src/car3/config/task3_vision.yaml`：
@@ -155,10 +150,12 @@ test -f src/car3/models/sign/meshes/wall_Food.obj
    ```
 
    `rtf_minimum` 只控制任务启动前的通过/警告门槛，不会加快 Gazebo。设为
-   `strict: true` 后，低于门槛会终止任务；默认只警告。要改善实际 RTF，可
-   减少后台负载、使用合适显卡驱动并关闭无关程序；`<physics>` 段的时间参数
-   （当前 333 Hz 步长 + 200 上限更新率，实时率约 0.6）已按负责人授权直接
-   调整，模型与传感器配置不得再改。
+   `strict: true` 后，低于门槛会终止任务；默认只警告。要改善实际 RTF，应减少
+   后台负载、使用合适显卡驱动并关闭无关程序，不能通过修改官方 world 冒充性能提升。
+
+非正式研究若确需改变 Gazebo 目标比例，应在独立实验分支研究
+`src/car3/world/math.world` 的 `<physics>`，不得提交到正式分支，也不能把结果
+称为满足官方模型基线。
 
 ## 8. 正式启动
 

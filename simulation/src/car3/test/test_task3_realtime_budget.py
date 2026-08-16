@@ -38,16 +38,13 @@ LOCAL_COSTMAP = (
 
 
 class Task3RealtimeBudgetTest(unittest.TestCase):
-    def test_world_uses_200hz_max_update_rate(self):
-        # 时间参数（physics 段）由负责人授权可按需调整：物理步长 0.003 s
-        # （约 333 Hz），max_update_rate 200 钳制实时率到约 0.6；world 中
-        # 的模型部分仍保持官方基线，见 SHA-256 回归。
+    def test_world_keeps_official_physics_settings(self):
         root = ET.parse(WORLD).getroot()
         physics = root.find(".//world/physics")
         self.assertIsNotNone(physics)
-        self.assertAlmostEqual(float(physics.findtext("max_step_size")), 0.003)
+        self.assertAlmostEqual(float(physics.findtext("max_step_size")), 0.001)
         self.assertAlmostEqual(
-            float(physics.findtext("real_time_update_rate")), 200.0
+            float(physics.findtext("real_time_update_rate")), 1000.0
         )
         self.assertAlmostEqual(float(physics.findtext("real_time_factor")), 1.0)
         self.assertEqual(root.findtext(".//world/scene/shadows"), "1")

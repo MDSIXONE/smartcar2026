@@ -137,14 +137,9 @@
     <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
     <atmosphere type='adiabatic'/>
     <physics type='ode'>
-      <!-- 时间参数（非模型部分）由负责人授权可按需调整：物理步长 333 Hz
-           （0.003 s，比 200 Hz 步长更细，接触更稳定），目标实时率约 0.6：
-           每秒最多 200 个物理步（200 * 0.003 s = 0.6 s 仿真时间/实时秒）。
-           实测 RTF=1.0（步长 0.005）时任务速度过快导致翻车，故收细步长
-           并把实时率钳制在 0.6 左右。 -->
-      <max_step_size>0.003</max_step_size>
+      <max_step_size>0.001</max_step_size>
       <real_time_factor>1</real_time_factor>
-      <real_time_update_rate>200</real_time_update_rate>
+      <real_time_update_rate>1000</real_time_update_rate>
     </physics>
     <scene>
       <ambient>0.4 0.4 0.4 1</ambient>
