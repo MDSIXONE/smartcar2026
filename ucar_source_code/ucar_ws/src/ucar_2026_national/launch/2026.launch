@@ -240,13 +240,13 @@
                  is kept with its default 3.0 for launch compatibility and is
                  no longer used by the task code. -->
             <param name="processing_dwell_seconds" value="3.0"/>
-            <!-- OCR 识别成功后，内墙交点向场内内缩 29cm 作为停车坐标。 -->
-            <param name="ocr_stop_offset_m" value="0.29"/>
+            <!-- OCR 识别成功后，内墙交点向场内内缩 25cm 作为停车坐标。 -->
+            <param name="ocr_stop_offset_m" value="0.25"/>
             <!-- Normal route keeps the large local safety inflation.  The
                  final OCR wall-parking leg temporarily uses a smaller local
                  radius, while CymPlanner remains in front-point mode. -->
             <param name="processing_parking_profile_enabled" value="true"/>
-            <param name="processing_parking_inflation_radius_m" value="0.10"/>
+            <param name="processing_parking_inflation_radius_m" value="0.05"/>
             <!-- Local simulation (host PC) coordination: only after the
                  real item has been parked and its completion announcement
                  has finished does the task park/start the simulation item. -->
@@ -303,10 +303,10 @@
                    value="/move_base/local_costmap/obstacle_layer"/>
             <param name="local_costmap_inflation_layer"
                    value="/move_base/local_costmap/inflation_layer"/>
-            <!-- After point 3, keep the global inflation radius at 0.235 m. -->
+            <!-- After point 3, keep the global inflation radius at 0.224 m. -->
             <param name="global_costmap_inflation_layer"
                    value="/move_base/global_costmap/inflation_layer"/>
-            <param name="global_costmap_inflation_radius_m" value="0.235"/>
+            <param name="global_costmap_inflation_radius_m" value="0.224"/>
             <!-- Heading the waypoint must face after arrival; 0 keeps the
                  current yaw (no rotation). -->
             <param name="post_qr_waypoint_heading_point_number" value="13"/>
@@ -330,9 +330,9 @@
             <param name="spark_thinking" value="disabled"/>
             <param name="spark_password_file"
                    value="/home/ucar/.ucar/spark_password"/>
-            <param name="spark_retries" value="2"/>
-            <param name="spark_timeout" value="60.0"/>
-            <param name="spark_helper_ready_timeout" value="60.0"/>
+            <param name="spark_retries" value="0"/>
+            <param name="spark_timeout" value="8.0"/>
+            <param name="spark_helper_ready_timeout" value="10.0"/>
             <!-- Before the first move_base goal, production_task_2026 pins
                  CymPlanner to front-lookahead point mode for every task leg. -->
             <param name="navigation_mode_connect_timeout" value="10.0"/>

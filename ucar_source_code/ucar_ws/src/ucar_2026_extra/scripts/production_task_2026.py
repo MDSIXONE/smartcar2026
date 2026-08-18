@@ -242,11 +242,11 @@ class ProductionTask2026(object):
             "~global_costmap_inflation_layer",
             "/move_base/global_costmap/inflation_layer"))
         self.global_costmap_inflation_radius_m = float(rospy.get_param(
-            "~global_costmap_inflation_radius_m", 0.235))
+            "~global_costmap_inflation_radius_m", 0.224))
         self.processing_parking_profile_enabled = bool(rospy.get_param(
             "~processing_parking_profile_enabled", True))
         self.processing_parking_inflation_radius_m = float(
-            rospy.get_param("~processing_parking_inflation_radius_m", 0.10))
+            rospy.get_param("~processing_parking_inflation_radius_m", 0.05))
 
         self.start_delay = float(rospy.get_param("~start_delay", 2.0))
         self.resume_production_only = bool(
@@ -422,11 +422,11 @@ class ProductionTask2026(object):
         self.spark_password_file = str(
             rospy.get_param("~spark_password_file", ""))
         self.spark_retries = max(
-            0, int(rospy.get_param("~spark_retries", 2)))
+            0, int(rospy.get_param("~spark_retries", 0)))
         self.spark_timeout = max(
             0.5, float(rospy.get_param("~spark_timeout", 8.0)))
         self.spark_helper_ready_timeout = float(
-            rospy.get_param("~spark_helper_ready_timeout", 30.0))
+            rospy.get_param("~spark_helper_ready_timeout", 10.0))
 
         if self.qr_rotation_speed <= 0.0:
             raise TaskDefinitionError("qr_rotation_speed must be positive")
@@ -654,6 +654,7 @@ class ProductionTask2026(object):
         self.ocr_process = None
         self.ocr_log_handle = None
         self.spark_process = None
+        self.spark_request_sequence = 0
         self.spark_log_handle = None
         self.voice_input_process = None
         self.requested_real_category = None
@@ -1448,11 +1449,18 @@ class ProductionTask2026(object):
                 item_text = self.normalize_qr_text(detected)
                 if not item_text or item_text in seen_items:
                     continue
-                seen_items.add(item_text)
                 self.classify_qr_text(
                     observation_number, item_text.encode("utf-8"))
                 category = self.qr_classification_category_for_item(
                     observation_number, item_text)
+                if category is None:
+                    self.used_qr_codes.discard(item_text)
+                    rospy.logwarn(
+                        "PRODUCTION_VOICE_QR_UNCLASSIFIED observation=%d "
+                        "item=%s retry=true",
+                        observation_number, self.log_safe_text(item_text))
+                    continue
+                seen_items.add(item_text)
                 if category not in requested_categories:
                     rospy.loginfo(
                         "PRODUCTION_VOICE_QR_IGNORED observation=%d "
@@ -1491,11 +1499,19 @@ class ProductionTask2026(object):
                     item_text = self.normalize_qr_text(detected)
                     if not item_text or item_text in seen_items:
                         continue
-                    seen_items.add(item_text)
                     self.classify_qr_text(
                         observation_number, item_text.encode("utf-8"))
                     category = self.qr_classification_category_for_item(
                         observation_number, item_text)
+                    if category is None:
+                        self.used_qr_codes.discard(item_text)
+                        rospy.logwarn(
+                            "PRODUCTION_VOICE_QR_UNCLASSIFIED observation=%d "
+                            "item=%s retry=true",
+                            observation_number,
+                            self.log_safe_text(item_text))
+                        continue
+                    seen_items.add(item_text)
                     if category not in requested_categories:
                         rospy.loginfo(
                             "PRODUCTION_VOICE_QR_IGNORED observation=%d "
@@ -2109,7 +2125,9 @@ class ProductionTask2026(object):
             "--api-base-url", self.spark_api_base_url,
             "--model", self.spark_model,
             "--retries", str(self.spark_retries),
-            "--timeout", str(self.spark_timeout),
+            # Leave one second for the helper to emit its local fallback
+            # before the task-level response deadline expires.
+            "--timeout", str(max(0.5, self.spark_timeout - 1.0)),
             "--thinking", self.spark_thinking,
         ]
         if self.spark_password_file:
@@ -2150,7 +2168,7 @@ class ProductionTask2026(object):
             message.get("local_keywords"))
         return True
 
-    def read_spark_message(self, timeout, context):
+    def read_spark_message(self, timeout, context, expected_request_id=None):
         """Read one JSON line from the helper; never raises for the task."""
         deadline = time.time() + float(timeout)
         while not rospy.is_shutdown() and time.time() < deadline:
@@ -2167,12 +2185,22 @@ class ProductionTask2026(object):
             if not raw_line:
                 continue
             try:
-                return json.loads(raw_line)
+                message = json.loads(raw_line)
             except ValueError:
                 rospy.logwarn(
                     "PRODUCTION_SPARK_NON_JSON %s",
                     raw_line.decode("utf-8", "replace").strip()
                     if not isinstance(raw_line, str) else raw_line.strip())
+                continue
+            if (expected_request_id is not None and
+                    message.get("request_id") != expected_request_id):
+                rospy.logwarn(
+                    "PRODUCTION_SPARK_STALE_RESPONSE context=%s "
+                    "expected=%s actual=%s",
+                    context, expected_request_id,
+                    message.get("request_id"))
+                continue
+            return message
         return None
 
     def stop_qr_classifier(self):
@@ -2744,7 +2772,7 @@ class ProductionTask2026(object):
     def qr_classification_category_for_item(self, observation_number,
                                             item_text):
         """Category classified for one item name at its observation face."""
-        for entry in self.qr_classifications:
+        for entry in reversed(self.qr_classifications):
             if (entry.get("observation") == int(observation_number) and
                     entry.get("qr_text") == item_text):
                 category = entry.get("category")
@@ -2799,8 +2827,14 @@ class ProductionTask2026(object):
                 self.log_safe_text(entry["error"]))
             self.qr_classifications.append(entry)
             return
+        self.spark_request_sequence += 1
+        request_id = self.spark_request_sequence
         try:
-            payload = {"command": "classify", "qr_text": qr_text}
+            payload = {
+                "command": "classify",
+                "request_id": request_id,
+                "qr_text": qr_text,
+            }
             self.spark_process.stdin.write(
                 (json.dumps(payload) + "\n").encode("utf-8"))
             self.spark_process.stdin.flush()
@@ -2815,9 +2849,10 @@ class ProductionTask2026(object):
             return
         response = self.read_spark_message(
             self.spark_timeout, "classify observation %d" %
-            observation_number)
+            observation_number, expected_request_id=request_id)
         if not response:
-            entry["error"] = "no reply from classifier helper"
+            entry["error"] = "classifier response timeout"
+            self.stop_qr_classifier()
             rospy.logerr(
                 "PRODUCTION_SPARK_CLASSIFY observation=%d qr=%s "
                 "category=null source=none error=%s (cannot reach spark model)",

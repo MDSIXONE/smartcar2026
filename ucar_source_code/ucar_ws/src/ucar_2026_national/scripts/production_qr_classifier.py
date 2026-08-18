@@ -7,9 +7,9 @@ The ROS mission is Python 2.  This helper prefers the vehicle's Python 3 but
 is kept Python-2-compatible (standard library only) so it can run under either
 interpreter.  It exchanges one JSON object per line over stdin/stdout:
 
-    {"command": "classify", "qr_text": "..."}
+    {"command": "classify", "request_id": n, "qr_text": "..."}
         -> {"category": "日用品|食品|电子产品|null", "source": "spark|local|none",
-            "attempts": n, "model": ..., "raw": ..., "error": ...}
+            "request_id": n, "attempts": n, "model": ..., "raw": ..., "error": ...}
     {"command": "close"} -> {"ok": true, "closed": true}
 
 A missing password file disables the remote call; the local map still works.
@@ -305,7 +305,7 @@ def parse_args():
         default="https://spark-api-open.xf-yun.com/x2/chat/completions")
     parser.add_argument("--model", default="spark-x")
     parser.add_argument("--password-file", default="")
-    parser.add_argument("--retries", type=int, default=2)
+    parser.add_argument("--retries", type=int, default=0)
     parser.add_argument("--timeout", type=float, default=8.0)
     parser.add_argument("--local-map-file", default="")
     parser.add_argument(
@@ -333,19 +333,26 @@ def main():
     })
     try:
         for raw_line in sys.stdin:
+            command = {}
+            name = None
             try:
                 command = json.loads(raw_line)
                 name = command.get("command")
                 if name == "classify":
                     qr_text = command.get("qr_text", "")
-                    emit(classify(args, local_map, password, qr_text))
+                    result = classify(args, local_map, password, qr_text)
+                    result["request_id"] = command.get("request_id")
+                    emit(result)
                 elif name == "close":
                     emit({"ok": True, "closed": True})
                     break
                 else:
                     emit({"ok": False, "error": "unknown command"})
             except Exception as exc:
-                emit({"ok": False, "error": str(exc)})
+                error = {"ok": False, "error": str(exc)}
+                if name == "classify":
+                    error["request_id"] = command.get("request_id")
+                emit(error)
     finally:
         pass
     return 0

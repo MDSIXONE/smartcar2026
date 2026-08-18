@@ -80,7 +80,7 @@ class Task3RealtimeBudgetTest(unittest.TestCase):
 
         planner = PLANNER_CONFIG.read_text(encoding="utf-8")
         self.assertIn('"main_legacy_target_distance": 0.2', planner)
-        self.assertIn('"main_legacy_max_vel_x": 14.0', planner)
+        self.assertIn('"main_legacy_max_vel_x": 13.5', planner)
         self.assertIn('"main_legacy_max_vel_theta": 20.5', planner)
         self.assertIn('"laser_projection_step": 0.03', planner)
         self.assertIn('"carry_speed_scale": 1.00', planner)

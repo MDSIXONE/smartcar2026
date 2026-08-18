@@ -40,3 +40,9 @@
 
 - `0.10m` 和点 3 后 `0.235m` 都是现场验证前的配置；车端应在 `/odom_raw` 和 TF 均为有限值、车辆零速的安全条件下复测。
 - 点 3 后 global/local 常态 inflation 均为 `0.235m`；OCR 停车只临时切换 local inflation，不能借此切换 CymPlanner 的 `body_projection` 模式。
+
+## 后续参数调整（2026-08-18）
+
+- 三套 2026 主流程共用的 `testnav20260721` local costmap 常态膨胀半径调整为 `0.224m`。
+- OCR 内墙停车阶段的临时 local 膨胀半径调整为 `0.05m`；全局 costmap 的目标值调整为 `0.224m`，CymPlanner 的 `point` 模式保持不变。
+- 三套 launch、任务脚本默认值和几何测试已同步；三套几何回归、Python AST、launch XML、YAML 和 `git diff --check` 均通过。未启动 ROS、不发送运动命令。

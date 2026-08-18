@@ -245,30 +245,30 @@ class ProductionTaskGeometryTest(unittest.TestCase):
             (x_min, x_max, y_min, y_max, side),
             (-2.5, 2.5, -0.5, 1.5, 0.5))
 
-    def test_stop_point_for_wall_point_uses_explicit_29cm_offset(self):
+    def test_stop_point_for_wall_point_uses_explicit_25cm_offset(self):
         bounds = (-2.5, 2.5, -0.5, 1.5)
         cases = [
             # wall intersection -> processing-area stop point:
-            ((0.75, 1.5), (0.75, 1.21)),    # 300 -> point 7
-            ((2.5, 0.75), (2.21, 0.75)),    # 455 -> point 20
-            ((-2.5, 0.75), (-2.21, 0.75)),  # 454 -> point 11
-            ((-2.5, 0.5), (-2.21, 0.5)),    # 448 -> midpoint of 11 and 21
-            ((-0.75, -0.5), (-0.75, -0.21)),  # 307 -> point 34
+            ((0.75, 1.5), (0.75, 1.25)),    # 300 -> point 7
+            ((2.5, 0.75), (2.25, 0.75)),    # 455 -> point 20
+            ((-2.5, 0.75), (-2.25, 0.75)),  # 454 -> point 11
+            ((-2.5, 0.5), (-2.25, 0.5)),    # 448 -> midpoint of 11 and 21
+            ((-0.75, -0.5), (-0.75, -0.25)),  # 307 -> point 34
         ]
         for wall_point, expected_stop in cases:
             actual_stop = stop_point_for_wall_point(
-                wall_point, 0.29, bounds)
+                wall_point, 0.25, bounds)
             self.assertAlmostEqual(actual_stop[0], expected_stop[0], places=9)
             self.assertAlmostEqual(actual_stop[1], expected_stop[1], places=9)
 
     def test_stop_point_for_wall_point_rejects_off_boundary_point(self):
         bounds = (-2.5, 2.5, -0.5, 1.5)
         with self.assertRaises(TaskDefinitionError):
-            stop_point_for_wall_point((0.0, 0.0), 0.29, bounds)
+            stop_point_for_wall_point((0.0, 0.0), 0.25, bounds)
         with self.assertRaises(TaskDefinitionError):
-            stop_point_for_wall_point((0.75, 0.75), 0.29, bounds)
+            stop_point_for_wall_point((0.75, 0.75), 0.25, bounds)
         with self.assertRaises(TaskDefinitionError):
-            stop_point_for_wall_point((-2.5, 2.5), 0.29, bounds)
+            stop_point_for_wall_point((-2.5, 2.5), 0.25, bounds)
 
 
 @unittest.skipIf(
@@ -298,7 +298,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task._ocr_turn_stop_flag = False
         self.task.processing_dwell_seconds = 0.0
         self.task.middle_zone_square_side = 0.5
-        self.task.ocr_stop_offset_m = 0.29
+        self.task.ocr_stop_offset_m = 0.25
         self.task.middle_zone_bounds = (-2.5, 2.5, -0.5, 1.5)
         self.task.ocr_alignment_min_speed = 0.12
         self.task.spark_classify_enabled = False
@@ -343,7 +343,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.local_costmap_inflation_layer = (
             "/move_base/local_costmap/inflation_layer")
         self.task.local_costmap_reconfigure_timeout = 0.5
-        self.task.processing_parking_inflation_radius_m = 0.10
+        self.task.processing_parking_inflation_radius_m = 0.05
         self.task._processing_parking_original_inflation_radius_m = None
 
         original_client = task_module.DynamicReconfigureClient
@@ -352,12 +352,12 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         task_module.rospy.sleep = lambda _duration: None
         try:
             self.task.enter_processing_parking_profile()
-            self.assertEqual(inflation_state[0], 0.10)
+            self.assertEqual(inflation_state[0], 0.05)
             self.assertEqual(messages, [
                 "point", "point", "point"])
 
             self.task.exit_processing_parking_profile()
-            self.assertEqual(inflation_state[0], 0.22)
+            self.assertEqual(inflation_state[0], 0.224)
             self.assertEqual(messages, [
                 "point", "point", "point",
                 "point", "point", "point"])
@@ -389,9 +389,9 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         task_module.DynamicReconfigureClient = InflationClient
         try:
             applied = self.task.set_global_costmap_inflation_radius(
-                0.235, "reached_point_3")
-            self.assertEqual(applied, 0.235)
-            self.assertEqual(inflation_state[0], 0.235)
+                0.224, "reached_point_3")
+            self.assertEqual(applied, 0.224)
+            self.assertEqual(inflation_state[0], 0.224)
             self.assertEqual(namespaces, [
                 "/move_base/global_costmap/inflation_layer"])
         finally:
@@ -773,7 +773,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.wait_for_safe_start = lambda: events.append("safe_start")
         self.task.switch_to_point_mode = lambda: events.append("point_mode")
         self.task.resume_production_only = True
-        self.task.global_costmap_inflation_radius_m = 0.235
+        self.task.global_costmap_inflation_radius_m = 0.224
         self.task.set_global_costmap_inflation_radius = (
             lambda *_args: events.append("global_inflation"))
         self.task.qr_enable_pub = QrPublisher()
@@ -1549,7 +1549,7 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         self.task._ocr_turn_stop_flag = False
         self.task.processing_dwell_seconds = 0.0
         self.task.middle_zone_square_side = 0.5
-        self.task.ocr_stop_offset_m = 0.29
+        self.task.ocr_stop_offset_m = 0.25
         self.task.middle_zone_bounds = (-2.5, 2.5, -0.5, 1.5)
         self.task.ocr_alignment_min_speed = 0.12
         self.task.spark_classify_enabled = False
@@ -1665,6 +1665,104 @@ class ProductionTaskDualItemTest(unittest.TestCase):
                 u"食品": {"item": u"蛋糕", "observation": 232},
             })
 
+    def test_classifier_ignores_late_response_from_previous_request(self):
+        class FakeStdin(object):
+            def __init__(self):
+                self.payloads = []
+
+            def write(self, payload):
+                self.payloads.append(payload)
+
+            def flush(self):
+                pass
+
+        class FakeStdout(object):
+            def __init__(self, lines):
+                self.lines = iter(lines)
+
+            def readline(self):
+                try:
+                    return next(self.lines)
+                except StopIteration:
+                    return b""
+
+        class FakeProcess(object):
+            def __init__(self):
+                self.stdin = FakeStdin()
+                self.stdout = FakeStdout([
+                    json.dumps({
+                        "request_id": 1,
+                        "category": u"电子产品",
+                        "source": "spark",
+                        "attempts": 3,
+                        "model": "spark-x",
+                        "error": "",
+                    }, ensure_ascii=True).encode("utf-8") + b"\n",
+                    json.dumps({
+                        "request_id": 2,
+                        "category": u"日用品",
+                        "source": "local",
+                        "attempts": 0,
+                        "model": "spark-x",
+                        "error": "",
+                    }, ensure_ascii=True).encode("utf-8") + b"\n",
+                ])
+
+            def poll(self):
+                return None
+
+        process = FakeProcess()
+        self.task.spark_classify_enabled = True
+        self.task.spark_request_sequence = 1
+        self.task.spark_process = process
+        self.task.spark_log_handle = None
+        self.task.spark_timeout = 0.5
+        self.task.spark_model = "spark-x"
+        self.task.start_qr_classifier = lambda: True
+        self.task.stop_qr_classifier = lambda: None
+        original_select = task_module.select.select
+        task_module.select.select = (
+            lambda *_args: ([process.stdout], [], []))
+        try:
+            self.task.classify_qr_text(295, u"毛巾".encode("utf-8"))
+        finally:
+            task_module.select.select = original_select
+
+        sent = json.loads(process.stdin.payloads[0].decode("utf-8"))
+        self.assertEqual(sent["request_id"], 2)
+        self.assertEqual(self.task.qr_classifications[-1]["category"],
+                         u"日用品")
+
+    def test_voice_qr_collection_retries_after_unclassified_item(self):
+        self.task.qr_observation_numbers = [262, 232]
+        self.task.used_qr_codes = set()
+        detections = iter([u"耳机", u"耳机"])
+        categories = iter([None, u"电子产品"])
+
+        def scan(_observation_number, accept_text=None,
+                 allow_revolution=True):
+            item = next(detections)
+            if accept_text is not None and not accept_text(item):
+                return None
+            self.task.used_qr_codes.add(item)
+            return item
+
+        def classify(observation_number, item_text):
+            if isinstance(item_text, bytes):
+                item_text = item_text.decode("utf-8")
+            self.task.qr_classifications.append({
+                "observation": observation_number,
+                "qr_text": item_text,
+                "category": next(categories),
+            })
+
+        self.task.scan_observation_point = scan
+        self.task.classify_qr_text = classify
+        collected = self.task.collect_target_qr_codes_by_category(
+            set([u"电子产品"]), rounds=1)
+        self.assertEqual(
+            collected,
+            {u"电子产品": {"item": u"耳机", "observation": 232}})
     def test_qr_collection_filters_targets_and_takes_first_only(self):
         self.task.qr_observation_numbers = [262, 232, 295]
         faces = []

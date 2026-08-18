@@ -61,7 +61,7 @@ class Task3NavigationPhaseContractTest(unittest.TestCase):
             '"main_legacy_linear_x_gain": 10.0',
             '"main_legacy_linear_x_kd": 0.05',
             '"main_legacy_angular_gain": 14.0',
-            '"main_legacy_max_vel_x": 14.0',
+            '"main_legacy_max_vel_x": 13.5',
             '"main_legacy_max_vel_theta": 20.5',
             '"main_legacy_final_yaw_gain": 12.0',
             '"main_legacy_final_yaw_max_vel": 10.2',

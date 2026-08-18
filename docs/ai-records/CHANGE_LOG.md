@@ -1,5 +1,41 @@
 # AI 改动记录
 
+## 2026-08-18｜常态与 OCR 停车局部膨胀参数调整
+
+- **状态**：改动完成
+- **目标**：将实车三套 2026 主流程使用的 global/local costmap 常态膨胀半径统一调整为 `0.224m`，OCR 内墙停车临时膨胀半径调整为 `0.05m`。
+- **影响文件**：三套 2026 launch/任务脚本/几何测试、`testnav20260721` global/local costmap YAML、实车操作文档与 `docs/changes/2026-08-18-staged-processing-parking-costmap.md`。
+- **结果**：三套 launch 和脚本默认值、全局 YAML 说明均改为 global/local 常态 `0.224m`，停车临时值为 `0.05m`；`point` 模式保持不变；7 个运行文件已同步到 `ucar-mini`。
+- **验证**：标准/额外/国赛几何回归分别 `90/105/91` 项通过（跳过 `75/90/76` 项）；9 个 Python 文件 AST、3 个 launch XML、YAML 参数检查和 `git diff --check` 通过；本轮 7 个文件本地/车端 SHA-256 一致；未启动 ROS、不发送运动命令。
+- **已知限制**：参数需重启实际使用的 2026 主流程后生效，尚未进行车端运动实测。
+
+## 2026-08-18｜OCR 识别后内墙停车恢复为 25cm
+
+- **状态**：改动完成
+- **目标**：OCR 识别并完成墙面交点测量后，车辆停在墙内 `0.25m` 处。
+- **影响文件**：三套 `2026.launch`、三套几何测试、`ucar_source_code/docs/operations.md` 和本记录。
+- **结果**：三套 launch 的 `ocr_stop_offset_m` 已统一为 `0.25`；几何测试断言同步为 25cm；运维文档核对命令同步更新。
+- **验证**：标准/国赛/额外三套几何测试分别 `90/91/105` 项通过（含既有条件跳过）；3 个 launch XML、9 个 Python AST 和 25cm 参数检查通过；`git diff --check` 通过；未启动 ROS、不发送运动命令。
+- **已知限制**：参数需重启实际使用的 2026 主流程后生效；尚未进行车端运动实测。
+
+## 2026-08-18｜QR 分类超时响应串线修复
+
+- **状态**：改动完成，已部署，待车端现场复测
+- **目标**：停止 QR 分类请求超时后旧响应串给下一二维码，避免语音双类别扫描阶段等待 60 秒、类别错配和重复扫描。
+- **影响文件**：三套 2026 主流程 Python/QR helper、三套 `2026.launch`、对应测试、`ucar_source_code/docs/operations.md` 和改动记录。
+- **结果**：分类请求/响应使用 `request_id` 配对；迟到响应被丢弃；分类超时 8 秒后销毁 helper，下一请求启动干净进程；分类失败释放二维码已用标记并在有限轮次内重试；三套 launch 均设置 `spark_retries=0`、`spark_timeout=8.0`、helper 启动等待 `10.0` 秒。
+- **验证**：旧车端代码新增两条回归均按预期失败；修复后车端 ROS 环境三套包各 2/2 定向回归通过，标准包完整 90 项通过；本地 Python/launch 静态检查和 helper request_id 协议冒烟通过；车端 Python2 语法检查、helper 远端失败后本地分类协议检查通过；运行文件已同步，任务与运动进程保持停止。
+- **已知限制**：国赛和额外包完整车端回归各有 1 个与本次 QR 改动无关的既有用例错误（分别为 `state_pub` 缺失、测试 stub 不接受 `stop_mode`）；真实讯飞延迟和现场扫描仍需车辆静止并通过安全门后复测。详细记录见 `ucar_source_code/docs/changes/2026-08-18-fix-qr-classifier-response-desync.md`。
+
+## 2026-08-18｜仿真第一段导航速度小幅下调
+
+- **状态**：改动完成
+- **目标**：将仿真第一段导航（`main_legacy`）的前进速度上限由 `14.0 m/s` 小幅下调为 `13.5 m/s`。
+- **影响文件**：`simulation/src/cym_planner/config/cym_planner_params.json`、`simulation/src/car3/test/test_task3_navigation_phase_contract.py`、`simulation/src/car3/test/test_task3_realtime_budget.py`。
+- **结果**：第一段导航 `main_legacy_max_vel_x` 从 `14.0` 调整为 `13.5 m/s`；运行中的 WSL 仿真配置已同步并重启准备层。
+- **验证**：两组导航契约测试各 7 项通过；Windows 与 WSL 配置 SHA-256 一致；运行时 `/move_base/CymPlanner/main_legacy_max_vel_x` 已读回 `13.5`。
+- **已知限制**：13.5 m/s 是前向指令上限，不是全程恒定速度；实际速度仍受位置误差和转向降速影响。
+
 ## 2026-08-18｜国赛终点改为雷达角落闭环停车
 
 - **状态**：改动完成，已部署，待车端现场复测

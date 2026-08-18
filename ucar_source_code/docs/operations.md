@@ -41,17 +41,17 @@ scp ucar_ws/src/cym_planner/config/ucar_cym_planner_params.yaml "ucar@$CAR_IP`:~
 ssh "ucar@$CAR_IP" 'grep -n "obstacle_cost_threshold" ~/ucar_ws/src/cym_planner/config/ucar_cym_planner_params.yaml'
 ~~~
 
-当前 CymPlanner 判定读取 local costmap；local inflation 已在后续配置中同步为 `0.22 m`，因此重启主流程后可覆盖与全局相同的安全带范围。
+当前 CymPlanner 判定读取 local costmap；local inflation 已在后续配置中同步为 `0.224 m`，因此重启主流程后可覆盖与全局相同的安全带范围。
 
 ## 局部代价地图与前视范围
 
-当前实车配置使用 `1.8×1.8 m` rolling local costmap、`0.02 m` 分辨率、`0.235 m` local inflation 和 `0.8 m` CymPlanner 前视距离。局部窗口约为 `90×90` 格；三者应同时保持：窗口半边至少覆盖前视距离，local inflation 才能在前视点进入安全带前被采样到。修改这些 YAML 后不需要编译，但必须重启对应 `move_base`/2026 主流程；不在运行任务期间强制重启。
+当前实车配置使用 `1.8×1.8 m` rolling local costmap、`0.02 m` 分辨率、`0.224 m` local inflation 和 `0.8 m` CymPlanner 前视距离。局部窗口约为 `90×90` 格；三者应同时保持：窗口半边至少覆盖前视距离，local inflation 才能在前视点进入安全带前被采样到。修改这些 YAML 后不需要编译，但必须重启对应 `move_base`/2026 主流程；不在运行任务期间强制重启。
 
 ## 局部动态代价层在点 3 启用
 
 标准、省赛/国赛和额外任务默认在点 3 前关闭 local costmap 的 `obstacle_layer`、`inflation_layer`，点 3 导航成功返回后再通过 dynamic_reconfigure 同时打开。local costmap 容器和 StaticLayer 始终运行，不能把整个 local costmap 关闭，否则 CymPlanner 会因 `isCurrent()` 不满足而停止输出速度。额外任务使用非空 `ocr_route_profile` 时不经过点 3，该快捷流程不执行这组切换。
 
-同一个点 3 成功回调还会把 `/move_base/global_costmap/inflation_layer` 的 `inflation_radius` 设置为 `0.235m` 并保持到任务结束；断点续跑启动时会重新设置一次。点 3 后 local costmap 的常态 inflation 也为 `0.235m`，两者是独立的 dynamic_reconfigure/启动配置。local 在 OCR 停车阶段临时变为 `0.10m` 时，global 仍保持 `0.235m`，停车结束后 local 恢复 `0.235m`。服务缺失或回读值不一致会中止任务。
+同一个点 3 成功回调还会把 `/move_base/global_costmap/inflation_layer` 的 `inflation_radius` 设置为 `0.224m` 并保持到任务结束；断点续跑启动时会重新设置一次。点 3 后 local costmap 的常态 inflation 也为 `0.224m`，两者是独立的 dynamic_reconfigure/启动配置。local 在 OCR 停车阶段临时变为 `0.05m` 时，global 仍保持 `0.224m`，停车结束后 local 恢复 `0.224m`。服务缺失或回读值不一致会中止任务。
 
 源码/launch 改动部署后必须重启任务节点；先动态发现车端 IP，不在车端创建备份目录：
 
@@ -70,9 +70,13 @@ ssh "ucar@$CAR_IP" 'grep -n "set_global_costmap_inflation_radius\|global_costmap
 
 只同步 Python2 源码、launch 和 YAML 时不需要编译；由于新增了 `dynamic_reconfigure` 运行依赖，若车端工作区依赖未安装，先在 Ubuntu 18.04 / ROS Melodic 检查 `rospack find dynamic_reconfigure`，再按部署文档执行白名单构建。启动后只读查看 `/move_base/local_costmap/obstacle_layer/set_parameters`、`/move_base/local_costmap/inflation_layer/set_parameters` 和 `/move_base/global_costmap/inflation_layer/set_parameters` 服务是否存在，并在任务日志中确认点 3 前后时序。
 
+2026-08-18 本轮已将共享 local costmap YAML、三套任务脚本和三套 `2026.launch` 同步到 `ucar-mini`（`192.168.8.231`）；7 个文件的本地/车端 SHA-256 一致。同步未启动 ROS、主流程或车辆运动，参数需下次安全重启对应主流程后加载。
+
+随后 global costmap 目标值调整为 `0.224m`，已再次同步 global costmap 配置、三套任务脚本和三套 `2026.launch`；7 个文件的本地/车端 SHA-256 一致，车端仍未启动 ROS 或主流程。
+
 ## OCR 识别后内墙停车坐标
 
-OCR 识别并完成墙面交点测量后，三套 2026 主流程通过 `ocr_stop_offset_m` 计算内墙交点向场内的停车坐标。当前值为 `0.29m`，即由原来的 `0.25m` 向场外墙边少退 `0.04m`；生产网格的 `square_side_m=0.5` 不变。
+OCR 识别并完成墙面交点测量后，三套 2026 主流程通过 `ocr_stop_offset_m` 计算内墙交点向场内的停车坐标。当前值为 `0.25m`；生产网格的 `square_side_m=0.5` 不变。
 
 该参数位于三个包的 `launch/2026.launch`，只修改参数不需要编译，但必须重启对应主流程后生效。部署前在 `ucar_source_code` 目录执行本地核对：
 
@@ -88,8 +92,8 @@ files = [
 for path in files:
     ET.parse(str(path))
     text = path.read_text(encoding='utf-8')
-    assert 'ocr_stop_offset_m' in text and 'value="0.29"' in text
-print('OCR stop offset: 0.29m')
+    assert 'ocr_stop_offset_m' in text and 'value="0.25"' in text
+print('OCR stop offset: 0.25m')
 '@ | python -
 ~~~
 
@@ -127,19 +131,19 @@ ssh "ucar@$CAR_IP" 'sha256sum ~/ucar_ws/src/lane_proto/scripts/lane_common.py ~/
 
 ### OCR 内墙停车分阶段膨胀
 
-正常轨迹规划使用 local costmap 当前的 `0.235m` 膨胀半径。到达点 3 后，任务会将 `/move_base/global_costmap/inflation_layer` 的全局膨胀半径切换为并保持 `0.235m`；断点续跑也会先重新应用该值。该全局值与 local costmap 的分阶段切换相互独立。
+正常轨迹规划使用 local costmap 当前的 `0.224m` 膨胀半径。到达点 3 后，任务会将 `/move_base/global_costmap/inflation_layer` 的全局膨胀半径切换为并保持 `0.224m`；断点续跑也会先重新应用该值。该全局值与 local costmap 的分阶段切换相互独立。
 
-OCR 识别完成后，任务进入内墙最终停车前，会将 `/move_base/local_costmap/inflation_layer` 临时切换到 `0.10m`，同时显式保持 CymPlanner 的 `point` 模式；`obstacle_layer` 和 `static_layer` 保持运行。停车动作无论成功、失败还是超时，都会恢复进入前读取到的局部膨胀半径并再次确认 `point` 模式。车端不得在此流程使用 `body_projection`。
+OCR 识别完成后，任务进入内墙最终停车前，会将 `/move_base/local_costmap/inflation_layer` 临时切换到 `0.05m`，同时显式保持 CymPlanner 的 `point` 模式；`obstacle_layer` 和 `static_layer` 保持运行。停车动作无论成功、失败还是超时，都会恢复进入前读取到的局部膨胀半径并再次确认 `point` 模式。车端不得在此流程使用 `body_projection`。
 
 三个主流程当前参数均为：
 
 ~~~xml
 <param name="processing_parking_profile_enabled" value="true"/>
-<param name="processing_parking_inflation_radius_m" value="0.10"/>
-<param name="ocr_stop_offset_m" value="0.29"/>
+<param name="processing_parking_inflation_radius_m" value="0.05"/>
+<param name="ocr_stop_offset_m" value="0.25"/>
 <param name="global_costmap_inflation_layer"
        value="/move_base/global_costmap/inflation_layer"/>
-<param name="global_costmap_inflation_radius_m" value="0.235"/>
+<param name="global_costmap_inflation_radius_m" value="0.224"/>
 ~~~
 
 该切换依赖车端提供两个 inflation layer 的 `set_parameters` 服务，任务会分别校验局部临时半径和点 3 后全局半径确实生效；服务缺失或返回值不一致时会中止，不得继续运动。源码/YAML 同步后必须重启对应 `move_base` 和 2026 主流程；现场复测前仍需先确认动态 IP、`/odom_raw`、两个 TF 和零速度安全门。额外任务使用非空 `ocr_route_profile` 的快捷流程不经过点 3，因此不执行点 3 的全局切换。
@@ -438,16 +442,26 @@ rostopic pub -1 /cmd_vel geometry_msgs/Twist \
 ~~~powershell
 $CAR_IP = '<当前动态确认的车端IP>'
 scp ucar_ws/src/ucar_2026/scripts/production_task_2026.py "ucar@$CAR_IP`:~/ucar_ws/src/ucar_2026/scripts/production_task_2026.py"
+scp ucar_ws/src/ucar_2026/scripts/production_qr_classifier.py "ucar@$CAR_IP`:~/ucar_ws/src/ucar_2026/scripts/production_qr_classifier.py"
 scp ucar_ws/src/ucar_2026/scripts/production_task_geometry.py "ucar@$CAR_IP`:~/ucar_ws/src/ucar_2026/scripts/production_task_geometry.py"
 scp ucar_ws/src/ucar_2026/launch/2026.launch "ucar@$CAR_IP`:~/ucar_ws/src/ucar_2026/launch/2026.launch"
 scp ucar_ws/src/ucar_2026_national/scripts/production_task_2026.py "ucar@$CAR_IP`:~/ucar_ws/src/ucar_2026_national/scripts/production_task_2026.py"
+scp ucar_ws/src/ucar_2026_national/scripts/production_qr_classifier.py "ucar@$CAR_IP`:~/ucar_ws/src/ucar_2026_national/scripts/production_qr_classifier.py"
 scp ucar_ws/src/ucar_2026_national/scripts/production_task_geometry.py "ucar@$CAR_IP`:~/ucar_ws/src/ucar_2026_national/scripts/production_task_geometry.py"
 scp ucar_ws/src/ucar_2026_national/launch/2026.launch "ucar@$CAR_IP`:~/ucar_ws/src/ucar_2026_national/launch/2026.launch"
 scp ucar_ws/src/ucar_2026_extra/scripts/production_task_2026.py "ucar@$CAR_IP`:~/ucar_ws/src/ucar_2026_extra/scripts/production_task_2026.py"
+scp ucar_ws/src/ucar_2026_extra/scripts/production_qr_classifier.py "ucar@$CAR_IP`:~/ucar_ws/src/ucar_2026_extra/scripts/production_qr_classifier.py"
 scp ucar_ws/src/ucar_2026_extra/scripts/production_task_geometry.py "ucar@$CAR_IP`:~/ucar_ws/src/ucar_2026_extra/scripts/production_task_geometry.py"
 scp ucar_ws/src/ucar_2026_extra/launch/2026.launch "ucar@$CAR_IP`:~/ucar_ws/src/ucar_2026_extra/launch/2026.launch"
 ssh "ucar@$CAR_IP" 'grep -n "qr_observation_numbers" ~/ucar_ws/src/ucar_2026/launch/2026.launch ~/ucar_ws/src/ucar_2026_national/launch/2026.launch ~/ucar_ws/src/ucar_2026_extra/launch/2026.launch'
 ~~~
+
+二维码分类请求使用 `request_id` 绑定响应；分类器响应超时为 8 秒，超时会销毁旧 helper，
+下一次分类重新启动干净进程，避免迟到响应串给下一个二维码。分类器仍保留车端本地关键词表，
+所以远端 Spark 不可用时会在单次有界请求后走本地分类；分类失败的二维码不会被永久标记为已用，
+会在当前有限扫描轮次内重试。同步后必须重新启动实际使用的 `2026.launch`，并在日志中确认
+`PRODUCTION_SPARK_STALE_RESPONSE`、`PRODUCTION_VOICE_QR_UNCLASSIFIED`（如发生）和后续
+`PRODUCTION_SPARK_CLASSIFY` 的 observation/category 对应一致。
 
 同步后必须停止并重新启动实际使用的 `2026.launch`，运行中节点不会重新读取 launch 参数。启动前按本文件安全检查确认 `/odom_raw` 为有限值且 `odom -> base_link`、`map -> base_link` TF 已恢复；出现 NaN 或 `TF_NAN_INPUT` 时先零速并重启底盘/定位链路。启动后观察日志应依次出现六个 `QR_FACE_<编号>` 状态。仅做 Python/launch 静态检查时，在本机执行：
 

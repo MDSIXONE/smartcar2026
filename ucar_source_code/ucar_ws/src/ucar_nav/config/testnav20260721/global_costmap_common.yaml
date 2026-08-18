@@ -1,5 +1,5 @@
 # testnav20260721 global costmap.  Keep the real vehicle footprint/frames and
-# The task raises this startup value to 0.235 m after point 3.
+# The task raises this startup value to 0.224 m after point 3.
 footprint: [[0.171, -0.128], [0.171, 0.128], [-0.171, 0.128], [-0.171, -0.128]]
 footprint_padding: 0.0
 transform_tolerance: 0.5
