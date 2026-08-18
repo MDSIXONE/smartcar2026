@@ -4,7 +4,8 @@
 
 Flow:
   1. Navigate to centre 52.
-  2. From 52, face QR observation points 262, 232, and 295 in order.
+  2. From 52, face QR observation points 262, 232, 295, 61, 41, and 43
+     in order (180°, 90°, -90°, -135°, 135°, 45°).
      If a fresh QR is not decoded while facing a point, turn slowly for at
      most one complete revolution while scanning.
   3. After both QR items are classified, announce their collection before
@@ -48,6 +49,7 @@ import rospy
 import tf
 from actionlib_msgs.msg import GoalStatus
 from cv_bridge import CvBridge, CvBridgeError
+from dynamic_reconfigure.client import Client as DynamicReconfigureClient
 from geometry_msgs.msg import PoseStamped, Twist
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
 from nav_msgs.msg import Odometry
@@ -58,6 +60,7 @@ from std_msgs.msg import Int8, String
 from std_srvs.srv import Empty, SetBool
 
 from production_task_geometry import (
+    DEFAULT_QR_OBSERVATION_NUMBERS,
     DEFAULT_FALLBACK_PRODUCTION_OBSERVATION_HEADINGS_DEG,
     DEFAULT_FALLBACK_PRODUCTION_ROUTE,
     DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG,
@@ -137,7 +140,8 @@ class ProductionTask2026(object):
             rospy.get_param("~sprint_transverse_enabled", False))
         self.qr_observation_numbers = [
             int(value) for value in
-            rospy.get_param("~qr_observation_numbers", [262, 232, 295])
+            rospy.get_param(
+                "~qr_observation_numbers", DEFAULT_QR_OBSERVATION_NUMBERS)
         ]
         self.production_route_numbers = [
             int(value) for value in
@@ -202,6 +206,8 @@ class ProductionTask2026(object):
             "~lane_owner_service", "/cmd_vel_owner/set_lane_mode"))
         self.lane_state_topic = str(rospy.get_param(
             "~lane_state_topic", "/lane_proto/state"))
+        self.lane_result_topic = str(rospy.get_param(
+            "~lane_result_topic", "/lane_proto/result"))
         self.lane_handoff_timeout = float(rospy.get_param(
             "~lane_handoff_timeout", 360.0))
         self.tf_lookup_retry_seconds = float(rospy.get_param(
@@ -233,6 +239,27 @@ class ProductionTask2026(object):
             rospy.get_param("~post_qr_waypoint_number", 3))
         self.post_qr_waypoint_heading_point_number = int(
             rospy.get_param("~post_qr_waypoint_heading_point_number", 0))
+        self.local_costmap_layer_control_enabled = bool(rospy.get_param(
+            "~local_costmap_layer_control_enabled", True))
+        self.local_costmap_enable_waypoint_number = int(rospy.get_param(
+            "~local_costmap_enable_waypoint_number", 3))
+        self.local_costmap_reconfigure_timeout = float(rospy.get_param(
+            "~local_costmap_reconfigure_timeout", 5.0))
+        self.local_costmap_obstacle_layer = str(rospy.get_param(
+            "~local_costmap_obstacle_layer",
+            "/move_base/local_costmap/obstacle_layer"))
+        self.local_costmap_inflation_layer = str(rospy.get_param(
+            "~local_costmap_inflation_layer",
+            "/move_base/local_costmap/inflation_layer"))
+        self.global_costmap_inflation_layer = str(rospy.get_param(
+            "~global_costmap_inflation_layer",
+            "/move_base/global_costmap/inflation_layer"))
+        self.global_costmap_inflation_radius_m = float(rospy.get_param(
+            "~global_costmap_inflation_radius_m", 0.235))
+        self.processing_parking_profile_enabled = bool(rospy.get_param(
+            "~processing_parking_profile_enabled", True))
+        self.processing_parking_inflation_radius_m = float(
+            rospy.get_param("~processing_parking_inflation_radius_m", 0.10))
 
         self.start_delay = float(rospy.get_param("~start_delay", 2.0))
         self.resume_production_only = bool(
@@ -295,7 +322,7 @@ class ProductionTask2026(object):
         self.camera_frame_timeout = float(
             rospy.get_param("~camera_frame_timeout", 1.0))
         self.video_device = str(
-            rospy.get_param("~video_device", "/dev/video0"))
+            rospy.get_param("~video_device", "/dev/ucar_camera"))
         self.camera_width = int(rospy.get_param("~camera_width", 640))
         self.camera_height = int(rospy.get_param("~camera_height", 480))
         self.camera_warmup_frames = max(
@@ -442,7 +469,8 @@ class ProductionTask2026(object):
         if (self.lane_handoff_enabled and not all((
                 self.lane_activate_service.strip(),
                 self.lane_owner_service.strip(),
-                self.lane_state_topic.strip()))):
+                self.lane_state_topic.strip(),
+                self.lane_result_topic.strip()))):
             raise TaskDefinitionError(
                 "lane activation, owner, and state endpoints must be set")
         self.simulation_host = self.resolve_simulation_host()
@@ -573,6 +601,25 @@ class ProductionTask2026(object):
         self.middle_zone_bounds = (
             self.middle_zone_x_min, self.middle_zone_x_max,
             self.middle_zone_y_min, self.middle_zone_y_max)
+        self.ocr_stop_offset_m = float(rospy.get_param(
+            "~ocr_stop_offset_m", self.middle_zone_square_side / 2.0))
+        if (not is_finite(self.ocr_stop_offset_m) or
+                self.ocr_stop_offset_m <= 0.0):
+            raise TaskDefinitionError(
+                "ocr_stop_offset_m must be finite and positive")
+        if (not is_finite(self.processing_parking_inflation_radius_m) or
+                self.processing_parking_inflation_radius_m <= 0.0 or
+                self.processing_parking_inflation_radius_m >=
+                self.ocr_stop_offset_m):
+            raise TaskDefinitionError(
+                "processing_parking_inflation_radius_m must be finite, "
+                "positive, and smaller than ocr_stop_offset_m")
+        if (not is_finite(self.global_costmap_inflation_radius_m) or
+                self.global_costmap_inflation_radius_m <= 0.0):
+            raise TaskDefinitionError(
+                "global_costmap_inflation_radius_m must be finite and "
+                "positive")
+        self._processing_parking_original_inflation_radius_m = None
 
         self.move_base = actionlib.SimpleActionClient(
             "move_base", MoveBaseAction)
@@ -642,6 +689,7 @@ class ProductionTask2026(object):
         self.served_wall_points = set()
         self._ocr_turn_stop_flag = False
         self.lane_state = ""
+        self.lane_result = ""
         self.lane_state_event = threading.Event()
 
         rospy.Subscriber(
@@ -662,6 +710,8 @@ class ProductionTask2026(object):
             "/rosout_agg", Log, self.rosout_cb, queue_size=100)
         rospy.Subscriber(
             self.lane_state_topic, String, self.lane_state_cb, queue_size=10)
+        rospy.Subscriber(
+            self.lane_result_topic, String, self.lane_result_cb, queue_size=10)
         rospy.on_shutdown(self.shutdown)
 
         self.publish_state("WAITING_START")
@@ -763,6 +813,11 @@ class ProductionTask2026(object):
     def lane_state_cb(self, message):
         with self.lock:
             self.lane_state = message.data.strip()
+        self.lane_state_event.set()
+
+    def lane_result_cb(self, message):
+        with self.lock:
+            self.lane_result = message.data.strip()
         self.lane_state_event.set()
 
     def qr_result_cb(self, message):
@@ -897,6 +952,16 @@ class ProductionTask2026(object):
                 self.move_base_ready_timeout)
         self.wait_for_safe_start()
         self.switch_to_point_mode()
+        if self.resume_production_only:
+            # Resume mode starts after the point-3 leg has already completed.
+            self.set_global_costmap_inflation_radius(
+                self.global_costmap_inflation_radius_m,
+                "resume_after_point_3")
+            self.set_local_costmap_dynamic_layers_enabled(
+                True, "resume_after_point_3")
+        else:
+            self.set_local_costmap_dynamic_layers_enabled(
+                False, "before_point_3")
         # The Spark QR classifier writes into result_directory during the QR
         # phase; create it before any classification (also covers resume).
         self.prepare_result_directory()
@@ -1029,6 +1094,26 @@ class ProductionTask2026(object):
                     waypoint[0], waypoint[1], waypoint_yaw,
                     "post-QR waypoint %d" % self.post_qr_waypoint_number,
                     require_plan=True)
+                if getattr(self, "local_costmap_layer_control_enabled", False):
+                    if (self.post_qr_waypoint_number !=
+                            self.local_costmap_enable_waypoint_number):
+                        raise MissionAbort(
+                            "local costmap enable waypoint is %d, but the "
+                            "post-QR waypoint is %d" % (
+                                self.local_costmap_enable_waypoint_number,
+                                self.post_qr_waypoint_number))
+                    self.set_global_costmap_inflation_radius(
+                        self.global_costmap_inflation_radius_m,
+                        "reached_point_%d" %
+                        self.post_qr_waypoint_number)
+                    self.set_local_costmap_dynamic_layers_enabled(
+                        True, "reached_point_%d" %
+                        self.post_qr_waypoint_number)
+            elif getattr(self, "local_costmap_layer_control_enabled", False):
+                raise MissionAbort(
+                    "post_qr_waypoint_number must be point %d when local "
+                    "costmap layer control is enabled" %
+                    self.local_costmap_enable_waypoint_number)
 
         if self.resume_production_only:
             real_category, sim_category = self.set_target_categories_from_qr(
@@ -1171,7 +1256,7 @@ class ProductionTask2026(object):
             self.log_safe_text(missing_categories))
 
     def finish_at_destination(self, reason):
-        """Navigate to the handoff point, publish success, and start lane mode."""
+        """Navigate near the final area, finish radar parking, then publish success."""
         if self.destination_midpoint_point_numbers:
             first = self.points[
                 self.destination_midpoint_point_numbers[0]]
@@ -1197,13 +1282,14 @@ class ProductionTask2026(object):
             destination[0], destination[1], destination_yaw,
             "destination %s" % destination_label,
             require_plan=True)
+        # Navigation only brings the vehicle to the final-area handoff point.
+        # The task is not successful until the resident lane node reports the
+        # radar corner controller's GOAL result.
+        self.handoff_to_lane()
         self.publish_state("SUCCEEDED")
         self.publish_result(
-            True, "%s; arrived at destination %s" % (reason, destination_label))
-        # The successful navigation action is the boundary.  Do not add a
-        # parking command here: activate the already-warm lane node and
-        # switch command ownership directly.
-        self.handoff_to_lane()
+            True, "%s; arrived and parked at destination %s" %
+            (reason, destination_label))
         rospy.signal_shutdown("lane following completed")
 
     @staticmethod
@@ -2291,9 +2377,14 @@ class ProductionTask2026(object):
         while not rospy.is_shutdown() and time.time() < deadline:
             with self.lock:
                 lane_state = self.lane_state
+                lane_result = self.lane_result
             if lane_state == "STOPPED":
-                rospy.loginfo("PRODUCTION_LANE_HANDOFF_COMPLETED")
-                return
+                if lane_result in ("ABORT", "ESTOP", "CONFIG"):
+                    raise MissionAbort(
+                        "lane parking stopped with result %s" % lane_result)
+                if lane_result == "GOAL":
+                    rospy.loginfo("PRODUCTION_LANE_HANDOFF_COMPLETED result=GOAL")
+                    return
             self.lane_state_event.wait(0.10)
             self.lane_state_event.clear()
         raise MissionAbort(
@@ -2304,8 +2395,9 @@ class ProductionTask2026(object):
         """Ask the local simulation to start; retries then falls back.
 
         POST /start with the item name and its category.  A 2xx reply with
-        ``accepted`` returns; HTTP 409 means the simulation is already
-        running and aborts immediately; other failures retry up to
+        ``accepted`` returns; HTTP 409 means the bridge already has a
+        running/finished task and falls through to status polling; other
+        failures retry up to
         simulation_start_retries before returning False, letting the caller
         fall back to /status polling in simulation_wait_done (whose
         simulation_done_timeout of 120 s keeps the mission moving).
@@ -2331,7 +2423,10 @@ class ProductionTask2026(object):
                     response.close()
             except urllib2.HTTPError as exc:
                 if exc.code == 409:
-                    raise MissionAbort("simulation already running")
+                    rospy.logwarn(
+                        "PRODUCTION_SIMULATION_START_409_CONTINUE item=%s",
+                        self.log_safe_text(item_name))
+                    return False
                 last_error = "http=%d" % exc.code
                 rospy.logwarn(
                     "PRODUCTION_SIMULATION_START_RETRY attempt=%d/%d "
@@ -3025,7 +3120,7 @@ class ProductionTask2026(object):
         intersection = observation.get(
             "forward_ray_wall_intersection_map", wall_coordinate)
         stop_x, stop_y = stop_point_for_wall_point(
-            intersection, self.middle_zone_square_side,
+            intersection, self.ocr_stop_offset_m,
             self.middle_zone_bounds)
         parking_yaw = normalize_angle(
             bearing((stop_x, stop_y), intersection) + math.pi)
@@ -3035,10 +3130,18 @@ class ProductionTask2026(object):
             "intersection=%s stop=%.3f,%.3f item=%s",
             wall_number, wall_coordinate, intersection, stop_x, stop_y,
             self.log_safe_text(item))
-        self.navigate_coordinates(
-            stop_x, stop_y, parking_yaw,
-            "processing stop point %d" % wall_number,
-            require_plan=True)
+        parking_profile_enabled = getattr(
+            self, "processing_parking_profile_enabled", False)
+        try:
+            if parking_profile_enabled:
+                self.enter_processing_parking_profile()
+            self.navigate_coordinates(
+                stop_x, stop_y, parking_yaw,
+                "processing stop point %d" % wall_number,
+                require_plan=True)
+        finally:
+            if parking_profile_enabled:
+                self.exit_processing_parking_profile()
         self.stop_motion()
         if announce:
             self.publish_state("PROCESSING_ANNOUNCE_%03d" % wall_number)
@@ -4038,6 +4141,137 @@ class ProductionTask2026(object):
             rospy.sleep(0.1)
         rospy.loginfo(
             "PRODUCTION_TASK navigation mode switched to %s", mode)
+
+    def set_local_costmap_inflation_radius(self, radius, stage):
+        """Apply and verify one local inflation radius via dynamic reconfigure."""
+        if not getattr(self, "local_costmap_layer_control_enabled", False):
+            raise MissionAbort(
+                "local costmap layer control is required for %s" % stage)
+        radius = float(radius)
+        try:
+            client = DynamicReconfigureClient(
+                self.local_costmap_inflation_layer,
+                timeout=self.local_costmap_reconfigure_timeout)
+            configuration = client.update_configuration({
+                "inflation_radius": radius,
+            })
+        except Exception as exc:
+            raise MissionAbort(
+                "cannot set local inflation radius %.3f at %s: %s" %
+                (radius, stage, exc))
+        applied = float(configuration["inflation_radius"])
+        if abs(applied - radius) > 1e-6:
+            raise MissionAbort(
+                "local inflation radius %.3f did not apply at %s; got %.3f" %
+                (radius, stage, applied))
+        rospy.loginfo(
+            "PRODUCTION_COSTMAP stage=%s local_inflation_radius=%.3f",
+            stage, applied)
+        return applied
+
+    def set_global_costmap_inflation_radius(self, radius, stage):
+        """Apply and verify the persistent post-point-3 global inflation."""
+        if not getattr(self, "local_costmap_layer_control_enabled", False):
+            raise MissionAbort(
+                "global costmap inflation control is required for %s" % stage)
+        radius = float(radius)
+        try:
+            client = DynamicReconfigureClient(
+                self.global_costmap_inflation_layer,
+                timeout=self.local_costmap_reconfigure_timeout)
+            configuration = client.update_configuration({
+                "inflation_radius": radius,
+            })
+        except Exception as exc:
+            raise MissionAbort(
+                "cannot set global inflation radius %.3f at %s: %s" %
+                (radius, stage, exc))
+        applied = float(configuration["inflation_radius"])
+        if abs(applied - radius) > 1e-6:
+            raise MissionAbort(
+                "global inflation radius %.3f did not apply at %s; got %.3f" %
+                (radius, stage, applied))
+        rospy.loginfo(
+            "PRODUCTION_COSTMAP stage=%s global_inflation_radius=%.3f",
+            stage, applied)
+        return applied
+
+    def enter_processing_parking_profile(self):
+        """Reduce local inflation for wall parking while keeping point mode."""
+        if self._processing_parking_original_inflation_radius_m is not None:
+            raise MissionAbort("processing parking profile is already active")
+        if not getattr(self, "local_costmap_layer_control_enabled", False):
+            raise MissionAbort(
+                "processing parking profile requires local costmap control")
+        try:
+            client = DynamicReconfigureClient(
+                self.local_costmap_inflation_layer,
+                timeout=self.local_costmap_reconfigure_timeout)
+            current = client.get_configuration()
+            original_radius = float(current["inflation_radius"])
+        except Exception as exc:
+            raise MissionAbort(
+                "cannot read local inflation radius before processing "
+                "parking: %s" % exc)
+        self._processing_parking_original_inflation_radius_m = original_radius
+        try:
+            self.set_local_costmap_inflation_radius(
+                self.processing_parking_inflation_radius_m,
+                "processing_parking_enter")
+            self.switch_to_point_mode()
+            rospy.loginfo(
+                "PRODUCTION_PROCESSING_PROFILE entered inflation=%.3f "
+                "navigation_mode=point",
+                self.processing_parking_inflation_radius_m)
+        except Exception:
+            self.exit_processing_parking_profile()
+            raise
+
+    def exit_processing_parking_profile(self):
+        """Restore normal inflation and point-mode navigation."""
+        original_radius = (
+            self._processing_parking_original_inflation_radius_m)
+        if original_radius is None:
+            return
+        try:
+            self.set_local_costmap_inflation_radius(
+                original_radius, "processing_parking_exit")
+            self.switch_to_point_mode()
+            rospy.loginfo(
+                "PRODUCTION_PROCESSING_PROFILE exited inflation=%.3f "
+                "navigation_mode=point", original_radius)
+        finally:
+            self._processing_parking_original_inflation_radius_m = None
+
+    def set_local_costmap_dynamic_layers_enabled(self, enabled, stage):
+        """Toggle local lidar obstacles and their inflation as one stage."""
+        # Existing object.__new__-based unit tests do not run __init__.  Their
+        # absent flag intentionally keeps this runtime-only control inactive.
+        if not getattr(self, "local_costmap_layer_control_enabled", False):
+            return
+        layers = (
+            ("obstacle_layer", self.local_costmap_obstacle_layer),
+            ("inflation_layer", self.local_costmap_inflation_layer),
+        )
+        for layer_name, namespace in layers:
+            try:
+                client = DynamicReconfigureClient(
+                    namespace,
+                    timeout=self.local_costmap_reconfigure_timeout)
+                configuration = client.update_configuration({
+                    "enabled": bool(enabled),
+                })
+            except Exception as exc:
+                raise MissionAbort(
+                    "cannot set local %s enabled=%s at %s: %s" %
+                    (layer_name, enabled, stage, exc))
+            if bool(configuration["enabled"]) != bool(enabled):
+                raise MissionAbort(
+                    "local %s did not apply enabled=%s at %s" %
+                    (layer_name, enabled, stage))
+        rospy.loginfo(
+            "PRODUCTION_COSTMAP stage=%s local_obstacle_and_inflation=%s",
+            stage, "enabled" if enabled else "disabled")
 
     def wait_for_safe_start(self):
         deadline = rospy.Time.now() + rospy.Duration(self.safe_start_timeout)

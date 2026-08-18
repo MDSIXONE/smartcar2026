@@ -14,6 +14,7 @@
   <exec_depend>actionlib_msgs</exec_depend>
   <exec_depend>cym_planner</exec_depend>
   <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>dynamic_reconfigure</exec_depend>
   <exec_depend>jie_ware</exec_depend>
   <exec_depend>lane_proto</exec_depend>
   <exec_depend>map_server</exec_depend>

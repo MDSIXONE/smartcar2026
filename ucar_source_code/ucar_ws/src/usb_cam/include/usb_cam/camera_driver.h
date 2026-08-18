@@ -68,6 +68,9 @@ protected:
 
     /* V4L camera parameters */
     static bool streaming_status;
+    static bool capture_requested;
+    static double reconnect_timeout;
+    static double reconnect_interval;
     static std::string video_device_name;
     static std::string io_method_name;
     static std::string pixel_format_name;
@@ -103,6 +106,12 @@ protected:
     static void v4l_query_controls();
     static void adjust_camera();
     static bool start_capture();
+    static bool start_capture_once(int &error_code);
+    static bool recover_device();
+    static void reset_device();
+    static void mark_device_disconnected();
+    static bool device_ready();
+    static bool is_device_disconnect_error(int error_code);
     static camera_image_t* read_frame();
     static bool decode_ffmpeg(const void *src, int len, camera_image_t *dest);
     static bool process_image(const void * src, int len, camera_image_t * dest);

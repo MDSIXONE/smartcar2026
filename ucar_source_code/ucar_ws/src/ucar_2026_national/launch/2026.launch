@@ -19,6 +19,8 @@
     <!-- No RViz/camera workload by default. Set false only when a manual
          session explicitly needs an immediately-live camera stream. -->
     <arg name="camera_start_suspended" default="true"/>
+    <!-- Stable udev alias; do not depend on the enumerated /dev/videoN index. -->
+    <arg name="camera_device" default="/dev/ucar_camera"/>
     <!-- RViz-only chassis model; it is a visual on the existing base_link and
          does not create TF, collision geometry, or a control dependency. -->
     <param name="robot_description" textfile="$(find ucar_2026_national)/urdf/ucar_2026_national_visual.urdf"/>
@@ -36,7 +38,7 @@
          session may opt in with camera_start_suspended:=false. -->
     <node name="usb_cam" pkg="usb_cam" type="usb_cam_node" output="screen"
           respawn="$(eval arg('task_enabled') != 'true')" respawn_delay="2.0">
-        <param name="video_device" value="/dev/video0"/>
+        <param name="video_device" value="$(arg camera_device)"/>
         <param name="image_width" value="640"/>
         <param name="image_height" value="480"/>
         <param name="pixel_format" value="yuyv"/>
@@ -44,6 +46,8 @@
         <param name="io_method" value="mmap"/>
         <param name="framerate" value="30"/>
         <param name="create_suspended" value="$(arg camera_start_suspended)"/>
+        <param name="reconnect_timeout" value="8.0"/>
+        <param name="reconnect_interval" value="0.5"/>
         <param name="camera_info_url" type="string"
                value="file://$(find ucar_cam)/camera_calibration.yaml"/>
     </node>
@@ -128,8 +132,18 @@
             <arg name="require_fresh_odom" value="true"/>
             <arg name="odom_fresh_timeout" value="4.0"/>
             <arg name="exit_on_stop" value="true"/>
+            <!-- 终点视觉命中后直接用两面墙雷达闭环；若墙距仍超过
+                 1m，lane_proto 自己退回原来的 PAUSE+APPROACH。 -->
+            <arg name="use_lidar" value="true"/>
+            <!-- OCR 完成后交接到从小车同步的新版 lane_proto。主流程仍共享
+                 usb_cam/底盘；新版的雷达板检测、BoardKF 闭环绕板、终点板面
+                 复核和无板回退由 board_in_lane/go_around 打开。 -->
+            <arg name="board_in_lane" value="true"/>
+            <arg name="go_around" value="true"/>
+            <arg name="board_stop_dist" value="0.321"/>
+            <arg name="go_around_keepout" value="0.15"/>
             <!-- 2026-08-15：交接后必须走起跑序列（黄线对齐 → 认灯 → 进三岔口
-                 → 巡线 → 终点横线 STOPPED）。缺 is_fork:=yolo 时交接点画面里的
+                 → 巡线 → 终点雷达角落闭环 STOPPED）。缺 is_fork:=yolo 时交接点画面里的
                  黄线会在 FOLLOW 相位被 goal_block 当终点横线立即触发
                  APPROACH/STOPPED，整段巡线被跳过。以下起跑与性能参数与已实车
                  验证的 handoff_lane.sh（2026-08-12 最终值）对齐。 -->
@@ -139,9 +153,9 @@
             <arg name="align_offset" value="0.14"/>
             <arg name="start_offset" value="0.23"/>
             <arg name="goal_y_lo" value="0.85"/>
-            <!-- 2026-08-16：0.35 -> 0.25。实车巡线容易出线，
+            <!-- 2026-08-17：采用新版巡线参考值 0.20。实车巡线容易出线，
                  降速 30% 给视觉修正留出反应时间。 -->
-            <arg name="linear_speed" value="0.25"/>
+            <arg name="linear_speed" value="0.2"/>
             <arg name="gain" value="1.2"/>
             <arg name="rate" value="20"/>
             <arg name="dump_every" value="3"/>
@@ -193,14 +207,16 @@
             <param name="sprint_end_point_number" value="288"/>
             <param name="sprint_end_x" value="0.875"/>
             <param name="sprint_end_y" value="1.75"/>
-            <!-- 冲刺朝向（度）：前进冲刺 175（实车验证 180 偏一点）；
+            <!-- 冲刺朝向（度）：前进冲刺 180（本轮恢复；此前 170，历史实车观察略偏）；
                  横向平移实验用车头 90°，已保留（sprint_transverse_enabled
                  置 true + sprint_yaw_deg=90 即可切换）。 -->
-            <param name="sprint_yaw_deg" value="175"/>
+            <param name="sprint_yaw_deg" value="180"/>
             <!-- 横向平移实验：false 走前进冲刺（默认）；true 走
                  CymPlanner transverse 模式（车头 90° 横向 -x 平移）。 -->
             <param name="sprint_transverse_enabled" value="false"/>
-            <rosparam param="qr_observation_numbers">[262, 232, 295]</rosparam>
+            <!-- QR scan directions from centre point 52:
+                 180° -> 90° -> -90° -> -135° -> 135° -> 45°. -->
+            <rosparam param="qr_observation_numbers">[262, 232, 295, 61, 41, 43]</rosparam>
             <!-- Each target is reached before one OCR search revolution.  A
                  candidate is centred/ranged; once both requested categories
                  are absent from this inner route, the perimeter fallback
@@ -224,6 +240,13 @@
                  is kept with its default 3.0 for launch compatibility and is
                  no longer used by the task code. -->
             <param name="processing_dwell_seconds" value="3.0"/>
+            <!-- OCR 识别成功后，内墙交点向场内内缩 29cm 作为停车坐标。 -->
+            <param name="ocr_stop_offset_m" value="0.29"/>
+            <!-- Normal route keeps the large local safety inflation.  The
+                 final OCR wall-parking leg temporarily uses a smaller local
+                 radius, while CymPlanner remains in front-point mode. -->
+            <param name="processing_parking_profile_enabled" value="true"/>
+            <param name="processing_parking_inflation_radius_m" value="0.10"/>
             <!-- Local simulation (host PC) coordination: only after the
                  real item has been parked and its completion announcement
                  has finished does the task park/start the simulation item. -->
@@ -237,12 +260,15 @@
             <!-- Synchronous announcement budget; a timeout terminates the
                  TTS helper and continues the mission. -->
             <param name="speak_wait_timeout" value="120"/>
-            <!-- After SUCCEEDED, activate the already resident lane node and
-                 atomically switch the single /cmd_vel owner. -->
+            <!-- At the coarse destination, activate the already resident lane
+                 node and atomically switch the single /cmd_vel owner.  Only
+                 after lane_proto publishes GOAL does production_task publish
+                 the final SUCCEEDED. -->
             <param name="lane_handoff_enabled" value="true"/>
             <param name="lane_activate_service" value="/lane_proto/set_active"/>
             <param name="lane_owner_service" value="/cmd_vel_owner/set_lane_mode"/>
             <param name="lane_state_topic" value="/lane_proto/state"/>
+            <param name="lane_result_topic" value="/lane_proto/result"/>
             <param name="lane_handoff_timeout" value="360.0"/>
             <!-- Retry window (s) for a scan stamp briefly outrunning the TF
                  clock (~9 ms jitter seen on the real vehicle); the lookup
@@ -269,6 +295,18 @@
             <!-- Drive to this waypoint after the QR phase (no OCR rotation),
                  then start the production route.  0 disables it. -->
             <param name="post_qr_waypoint_number" value="3"/>
+            <!-- Keep local dynamic obstacles/inflation off during the QR→point-3
+                 leg; production_task_2026 enables both after point 3 arrival. -->
+            <param name="local_costmap_layer_control_enabled" value="true"/>
+            <param name="local_costmap_enable_waypoint_number" value="3"/>
+            <param name="local_costmap_obstacle_layer"
+                   value="/move_base/local_costmap/obstacle_layer"/>
+            <param name="local_costmap_inflation_layer"
+                   value="/move_base/local_costmap/inflation_layer"/>
+            <!-- After point 3, keep the global inflation radius at 0.235 m. -->
+            <param name="global_costmap_inflation_layer"
+                   value="/move_base/global_costmap/inflation_layer"/>
+            <param name="global_costmap_inflation_radius_m" value="0.235"/>
             <!-- Heading the waypoint must face after arrival; 0 keeps the
                  current yaw (no rotation). -->
             <param name="post_qr_waypoint_heading_point_number" value="13"/>
@@ -306,7 +344,7 @@
             <param name="camera_service_timeout" value="10.0"/>
             <param name="use_ros_camera_for_ocr" value="true"/>
             <param name="camera_image_topic" value="/usb_cam/image_raw"/>
-            <param name="video_device" value="/dev/video0"/>
+            <param name="video_device" value="$(arg camera_device)"/>
             <param name="camera_width" value="640"/>
             <param name="camera_height" value="480"/>
             <param name="ocr_python" value="/usr/bin/python3"/>

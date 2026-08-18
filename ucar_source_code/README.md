@@ -9,19 +9,22 @@ SmartCar 2026 真机 ROS 1 工程：包含导航与视觉工作区、CymPlanner 
 | `ucar_ws/` | 实车 ROS Melodic Catkin 工作区；源码位于 `ucar_ws/src/`。 |
 | `ucar_ws/src/ucar_2026/` | 2026 导航启动与专用脚本、URDF、RViz 资源的唯一正式位置。 |
 | `ucar_ws/src/jie_ware/` | 激光定位 ROS 包的唯一正式源码路径；仓库根目录不再保留独立副本。 |
-| `docs/new-computer-gui-simulation-mission.md` | 新电脑/新 Wi-Fi 运行真车双物品主流程与 GUI 仿真的权威操作指南。 |
-| `docs/operations.md` | 实车部署、导航、二维码与建图的专题维护说明。 |
+| `docs/deployment.md` | 新电脑部署 WSL 仿真、动态网络、Windows 防火墙和真车—仿真通信。 |
+| `docs/operations.md` | `ucar_2026` 标准主流程操作。 |
+| `docs/operations-national.md` | `ucar_2026_national` 国赛主流程操作。 |
+| `docs/operations-extra.md` | `ucar_2026_extra` 额外 OCR 主流程操作。 |
 | `docs/changes/` | 本地改动记录、验证结果和已知限制。 |
 | `full_map_grid_0p2m.*` | 当前任务地图的网格导出。 |
 
 ## 环境与启动
 
 - 实车工作区使用 Ubuntu 18.04 / ROS Melodic / Python 2。
-- 控制电脑 WSL Ubuntu 20.04 是唯一 ROS Master；地址按
-  [rosmaster/NETWORK_CONFIGURATION.md](rosmaster/NETWORK_CONFIGURATION.md) 动态发现或显式配置，
-  不得在小车端启动 `roscore`。
-- 新电脑首次运行主流程请先按 [docs/new-computer-gui-simulation-mission.md](docs/new-computer-gui-simulation-mission.md)；
-  专题构建、部署和回滚命令见 [docs/operations.md](docs/operations.md)。
+- 当前三套 `start_2026.sh` 由小车端临时托管小车 ROS Master；电脑 WSL 只运行仿真专用
+  `127.0.0.1:11312` 和 HTTP bridge `11313`。地址按
+  [docs/deployment.md](docs/deployment.md) 动态发现，不得照抄旧 Wi-Fi 地址。
+- 新电脑首次运行主流程请先按 [docs/deployment.md](docs/deployment.md)，再根据比赛版本阅读
+  [docs/operations.md](docs/operations.md)、[docs/operations-national.md](docs/operations-national.md)
+  或 [docs/operations-extra.md](docs/operations-extra.md)。
 
 首次使用需要在小车的 ROS Melodic 环境下构建所需 Catkin 包。
 

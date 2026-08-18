@@ -30,8 +30,10 @@ cym_planner/CymPlanner:
     final_yaw_max_vel: 1.00
     final_yaw_tolerance: 0.05
     final_linear_x_gain: 0.0
-    obstacle_lookahead_distance: 0.25
-    obstacle_cost_threshold: 253
+    obstacle_lookahead_distance: 0.8
+    # Any non-zero local cost means the path has entered an inflation band;
+    # return false so move_base can request an event-driven global replan.
+    obstacle_cost_threshold: 1
     carry_speed_scale: 1.0
 
   # 模式 2：body_projection / footprint / laser_avoidance。
@@ -52,8 +54,9 @@ cym_planner/CymPlanner:
     final_yaw_max_vel: 0.25
     final_yaw_tolerance: 0.10
     final_linear_x_gain: 0.6
-    obstacle_lookahead_distance: 0.25
-    obstacle_cost_threshold: 253
+    obstacle_lookahead_distance: 0.8
+    # Treat every non-zero local inflation cost as a replan trigger.
+    obstacle_cost_threshold: 1
     carry_speed_scale: 1.0
 
   # 模式 3：sprint —— 国赛"起点→52"途中 70→288 加速段专用参数集。
@@ -69,6 +72,9 @@ cym_planner/CymPlanner:
   #   到达 288 时朝向同样严格（与 mode1_point 一致）。
   # 2026-08-16（第三轮）：航向环 P 再翻倍（angular_gain 5.0→10.0），
   #   角速度输出仍受 max_vel_theta 0.80 钳制，只加快小角度误差收敛。
+  # 2026-08-18：按实车冲刺角度表现，航向环 P 10.0→5.0；线速度增益不变。
+  # 2026-08-18：对比试跑，冲刺 max_vel_x 2.5→2.7；规划器无独立加速度
+  #   参数，以 linear_x_gain 12.5→13.5 提高前向加速响应。
   # 2026-08-16（第五轮）：速度再次加大——linear_x_gain 5.0→8.0
   #   （稳态 0.20×8.0=1.6 m/s）、max_vel_x 1.20→1.60，稳态顶满上限；
   #   末端停车仍由 approach 自动减速兜底（1.0m 起压到 0.12）。
@@ -97,10 +103,10 @@ cym_planner/CymPlanner:
   #   max_vel_y 横向速度上限，与 max_vel_x 同量级；接近自动减速同样
   #   作用于横向速度。任务节点 sprint_transverse_enabled=true 时切换。
   mode3_sprint:
-    linear_x_gain: 12.5
+    linear_x_gain: 13.5
     linear_x_kd: 0.5
-    max_vel_x: 2.5
-    angular_gain: 10.0
+    max_vel_x: 2.7
+    angular_gain: 5.0
     angular_kd: 0.4
     max_vel_theta: 0.80
     heading_slowdown_min_scale: 0.00
@@ -119,8 +125,9 @@ cym_planner/CymPlanner:
     final_yaw_max_vel: 1.00
     final_yaw_tolerance: 0.05
     final_linear_x_gain: 0.6
-    obstacle_lookahead_distance: 0.25
-    obstacle_cost_threshold: 253
+    obstacle_lookahead_distance: 0.8
+    # Treat every non-zero local inflation cost as a replan trigger.
+    obstacle_cost_threshold: 1
     carry_speed_scale: 1.0
 
   # 受限横移目前是次级兜底。Sol 安全复核发现状态保持、全接触格统计和本地动态

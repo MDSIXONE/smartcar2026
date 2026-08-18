@@ -25,6 +25,35 @@ except ImportError:
 IN_W, IN_H = 320, 192
 
 
+def _s(x):
+    """把任何东西转成**本地 str**(py2 = utf-8 字节串, py3 = 文本)。
+
+    py2 的坑: 只要 % 格式化里混进一个 unicode, 整条格式串和所有参数都会
+    被强制转 unicode —— 而模板里的中文是 utf-8 字节串, 会按 ASCII 去解,
+    立刻 UnicodeDecodeError。ts_backend().decode() 返回的正是 unicode,
+    于是 "backend=%s ... mirror=ON(翻转)" 那行日志就炸在"翻"字上,
+    被外层 except 抓成"分割网加载不了", 主流程直接中止任务(实车出过)。
+
+    ⚠ 第二个坑: py2 下 str(异常) 如果异常消息是 unicode, str() 自己就会
+    抛 UnicodeEncodeError。所以非字符串对象必须 try 着转。
+    """
+    if isinstance(x, bytes):
+        return x if str is bytes else x.decode("utf-8", "replace")
+    if str is bytes and type(x).__name__ == "unicode":
+        return x.encode("utf-8", "replace")
+    try:
+        return str(x)
+    except Exception:
+        pass
+    try:                        # py2: 消息是 unicode 的异常走这里
+        return unicode(x).encode("utf-8", "replace")   # noqa: F821
+    except Exception:
+        try:
+            return repr(x)
+        except Exception:
+            return "<无法转成字符串>"
+
+
 class TrackSeg(object):
     def __init__(self, lib_path=None):
         here = os.path.dirname(os.path.abspath(__file__))
@@ -43,13 +72,14 @@ class TrackSeg(object):
                     last = e
         if self.lib is None:
             raise RuntimeError("找不到 libtrackseg*.so (先 make / make cpu): %s"
-                               % last)
+                               % _s(last))
         self.lib.ts_error.restype = ctypes.c_char_p
         self.lib.ts_backend.restype = ctypes.c_char_p
         if self.lib.ts_init() != 0:
-            raise RuntimeError("ts_init: %s" %
-                               self.lib.ts_error().decode("utf-8", "replace"))
-        self.backend = self.lib.ts_backend().decode()
+            raise RuntimeError("ts_init: %s" % _s(self.lib.ts_error()))
+        # ⚠ 不要 .decode(): py2 下那会变成 unicode, 之后任何"中文模板 + 它"
+        # 的日志格式化都会炸(实车上就是这么中止了一次交接)。
+        self.backend = _s(self.lib.ts_backend())
 
     def _prep(self, frame_bgr):
         img = np.ascontiguousarray(frame_bgr, dtype=np.uint8)
@@ -68,7 +98,7 @@ class TrackSeg(object):
                               mask.ctypes.data_as(ctypes.c_char_p))
         if r != 0:
             raise RuntimeError("ts_infer: %s" %
-                               self.lib.ts_error().decode("utf-8", "replace"))
+                               _s(self.lib.ts_error()))
         if out_size and frame_bgr.shape[:2] != (IN_H, IN_W):
             mask = cv2.resize(mask, (frame_bgr.shape[1], frame_bgr.shape[0]),
                               interpolation=cv2.INTER_NEAREST)
@@ -83,7 +113,7 @@ class TrackSeg(object):
             logits.ctypes.data_as(ctypes.c_char_p))
         if r != 0:
             raise RuntimeError("ts_infer_logits: %s" %
-                               self.lib.ts_error().decode("utf-8", "replace"))
+                               _s(self.lib.ts_error()))
         return logits
 
     def close(self):

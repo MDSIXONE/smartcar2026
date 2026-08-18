@@ -1,0 +1,112 @@
+<launch>
+    <!-- 安全默认：只启动导航与地图，不自动运动；执行时显式传 run:=true。 -->
+    <arg name="run" default="false"/>
+
+    <!-- 保持国赛点 70 原坐标；小车必须物理放在点 70。 -->
+    <arg name="initial_pose_x" default="2.25"/>
+    <arg name="initial_pose_y" default="1.75"/>
+    <arg name="initial_pose_a" default="3.141592653589793"/>
+    <arg name="map_file"
+         default="$(find ucar_nav)/maps/iflysse_field_walls_national.yaml"/>
+
+    <!-- 仅保留冲刺段可调参数。linear_x_gain 决定加速响应，max_vel_x
+         决定上限；两者同时调时才是一次完整速度试验。 -->
+    <arg name="sprint_linear_x_gain" default="13.5"/>
+    <arg name="sprint_max_vel_x" default="2.7"/>
+    <arg name="sprint_angular_gain" default="5.0"/>
+    <arg name="sprint_max_vel_theta" default="0.80"/>
+    <arg name="sprint_approach_decel_distance" default="1.0"/>
+    <arg name="sprint_approach_min_vel_x" default="0.12"/>
+
+    <!-- 复用车端底盘、EKF、雷达与静态 TF；ROS Master 仍须使用当前
+         rosmaster/NETWORK_CONFIGURATION.md 发现的 WSL Master。 -->
+    <group>
+        <remap from="scan" to="scan_raw"/>
+        <include file="$(find ucar_controller)/launch/ucar_bringup.launch"/>
+    </group>
+
+    <node pkg="ucar_2026_national" type="navigation_scan_relay.py"
+          name="navigation_scan_relay" output="screen" respawn="true"
+          respawn_delay="2.0"
+          launch-prefix="$(find ucar_2026_national)/scripts/run_melodic_python2.sh">
+        <param name="global_obstacle_filter_enabled" value="true"/>
+        <param name="global_static_filter_radius" value="0.22"/>
+        <param name="global_static_filter_threshold" value="65"/>
+        <param name="global_transform_max_age" value="2.4"/>
+    </node>
+
+    <node name="map_server" pkg="map_server" type="map_server"
+          args="$(arg map_file)" output="screen">
+        <param name="frame_id" value="map"/>
+    </node>
+
+    <node pkg="jie_ware" type="lidar_loc" name="lidar_loc" output="screen">
+        <param name="base_frame" value="base_link"/>
+        <param name="odom_frame" value="odom"/>
+        <param name="laser_frame" value="laser_frame"/>
+        <param name="laser_topic" value="scan"/>
+        <param name="initial_pose_x" value="$(arg initial_pose_x)"/>
+        <param name="initial_pose_y" value="$(arg initial_pose_y)"/>
+        <param name="initial_pose_a" value="$(arg initial_pose_a)"/>
+        <param name="tf_publish_tolerance" value="0.15"/>
+    </node>
+
+    <node pkg="jie_ware" type="lidar_filter_node" name="lidar_filter_node"
+          output="screen">
+        <param name="source_topic" value="/scan"/>
+        <param name="pub_topic" value="/scan_filtered"/>
+        <param name="outlier_threshold" value="0.10"/>
+    </node>
+
+    <!-- 这是 2026 实车导航配置的独立副本入口，不启动完整任务。 -->
+    <node pkg="move_base" type="move_base" respawn="true" name="move_base"
+          output="screen" clear_params="true">
+        <rosparam file="$(find ucar_nav)/config/testnav20260721/global_costmap_common.yaml"
+                  command="load" ns="global_costmap"/>
+        <rosparam file="$(find ucar_nav)/config/testnav20260721/local_costmap_common.yaml"
+                  command="load" ns="local_costmap"/>
+        <rosparam file="$(find ucar_nav)/config/testnav20260721/local_costmap_params.yaml"
+                  command="load"/>
+        <rosparam file="$(find ucar_nav)/config/testnav20260721/global_costmap_params.yaml"
+                  command="load"/>
+        <rosparam file="$(find ucar_nav)/config/testnav20260721/global_planner_params.yaml"
+                  command="load"/>
+        <rosparam file="$(find ucar_nav)/config/testnav20260721/move_base_params.yaml"
+                  command="load"/>
+        <rosparam file="$(find cym_planner)/config/ucar_cym_planner_params.yaml"
+                  command="load"/>
+
+        <!-- 覆盖本次试验的冲刺速度；point 模式参数保持配置文件原值。 -->
+        <param name="cym_planner/CymPlanner/mode3_sprint/linear_x_gain"
+               type="double" value="$(arg sprint_linear_x_gain)"/>
+        <param name="cym_planner/CymPlanner/mode3_sprint/max_vel_x"
+               type="double" value="$(arg sprint_max_vel_x)"/>
+        <param name="cym_planner/CymPlanner/mode3_sprint/angular_gain"
+               type="double" value="$(arg sprint_angular_gain)"/>
+        <param name="cym_planner/CymPlanner/mode3_sprint/max_vel_theta"
+               type="double" value="$(arg sprint_max_vel_theta)"/>
+        <param name="cym_planner/CymPlanner/mode3_sprint/approach_decel_distance"
+               type="double" value="$(arg sprint_approach_decel_distance)"/>
+        <param name="cym_planner/CymPlanner/mode3_sprint/approach_min_vel_x"
+               type="double" value="$(arg sprint_approach_min_vel_x)"/>
+    </node>
+
+    <node name="robot_pose_publisher" pkg="robot_pose_publisher"
+          type="robot_pose_publisher" output="screen"/>
+
+    <node if="$(arg run)" name="national_sprint_speed_debug"
+          pkg="ucar_2026_national" type="national_sprint_speed_debug.py"
+          output="screen" required="true"
+          launch-prefix="$(find ucar_2026_national)/scripts/run_melodic_python2.sh">
+        <param name="grid_path"
+               value="$(find ucar_2026_national)/config/production_full_grid_all_numbered.json"/>
+        <param name="start_point_number" value="70"/>
+        <param name="slope_left_point_number" value="67"/>
+        <param name="slope_right_point_number" value="290"/>
+        <param name="start_yaw_deg" value="180.0"/>
+        <param name="goal_yaw_deg" value="180.0"/>
+        <param name="cmd_vel_topic" value="/cmd_vel"/>
+        <param name="safe_start_timeout" value="90.0"/>
+        <param name="goal_timeout" value="120.0"/>
+    </node>
+</launch>

@@ -264,13 +264,14 @@ def main():
             log("ERROR: simulation environment not ready within %.0fs, exiting"
                 % args.wait_ready_timeout)
             sys.exit(1)
-        log("SIMULATION_BRIDGE_READY")
+        log("SIMULATION_ENVIRONMENT_READY")
     else:
-        log("SIMULATION_BRIDGE_READY (ready check skipped, wait-ready-timeout=0)")
+        log("SIMULATION_ENVIRONMENT_READY (ready check skipped, wait-ready-timeout=0)")
 
     BRIDGE.done_timeout = args.done_timeout
     server = ThreadingHTTPServer(("0.0.0.0", args.port), BridgeHandler)
     server.daemon_threads = True
+    log("SIMULATION_BRIDGE_READY")
     log("simulation bridge listening on 0.0.0.0:%d (state=waiting)" % args.port)
     try:
         server.serve_forever()

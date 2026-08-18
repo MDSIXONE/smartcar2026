@@ -19,6 +19,7 @@ if SCRIPT_ROOT not in sys.path:
     sys.path.insert(0, SCRIPT_ROOT)
 
 from production_task_geometry import (  # noqa: E402
+    DEFAULT_QR_OBSERVATION_NUMBERS,
     DEFAULT_FALLBACK_PRODUCTION_OBSERVATION_HEADINGS_DEG,
     DEFAULT_FALLBACK_PRODUCTION_ROUTE,
     DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG,
@@ -59,7 +60,10 @@ class ProductionTaskGeometryTest(unittest.TestCase):
 
     def test_requested_points_have_expected_coordinates(self):
         expected = {
+            41: (-2.25, 2.75),
+            43: (-1.25, 2.75),
             52: (-1.75, 2.25),
+            61: (-2.25, 1.75),
             262: (-2.50, 2.25),
             232: (-1.75, 3.00),
             295: (-1.75, 1.50),
@@ -83,12 +87,18 @@ class ProductionTaskGeometryTest(unittest.TestCase):
 
     def test_qr_observation_headings_are_from_staging_point_52(self):
         staging = self.points[52]
-        self.assertAngleAlmostEqual(
-            bearing(staging, self.points[262]), math.pi)
-        self.assertAngleAlmostEqual(
-            bearing(staging, self.points[232]), math.pi / 2.0)
-        self.assertAngleAlmostEqual(
-            bearing(staging, self.points[295]), -math.pi / 2.0)
+        self.assertEqual(
+            DEFAULT_QR_OBSERVATION_NUMBERS,
+            [262, 232, 295, 61, 41, 43])
+        expected_headings = [
+            math.pi, math.pi / 2.0, -math.pi / 2.0,
+            -3.0 * math.pi / 4.0, 3.0 * math.pi / 4.0,
+            math.pi / 4.0,
+        ]
+        for number, expected in zip(
+                DEFAULT_QR_OBSERVATION_NUMBERS, expected_headings):
+            self.assertAngleAlmostEqual(
+                bearing(staging, self.points[number]), expected)
 
     def test_middle_completion_counts_and_wall_references(self):
         with open(self.grid_path, "r") as handle:
@@ -235,29 +245,30 @@ class ProductionTaskGeometryTest(unittest.TestCase):
             (x_min, x_max, y_min, y_max, side),
             (-2.5, 2.5, -0.5, 1.5, 0.5))
 
-    def test_stop_point_for_wall_point_is_25cm_inside_the_field(self):
+    def test_stop_point_for_wall_point_uses_explicit_29cm_offset(self):
         bounds = (-2.5, 2.5, -0.5, 1.5)
         cases = [
             # wall intersection -> processing-area stop point:
-            ((0.75, 1.5), (0.75, 1.25)),    # 300 -> point 7
-            ((2.5, 0.75), (2.25, 0.75)),    # 455 -> point 20
-            ((-2.5, 0.75), (-2.25, 0.75)),  # 454 -> point 11
-            ((-2.5, 0.5), (-2.25, 0.5)),    # 448 -> midpoint of 11 and 21
-            ((-0.75, -0.5), (-0.75, -0.25)),  # 307 -> point 34
+            ((0.75, 1.5), (0.75, 1.21)),    # 300 -> point 7
+            ((2.5, 0.75), (2.21, 0.75)),    # 455 -> point 20
+            ((-2.5, 0.75), (-2.21, 0.75)),  # 454 -> point 11
+            ((-2.5, 0.5), (-2.21, 0.5)),    # 448 -> midpoint of 11 and 21
+            ((-0.75, -0.5), (-0.75, -0.21)),  # 307 -> point 34
         ]
         for wall_point, expected_stop in cases:
-            self.assertEqual(
-                stop_point_for_wall_point(wall_point, 0.5, bounds),
-                expected_stop)
+            actual_stop = stop_point_for_wall_point(
+                wall_point, 0.29, bounds)
+            self.assertAlmostEqual(actual_stop[0], expected_stop[0], places=9)
+            self.assertAlmostEqual(actual_stop[1], expected_stop[1], places=9)
 
     def test_stop_point_for_wall_point_rejects_off_boundary_point(self):
         bounds = (-2.5, 2.5, -0.5, 1.5)
         with self.assertRaises(TaskDefinitionError):
-            stop_point_for_wall_point((0.0, 0.0), 0.5, bounds)
+            stop_point_for_wall_point((0.0, 0.0), 0.29, bounds)
         with self.assertRaises(TaskDefinitionError):
-            stop_point_for_wall_point((0.75, 0.75), 0.5, bounds)
+            stop_point_for_wall_point((0.75, 0.75), 0.29, bounds)
         with self.assertRaises(TaskDefinitionError):
-            stop_point_for_wall_point((-2.5, 2.5), 0.5, bounds)
+            stop_point_for_wall_point((-2.5, 2.5), 0.29, bounds)
 
 
 @unittest.skipIf(
@@ -287,6 +298,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task._ocr_turn_stop_flag = False
         self.task.processing_dwell_seconds = 0.0
         self.task.middle_zone_square_side = 0.5
+        self.task.ocr_stop_offset_m = 0.29
         self.task.middle_zone_bounds = (-2.5, 2.5, -0.5, 1.5)
         self.task.ocr_alignment_min_speed = 0.12
         self.task.spark_classify_enabled = False
@@ -298,6 +310,92 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
 
     def capture_warning(self, message, *args):
         self.warnings.append(message % args)
+
+    def test_processing_parking_profile_keeps_point_mode_and_restores_inflation(self):
+        messages = []
+
+        class NavigationModePublisher(object):
+            def get_num_connections(self):
+                return 1
+
+            def publish(self, message):
+                messages.append(message.data)
+
+        inflation_state = [0.22]
+
+        class InflationClient(object):
+
+            def __init__(self, _namespace, timeout=None):
+                self.timeout = timeout
+
+            def get_configuration(self):
+                return {"inflation_radius": inflation_state[0]}
+
+            def update_configuration(self, configuration):
+                inflation_state[0] = float(configuration["inflation_radius"])
+                return {"inflation_radius": inflation_state[0]}
+
+        self.task.publish_state = lambda _state: None
+        self.task.require_safe = lambda: None
+        self.task.navigation_mode_pub = NavigationModePublisher()
+        self.task.navigation_mode_connect_timeout = 0.5
+        self.task.local_costmap_layer_control_enabled = True
+        self.task.local_costmap_inflation_layer = (
+            "/move_base/local_costmap/inflation_layer")
+        self.task.local_costmap_reconfigure_timeout = 0.5
+        self.task.processing_parking_inflation_radius_m = 0.10
+        self.task._processing_parking_original_inflation_radius_m = None
+
+        original_client = task_module.DynamicReconfigureClient
+        original_sleep = task_module.rospy.sleep
+        task_module.DynamicReconfigureClient = InflationClient
+        task_module.rospy.sleep = lambda _duration: None
+        try:
+            self.task.enter_processing_parking_profile()
+            self.assertEqual(inflation_state[0], 0.10)
+            self.assertEqual(messages, [
+                "point", "point", "point"])
+
+            self.task.exit_processing_parking_profile()
+            self.assertEqual(inflation_state[0], 0.22)
+            self.assertEqual(messages, [
+                "point", "point", "point",
+                "point", "point", "point"])
+            self.assertIsNone(
+                self.task._processing_parking_original_inflation_radius_m)
+        finally:
+            task_module.DynamicReconfigureClient = original_client
+            task_module.rospy.sleep = original_sleep
+
+    def test_point_three_global_inflation_is_applied_and_verified(self):
+        inflation_state = [0.20]
+        namespaces = []
+
+        class InflationClient(object):
+
+            def __init__(self, namespace, timeout=None):
+                namespaces.append(namespace)
+
+            def update_configuration(self, configuration):
+                inflation_state[0] = float(configuration["inflation_radius"])
+                return {"inflation_radius": inflation_state[0]}
+
+        self.task.local_costmap_layer_control_enabled = True
+        self.task.global_costmap_inflation_layer = (
+            "/move_base/global_costmap/inflation_layer")
+        self.task.local_costmap_reconfigure_timeout = 0.5
+
+        original_client = task_module.DynamicReconfigureClient
+        task_module.DynamicReconfigureClient = InflationClient
+        try:
+            applied = self.task.set_global_costmap_inflation_radius(
+                0.235, "reached_point_3")
+            self.assertEqual(applied, 0.235)
+            self.assertEqual(inflation_state[0], 0.235)
+            self.assertEqual(namespaces, [
+                "/move_base/global_costmap/inflation_layer"])
+        finally:
+            task_module.DynamicReconfigureClient = original_client
 
     def test_rosout_ahrs_crc_is_warning_but_head_len_stays_critical(self):
         self.task.lock = threading.RLock()
@@ -675,6 +773,9 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.wait_for_safe_start = lambda: events.append("safe_start")
         self.task.switch_to_point_mode = lambda: events.append("point_mode")
         self.task.resume_production_only = True
+        self.task.global_costmap_inflation_radius_m = 0.235
+        self.task.set_global_costmap_inflation_radius = (
+            lambda *_args: events.append("global_inflation"))
         self.task.qr_enable_pub = QrPublisher()
 
         def classify_qr_text(observation_number, qr_text):
@@ -708,6 +809,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.assertEqual(
             events,
             ["item_input", "safe_start", "point_mode",
+             "global_inflation",
              "production_navigation"])
 
     def test_qr_completion_does_not_switch_before_first_production_leg(self):
@@ -1446,6 +1548,7 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         self.task._ocr_turn_stop_flag = False
         self.task.processing_dwell_seconds = 0.0
         self.task.middle_zone_square_side = 0.5
+        self.task.ocr_stop_offset_m = 0.29
         self.task.middle_zone_bounds = (-2.5, 2.5, -0.5, 1.5)
         self.task.ocr_alignment_min_speed = 0.12
         self.task.spark_classify_enabled = False
@@ -1771,8 +1874,8 @@ class ProductionTaskDualItemTest(unittest.TestCase):
             lambda: events.append("camera_release"))
         self.task.save_observation_summary = lambda: events.append("save")
         self.task.simulation_request_start = (
-            lambda item, category: events.append(
-                ("sim_start", item, category)))
+            lambda item, category: (
+                events.append(("sim_start", item, category)), False)[1])
         self.task.simulation_wait_done = (
             lambda: (events.append("sim_wait_timeout"), False)[1])
         self.task.simulation_done_timeout = 120.0
@@ -2054,7 +2157,7 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         self.assertEqual(
             payload, {"item_name": u"手机", "category": u"电子产品"})
 
-    def test_simulation_request_start_409_aborts_immediately(self):
+    def test_simulation_request_start_409_continues_to_status_wait(self):
         self.task.simulation_host = "192.168.1.5"
         self.task.simulation_port = 11313
         self.task.simulation_start_timeout = 1.0
@@ -2068,11 +2171,13 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         original_urlopen = task_module.urllib2.urlopen
         task_module.urllib2.urlopen = fake_urlopen
         try:
-            with self.assertRaises(task_module.MissionAbort) as raised:
-                self.task.simulation_request_start(u"手机", u"电子产品")
+            result = self.task.simulation_request_start(u"手机", u"电子产品")
         finally:
             task_module.urllib2.urlopen = original_urlopen
-        self.assertIn("simulation already running", str(raised.exception))
+        self.assertFalse(result)
+        self.assertEqual(len(self.warnings), 1)
+        self.assertIn(
+            "PRODUCTION_SIMULATION_START_409_CONTINUE", self.warnings[0])
 
     def test_simulation_request_start_retries_then_succeeds(self):
         self.task.simulation_host = "192.168.1.5"

@@ -128,6 +128,8 @@ UsbCam::UsbCam():
     node.getParam("pixel_format", pixel_format_name);
     node.getParam("color_format", color_format_name);
     node.param<bool>("create_suspended", create_suspended, false);
+    node.param<double>("reconnect_timeout", reconnect_timeout, 8.0);
+    node.param<double>("reconnect_interval", reconnect_interval, 0.5);
     node.param<bool>("full_ffmpeg_log", full_ffmpeg_log, false);
     node.getParam("camera_name", camera_name);
     node.getParam("camera_frame_id", camera_frame_id);
@@ -186,12 +188,14 @@ UsbCam::UsbCam():
     /* All parameters set, running frame grabber */
     if(!start())
     {
-        ROS_ERROR("Error starting device");
-        node.shutdown();
-        return;
+        ROS_WARN("USB camera device is not available yet; reconnect will be attempted when capture is requested");
+        reset_device();
     }
-    /* Device opened, creating parameter grabber*/
-    v4l_query_controls();
+    /* Device opened, creating parameter grabber */
+    if(device_ready())
+        v4l_query_controls();
+    else
+        ROS_WARN("USB camera controls are unavailable until the device reconnects");
     /* Dynamically created V4L2 parameters */
     ROS_WARN("NOTE: the parameters generated for V4L intrinsic camera controls will be placed under namespace 'intrinsic_controls'");
     ROS_INFO("Use 'intrinsic_controls/ignore' list to enumerate the controls provoking errors or the ones you just want to keep untouched");
@@ -262,7 +266,8 @@ UsbCam::UsbCam():
     node.param<bool>("autoexposure", autoexposure, true);
     node.param<bool>("auto_white_balance", auto_white_balance, false);
     */
-    adjust_camera();
+    if(device_ready())
+        adjust_camera();
 
     // Creating timer
     ros::Duration frame_period(1.f / static_cast<float>(framerate));
@@ -273,13 +278,36 @@ UsbCam::UsbCam():
         if(!start_capture())
         {
             ROS_ERROR("Error starting capture device");
-            node.shutdown();
-            return;
         }
 }
 
 void UsbCam::frame_timer_callback(const ros::TimerEvent &event)
 {
+    static double next_reconnect_attempt = 0.0;
+    if(!streaming_status && capture_requested)
+    {
+        const double now = ros::WallTime::now().toSec();
+        if(now >= next_reconnect_attempt)
+        {
+            int error_code = 0;
+            if(!device_ready() && !recover_device())
+            {
+                next_reconnect_attempt = now + reconnect_interval;
+                return;
+            }
+            if(!start_capture_once(error_code))
+            {
+                if(is_device_disconnect_error(error_code))
+                    mark_device_disconnected();
+                else
+                    capture_requested = false;
+                next_reconnect_attempt = now + reconnect_interval;
+                return;
+            }
+            ROS_INFO("USB_CAM_RECONNECT capture resumed on %s",
+                     video_device_name.c_str());
+        }
+    }
     if(streaming_status)
     {
         camera_image_t* new_image = read_frame();
@@ -319,4 +347,3 @@ usb_cam::UsbCam &usb_cam::UsbCam::Instance()
     static UsbCam instance;
     return instance;
 }
-

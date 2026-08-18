@@ -1,5 +1,8 @@
 # ROS 1 动态网络配置：小车本机 Master
 
+新电脑从零部署、WSL 安装、Windows 防火墙和 COPY MODE 请先阅读
+`docs/deployment.md`；本文只保留主流程运行时的网络速查与故障定位。
+
 主流程的 ROS Master 运行在小车上；电脑不再运行或提供真车 ROS Master。电脑只运行仿真
 bridge 的 HTTP 服务（默认 `11313`）以及其独立的仿真 ROS Master（`127.0.0.1:11312`）。
 

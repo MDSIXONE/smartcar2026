@@ -1,0 +1,27 @@
+# OCR 快捷任务模板（国赛特殊任务用）。
+# 置空（ocr_route_profile: []）时完全沿用国赛 production_route_numbers 逻辑。
+# 每个条目为一个任务点：
+#   point           必填，网格编号点（须存在于 production_full_grid_all_numbered.json）
+#   heading_deg     可选，到达该点时的车头朝向（度）。缺省 None（沿用现有无朝向行为）
+#   rotate_angle_deg 可选，到点后原地旋转扫描角度（度），缺省 360
+#   rotate_dir      可选，旋转方向：ccw 逆时针 / cw 顺时针，缺省 ccw
+#   stop_mode       可选，命中文字后的停车记录模式：wall（国赛默认，激光测墙点编号）
+#                   / free（随机位置，对准后直接记录当前地图位姿），缺省 wall
+#   target_texts    可选，目标文字列表；非空时优先用"检测文本包含任一目标文字"匹配，
+#                   为空时沿用国赛三类别（日用品/食品/电子产品）
+ocr_route_profile: []
+
+# 示例条目（现场复制到上方列表即可切换任务；此注释块不会被加载）：
+# ocr_route_profile:
+#   - point: 12
+#     heading_deg: -45
+#     rotate_angle_deg: 360
+#     rotate_dir: ccw
+#     stop_mode: wall
+#     target_texts: [食品]
+#   - point: 22
+#     heading_deg: 45
+#     rotate_angle_deg: 180
+#     rotate_dir: cw
+#     stop_mode: free
+#     target_texts: []

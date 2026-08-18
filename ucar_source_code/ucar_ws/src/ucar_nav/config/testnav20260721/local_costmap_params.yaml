@@ -9,11 +9,11 @@ local_costmap:
   # footprint safety independent of a momentary lidar occlusion.
   static_map: true
   rolling_window: true
-  # 1 m square is sufficient for the slow body-projection horizon and avoids
-  # copying/drawing unused cells on every local planner cycle.
-  width: 1.0
-  height: 1.0
-  resolution: 0.03
+  # 1.8 m square gives the 0.8 m CymPlanner lookahead enough local context
+  # to see the inflation band before the vehicle reaches it.
+  width: 1.8
+  height: 1.8
+  resolution: 0.02
   always_send_full_costmap: true
   plugins:
     - {name: static_layer, type: "costmap_2d::StaticLayer"}

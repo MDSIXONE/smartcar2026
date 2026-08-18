@@ -19,6 +19,7 @@ if SCRIPT_ROOT not in sys.path:
     sys.path.insert(0, SCRIPT_ROOT)
 
 from production_task_geometry import (  # noqa: E402
+    DEFAULT_QR_OBSERVATION_NUMBERS,
     DEFAULT_FALLBACK_PRODUCTION_OBSERVATION_HEADINGS_DEG,
     DEFAULT_FALLBACK_PRODUCTION_ROUTE,
     DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG,
@@ -59,7 +60,10 @@ class ProductionTaskGeometryTest(unittest.TestCase):
 
     def test_requested_points_have_expected_coordinates(self):
         expected = {
+            41: (-2.25, 2.75),
+            43: (-1.25, 2.75),
             52: (-1.75, 2.25),
+            61: (-2.25, 1.75),
             262: (-2.50, 2.25),
             232: (-1.75, 3.00),
             295: (-1.75, 1.50),
@@ -83,12 +87,18 @@ class ProductionTaskGeometryTest(unittest.TestCase):
 
     def test_qr_observation_headings_are_from_staging_point_52(self):
         staging = self.points[52]
-        self.assertAngleAlmostEqual(
-            bearing(staging, self.points[262]), math.pi)
-        self.assertAngleAlmostEqual(
-            bearing(staging, self.points[232]), math.pi / 2.0)
-        self.assertAngleAlmostEqual(
-            bearing(staging, self.points[295]), -math.pi / 2.0)
+        self.assertEqual(
+            DEFAULT_QR_OBSERVATION_NUMBERS,
+            [262, 232, 295, 61, 41, 43])
+        expected_headings = [
+            math.pi, math.pi / 2.0, -math.pi / 2.0,
+            -3.0 * math.pi / 4.0, 3.0 * math.pi / 4.0,
+            math.pi / 4.0,
+        ]
+        for number, expected in zip(
+                DEFAULT_QR_OBSERVATION_NUMBERS, expected_headings):
+            self.assertAngleAlmostEqual(
+                bearing(staging, self.points[number]), expected)
 
     def test_middle_completion_counts_and_wall_references(self):
         with open(self.grid_path, "r") as handle:
@@ -235,29 +245,30 @@ class ProductionTaskGeometryTest(unittest.TestCase):
             (x_min, x_max, y_min, y_max, side),
             (-2.5, 2.5, -0.5, 1.5, 0.5))
 
-    def test_stop_point_for_wall_point_is_25cm_inside_the_field(self):
+    def test_stop_point_for_wall_point_uses_explicit_29cm_offset(self):
         bounds = (-2.5, 2.5, -0.5, 1.5)
         cases = [
             # wall intersection -> processing-area stop point:
-            ((0.75, 1.5), (0.75, 1.25)),    # 300 -> point 7
-            ((2.5, 0.75), (2.25, 0.75)),    # 455 -> point 20
-            ((-2.5, 0.75), (-2.25, 0.75)),  # 454 -> point 11
-            ((-2.5, 0.5), (-2.25, 0.5)),    # 448 -> midpoint of 11 and 21
-            ((-0.75, -0.5), (-0.75, -0.25)),  # 307 -> point 34
+            ((0.75, 1.5), (0.75, 1.21)),    # 300 -> point 7
+            ((2.5, 0.75), (2.21, 0.75)),    # 455 -> point 20
+            ((-2.5, 0.75), (-2.21, 0.75)),  # 454 -> point 11
+            ((-2.5, 0.5), (-2.21, 0.5)),    # 448 -> midpoint of 11 and 21
+            ((-0.75, -0.5), (-0.75, -0.21)),  # 307 -> point 34
         ]
         for wall_point, expected_stop in cases:
-            self.assertEqual(
-                stop_point_for_wall_point(wall_point, 0.5, bounds),
-                expected_stop)
+            actual_stop = stop_point_for_wall_point(
+                wall_point, 0.29, bounds)
+            self.assertAlmostEqual(actual_stop[0], expected_stop[0], places=9)
+            self.assertAlmostEqual(actual_stop[1], expected_stop[1], places=9)
 
     def test_stop_point_for_wall_point_rejects_off_boundary_point(self):
         bounds = (-2.5, 2.5, -0.5, 1.5)
         with self.assertRaises(TaskDefinitionError):
-            stop_point_for_wall_point((0.0, 0.0), 0.5, bounds)
+            stop_point_for_wall_point((0.0, 0.0), 0.29, bounds)
         with self.assertRaises(TaskDefinitionError):
-            stop_point_for_wall_point((0.75, 0.75), 0.5, bounds)
+            stop_point_for_wall_point((0.75, 0.75), 0.29, bounds)
         with self.assertRaises(TaskDefinitionError):
-            stop_point_for_wall_point((-2.5, 2.5), 0.5, bounds)
+            stop_point_for_wall_point((-2.5, 2.5), 0.29, bounds)
 
 
 @unittest.skipIf(
@@ -287,6 +298,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task._ocr_turn_stop_flag = False
         self.task.processing_dwell_seconds = 0.0
         self.task.middle_zone_square_side = 0.5
+        self.task.ocr_stop_offset_m = 0.29
         self.task.middle_zone_bounds = (-2.5, 2.5, -0.5, 1.5)
         self.task.ocr_alignment_min_speed = 0.12
         self.task.spark_classify_enabled = False
@@ -298,6 +310,92 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
 
     def capture_warning(self, message, *args):
         self.warnings.append(message % args)
+
+    def test_processing_parking_profile_keeps_point_mode_and_restores_inflation(self):
+        messages = []
+
+        class NavigationModePublisher(object):
+            def get_num_connections(self):
+                return 1
+
+            def publish(self, message):
+                messages.append(message.data)
+
+        inflation_state = [0.22]
+
+        class InflationClient(object):
+
+            def __init__(self, _namespace, timeout=None):
+                self.timeout = timeout
+
+            def get_configuration(self):
+                return {"inflation_radius": inflation_state[0]}
+
+            def update_configuration(self, configuration):
+                inflation_state[0] = float(configuration["inflation_radius"])
+                return {"inflation_radius": inflation_state[0]}
+
+        self.task.publish_state = lambda _state: None
+        self.task.require_safe = lambda: None
+        self.task.navigation_mode_pub = NavigationModePublisher()
+        self.task.navigation_mode_connect_timeout = 0.5
+        self.task.local_costmap_layer_control_enabled = True
+        self.task.local_costmap_inflation_layer = (
+            "/move_base/local_costmap/inflation_layer")
+        self.task.local_costmap_reconfigure_timeout = 0.5
+        self.task.processing_parking_inflation_radius_m = 0.10
+        self.task._processing_parking_original_inflation_radius_m = None
+
+        original_client = task_module.DynamicReconfigureClient
+        original_sleep = task_module.rospy.sleep
+        task_module.DynamicReconfigureClient = InflationClient
+        task_module.rospy.sleep = lambda _duration: None
+        try:
+            self.task.enter_processing_parking_profile()
+            self.assertEqual(inflation_state[0], 0.10)
+            self.assertEqual(messages, [
+                "point", "point", "point"])
+
+            self.task.exit_processing_parking_profile()
+            self.assertEqual(inflation_state[0], 0.22)
+            self.assertEqual(messages, [
+                "point", "point", "point",
+                "point", "point", "point"])
+            self.assertIsNone(
+                self.task._processing_parking_original_inflation_radius_m)
+        finally:
+            task_module.DynamicReconfigureClient = original_client
+            task_module.rospy.sleep = original_sleep
+
+    def test_point_three_global_inflation_is_applied_and_verified(self):
+        inflation_state = [0.20]
+        namespaces = []
+
+        class InflationClient(object):
+
+            def __init__(self, namespace, timeout=None):
+                namespaces.append(namespace)
+
+            def update_configuration(self, configuration):
+                inflation_state[0] = float(configuration["inflation_radius"])
+                return {"inflation_radius": inflation_state[0]}
+
+        self.task.local_costmap_layer_control_enabled = True
+        self.task.global_costmap_inflation_layer = (
+            "/move_base/global_costmap/inflation_layer")
+        self.task.local_costmap_reconfigure_timeout = 0.5
+
+        original_client = task_module.DynamicReconfigureClient
+        task_module.DynamicReconfigureClient = InflationClient
+        try:
+            applied = self.task.set_global_costmap_inflation_radius(
+                0.235, "reached_point_3")
+            self.assertEqual(applied, 0.235)
+            self.assertEqual(inflation_state[0], 0.235)
+            self.assertEqual(namespaces, [
+                "/move_base/global_costmap/inflation_layer"])
+        finally:
+            task_module.DynamicReconfigureClient = original_client
 
     def test_rosout_ahrs_crc_is_warning_but_head_len_stays_critical(self):
         self.task.lock = threading.RLock()
@@ -675,6 +773,9 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.wait_for_safe_start = lambda: events.append("safe_start")
         self.task.switch_to_point_mode = lambda: events.append("point_mode")
         self.task.resume_production_only = True
+        self.task.global_costmap_inflation_radius_m = 0.235
+        self.task.set_global_costmap_inflation_radius = (
+            lambda *_args: events.append("global_inflation"))
         self.task.qr_enable_pub = QrPublisher()
 
         def classify_qr_text(observation_number, qr_text):
@@ -708,6 +809,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.assertEqual(
             events,
             ["item_input", "safe_start", "point_mode",
+             "global_inflation",
              "production_navigation"])
 
     def test_qr_completion_does_not_switch_before_first_production_leg(self):
@@ -1157,7 +1259,8 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.stop_ros_camera_streaming = (
             lambda required=True: events.append(("camera_stop", required)))
         self.task.rotate_full_revolution_for_ocr = (
-            lambda _label, candidate_handler=None: (None, 2.0 * math.pi))
+            lambda _label, candidate_handler=None, **_kwargs:
+            (None, 2.0 * math.pi))
         self.task.save_observation_summary = lambda: events.append("save")
         self.task.publish_state = lambda state: events.append(("state", state))
 
@@ -1180,7 +1283,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.target_scan_events = []
         self.task.observations = []
         self.task.publish_state = lambda _state: None
-        def turn_one_circle(_label, candidate_handler=None):
+        def turn_one_circle(_label, candidate_handler=None, **_kwargs):
             self.assertIsNotNone(candidate_handler)
             self.assertTrue(candidate_handler(response, 1.2))
             return None, 2.0 * math.pi
@@ -1446,6 +1549,7 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         self.task._ocr_turn_stop_flag = False
         self.task.processing_dwell_seconds = 0.0
         self.task.middle_zone_square_side = 0.5
+        self.task.ocr_stop_offset_m = 0.29
         self.task.middle_zone_bounds = (-2.5, 2.5, -0.5, 1.5)
         self.task.ocr_alignment_min_speed = 0.12
         self.task.spark_classify_enabled = False
@@ -1771,8 +1875,8 @@ class ProductionTaskDualItemTest(unittest.TestCase):
             lambda: events.append("camera_release"))
         self.task.save_observation_summary = lambda: events.append("save")
         self.task.simulation_request_start = (
-            lambda item, category: events.append(
-                ("sim_start", item, category)))
+            lambda item, category: (
+                events.append(("sim_start", item, category)), False)[1])
         self.task.simulation_wait_done = (
             lambda: (events.append("sim_wait_timeout"), False)[1])
         self.task.simulation_done_timeout = 120.0
@@ -2054,7 +2158,7 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         self.assertEqual(
             payload, {"item_name": u"手机", "category": u"电子产品"})
 
-    def test_simulation_request_start_409_aborts_immediately(self):
+    def test_simulation_request_start_409_continues_to_status_wait(self):
         self.task.simulation_host = "192.168.1.5"
         self.task.simulation_port = 11313
         self.task.simulation_start_timeout = 1.0
@@ -2068,11 +2172,13 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         original_urlopen = task_module.urllib2.urlopen
         task_module.urllib2.urlopen = fake_urlopen
         try:
-            with self.assertRaises(task_module.MissionAbort) as raised:
-                self.task.simulation_request_start(u"手机", u"电子产品")
+            result = self.task.simulation_request_start(u"手机", u"电子产品")
         finally:
             task_module.urllib2.urlopen = original_urlopen
-        self.assertIn("simulation already running", str(raised.exception))
+        self.assertFalse(result)
+        self.assertEqual(len(self.warnings), 1)
+        self.assertIn(
+            "PRODUCTION_SIMULATION_START_409_CONTINUE", self.warnings[0])
 
     def test_simulation_request_start_retries_then_succeeds(self):
         self.task.simulation_host = "192.168.1.5"
@@ -2328,6 +2434,187 @@ class ProductionTaskDualItemTest(unittest.TestCase):
                 self.task.handoff_to_lane()
         finally:
             task_module.rospy.wait_for_service = original_wait
+
+
+@unittest.skipIf(
+    task_module is None, "production_task_2026 import requires ROS/Python2")
+class ProductionTaskOcrProfileValidationTest(unittest.TestCase):
+    """Validation of the OCR quick-route profile and its mission entry.
+
+    The profile is validated at startup (validate_ocr_route_profile) and,
+    when non-empty, run_mission switches to the profile cruise branch that
+    skips the national voice/QR flow entirely.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.grid_path = os.path.join(
+            PACKAGE_ROOT, "config",
+            "production_full_grid_all_numbered.json")
+        cls.points = load_numbered_points(cls.grid_path)
+
+    def setUp(self):
+        task_module.rospy.rostime.set_rostime_initialized(True)
+        self.task = object.__new__(task_module.ProductionTask2026)
+        self.task.points = self.points
+
+    def _assert_validation_error(self, profile, fragment):
+        with self.assertRaises(task_module.TaskDefinitionError) as raised:
+            self.task.validate_ocr_route_profile(profile)
+        self.assertIn(fragment, str(raised.exception))
+
+    def test_empty_profile_is_valid(self):
+        self.task.validate_ocr_route_profile([])
+
+    def test_valid_profile_with_all_fields_passes(self):
+        profile = [
+            {
+                "point": 12,
+                "heading_deg": -45,
+                "rotate_angle_deg": 360,
+                "rotate_dir": "ccw",
+                "stop_mode": "wall",
+                "target_texts": [u"食品"],
+            },
+            {
+                "point": 22,
+                "heading_deg": 45,
+                "rotate_angle_deg": 180,
+                "rotate_dir": "cw",
+                "stop_mode": "free",
+                "target_texts": [],
+            },
+        ]
+        self.task.validate_ocr_route_profile(profile)
+
+    def test_non_mapping_entry_raises(self):
+        self._assert_validation_error([42], "must be a mapping")
+
+    def test_missing_point_raises(self):
+        self._assert_validation_error([{"rotate_angle_deg": 90}],
+                                      "has no point")
+
+    def test_point_not_in_grid_raises(self):
+        self._assert_validation_error([{"point": 9999}],
+                                      "missing from the grid")
+
+    def test_point_not_integer_raises(self):
+        self._assert_validation_error([{"point": "abc"}],
+                                      "must be an integer grid number")
+
+    def test_invalid_heading_raises(self):
+        self._assert_validation_error(
+            [{"point": 12, "heading_deg": "north"}],
+            "heading_deg must be a number")
+
+    def test_zero_rotate_angle_raises(self):
+        self._assert_validation_error(
+            [{"point": 12, "rotate_angle_deg": 0}],
+            "rotate_angle_deg must be finite and positive")
+
+    def test_negative_rotate_angle_raises(self):
+        self._assert_validation_error(
+            [{"point": 12, "rotate_angle_deg": -90}],
+            "rotate_angle_deg must be finite and positive")
+
+    def test_non_numeric_rotate_angle_raises(self):
+        self._assert_validation_error(
+            [{"point": 12, "rotate_angle_deg": "wide"}],
+            "rotate_angle_deg must be a number")
+
+    def test_invalid_rotate_dir_raises(self):
+        self._assert_validation_error(
+            [{"point": 12, "rotate_dir": "left"}],
+            "rotate_dir must be ccw or cw")
+
+    def test_invalid_stop_mode_raises(self):
+        self._assert_validation_error(
+            [{"point": 12, "stop_mode": "auto"}],
+            "stop_mode must be wall or free")
+
+    def test_target_texts_not_list_raises(self):
+        self._assert_validation_error(
+            [{"point": 12, "target_texts": u"食品"}],
+            "target_texts must be a list")
+
+    def test_target_texts_with_non_string_raises(self):
+        self._assert_validation_error(
+            [{"point": 12, "target_texts": [123]}],
+            "target_texts must contain only strings")
+
+    def test_run_mission_profile_mode_skips_voice_wait(self):
+        profile = [
+            {
+                "point": 12,
+                "heading_deg": -45,
+                "rotate_angle_deg": 360,
+                "rotate_dir": "ccw",
+                "stop_mode": "wall",
+                "target_texts": [u"食品"],
+            },
+            {
+                "point": 22,
+                "rotate_angle_deg": 180,
+                "rotate_dir": "cw",
+                "stop_mode": "free",
+            },
+        ]
+        self.task.ocr_route_profile = profile
+
+        class MoveBase(object):
+            def wait_for_server(self, _timeout):
+                return True
+
+            def cancel_all_goals(self):
+                pass
+
+        self.task.move_base = MoveBase()
+        self.task.move_base_ready_timeout = 1.0
+        events = []
+        self.task.publish_state = (
+            lambda state: events.append(("state", state)))
+        self.task.wait_for_item_inputs = (
+            lambda: (_ for _ in ()).throw(
+                AssertionError(
+                    "voice/item input must not run in profile mode")))
+        self.task.wait_for_safe_start = lambda: events.append("safe_start")
+        self.task.switch_to_point_mode = lambda: events.append("point_mode")
+        self.task.prepare_result_directory = (
+            lambda: events.append("result_dir"))
+        self.task.use_ros_camera_for_ocr = True
+        self.task.camera_image_topic = "/usb_cam/image_raw"
+        self.task.start_native_ocr = lambda: events.append("ocr_start")
+        self.task.stop_native_ocr = lambda: events.append("ocr_stop")
+        self.task.ensure_ros_camera_released = (
+            lambda: events.append("camera_release"))
+        self.task.save_observation_summary = lambda: events.append("save")
+        cruised = []
+
+        def cruise(route):
+            cruised.append(list(route))
+
+        self.task.cruise_ocr_profile_route = cruise
+        finished = []
+        self.task.finish_at_destination = (
+            lambda reason: finished.append(reason))
+
+        self.task.run_mission()
+
+        # The national voice/QR flow is skipped: wait_for_item_inputs would
+        # have raised if called.  The profile cruise ran with the configured
+        # points and the task finished at the destination.
+        self.assertEqual(cruised, [profile])
+        self.assertEqual(finished, [
+            "OCR route profile completed all configured points"])
+        self.assertIn(("state", "WAITING_SAFE_START"), events)
+        self.assertIn(("state", "OPEN_ROS_IMAGE_OCR"), events)
+        self.assertIn("safe_start", events)
+        self.assertIn("point_mode", events)
+        self.assertIn("result_dir", events)
+        self.assertIn("ocr_start", events)
+        self.assertIn("ocr_stop", events)
+        self.assertIn("camera_release", events)
+        self.assertIn("save", events)
 
 
 if __name__ == "__main__":

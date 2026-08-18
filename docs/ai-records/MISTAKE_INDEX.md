@@ -24,20 +24,20 @@
 
 | 主题 | 涉及日期文件 |
 | ---- | ---- |
-| 跨 Shell 引号 / 变量展开 / 命令组合（PowerShell/WSL/SSH/Bash 嵌套 `$()`、`$pid`、here-string、awk/sed、引号破坏、组合超时） | 07-27、07-28、07-29、08-03、08-04、08-06、08-11 |
+| 跨 Shell 引号 / 变量展开 / 命令组合（PowerShell/WSL/SSH/Bash 嵌套 `$()`、`$pid`、here-string、awk/sed、引号破坏、组合超时） | 07-27、07-28、07-29、08-03、08-04、08-06、08-11、08-18 |
 | 文本编码与换行（CRLF/`\r`、GBK、UTF-8、shebang、中文乱码、Python 2 ASCII、stdin 管道编码） | 07-27、07-28、08-03、08-04、08-06 |
-| Python 2/3 差异（math.isfinite、time.monotonic、to_sec、json.dumps/loginfo 中文、unittest 跳过、mock 契约） | 07-26、07-27、07-28、07-29、08-03、08-04、08-06、08-07 |
+| Python 2/3 差异（math.isfinite、time.monotonic、to_sec、json.dumps/loginfo 中文、unittest 跳过、mock 契约、IndentationError） | 07-26、07-27、07-28、07-29、08-03、08-04、08-06、08-07、08-18 |
 | 底盘 / 串口 / IMU / USB 硬件链路（CRC、短读、sensor inactive、odom stale、USB Hub 枚举、断电、旋转死区、设备身份识别） | 07-27、07-28、08-04、08-05、08-06、08-07、08-10、08-14 |
 | NaN / TF / 定位与安全门（TF_NAN_INPUT、固定初值重启、TF 外推、map→base_link、安全门锁死） | 07-27、07-28、07-29、08-03、08-04、08-07 |
 | 构建 / 测试（catkin_make、CTest、gtest main、白名单、test_results、--force-cmake、pytest、ROS 单测初始化、WSL 9P） | 07-26、07-27、07-28、07-29、08-03、08-04、08-07、08-10、08-11、08-12、08-14 |
-| 部署 / 传输 / 权限（scp 目标目录、多源 scp、哈希校验、0755、启动器参数、Base64/LF 传输、index.lock、FETCH_HEAD） | 07-26、07-27、07-28、07-29、08-03、08-04、08-07、08-11、08-15 |
+| 部署 / 传输 / 权限（scp 目标目录、多源 scp、哈希校验、0755、启动器参数、Base64/LF 传输、index.lock、FETCH_HEAD、Windows tar 中文文件名、Windows/WSL 双工作副本同步） | 07-26、07-27、07-28、07-29、08-03、08-04、08-07、08-11、08-15、08-17、08-18 |
 | ROS 生命周期与回调（action server 等待、回调竞态、closed topic、rosnode cleanup、respawn、launch 解析、取消竞态、节点退出注销话题） | 07-26、07-27、07-28、07-29、08-03、08-04、08-06、08-07、08-10、08-11、08-14、08-15 |
-| 运动控制 / 规划器 / 碰撞（footprint、body_projection、253/254 代价、NO PATH、恢复/回中、PD 对齐、前视盲区、边界路线守卫、死区） | 07-26、07-27、07-28、07-29、08-03、08-04、08-06、08-10、08-11 |
-| OCR / 相机 / 二维码（V4L2 忙、usb_cam、OCR 候选/居中/镜像/类别去重/死循环、QR 文本、相机交接、QR 接收过滤、连续视觉伺服） | 07-26、07-27、07-28、07-29、08-03、08-04、08-07、08-11 |
+| 运动控制 / 规划器 / 碰撞（footprint、body_projection、253/254 代价、NO PATH、恢复/回中、PD 对齐、前视盲区、边界路线守卫、死区） | 07-26、07-27、07-28、07-29、08-03、08-04、08-06、08-10、08-11、08-18 |
+| OCR / 相机 / 二维码（V4L2 忙、usb_cam、OCR 候选/居中/镜像/类别去重/死循环、QR 文本、相机交接、QR 接收过滤、连续视觉伺服） | 07-26、07-27、07-28、07-29、08-03、08-04、08-07、08-11、08-18 |
 | 脚本环境与网络（nounset、ROS_MASTER_URI/ROS_IP 动态发现、WSL Master 后台/就绪、地址发现阻塞、WSLg COPY MODE、ROS 日志目录软链） | 07-26、07-27、07-28、07-29、08-03、08-04、08-07、08-10、08-11、08-14 |
-| 文档 / 文件操作（patch 上下文、Markdown 折行、文件名误判、rg glob、路径通配符、组合读取超时） | 07-26、07-27、07-28、07-29、08-03、08-04 |
+| 文档 / 文件操作（patch 上下文、Markdown 折行、文件名误判、rg glob、路径通配符、组合读取超时、浮点坐标校验） | 07-26、07-27、07-28、07-29、08-03、08-04、08-17 |
 | CLI 工具误用（--help、dump-params、rosrun、cleanup -y、位置参数、超时误判、timeout 退出码误报） | 07-27、07-28、07-29、08-03、08-11、08-14 |
-| 仿真 Gazebo/机械臂（set_model_configuration、物理抓取、RTF、模型恢复、官方向导一致性、代价地图残影、世界重置与 bridge 单轮） | 07-26、07-27、08-10、08-11、08-14 |
+| 仿真 Gazebo/机械臂（set_model_configuration、物理抓取、RTF、模型恢复、官方向导一致性、代价地图残影、世界重置与 bridge 单轮） | 07-26、07-27、08-10、08-11、08-14、08-18 |
 
 ## 按日期
 
@@ -261,3 +261,24 @@
 ### 2026-08-15（1 条）→ [mistakes/2026-08-15.md](mistakes/2026-08-15.md)
 
 - 常驻交接 include 漏传 is_fork:=yolo，交接点黄线被当终点横线，巡线全程跳过
+
+### 2026-08-17（2 条）→ [mistakes/2026-08-17.md](mistakes/2026-08-17.md)
+
+- 坐标校验使用浮点数精确相等
+- Windows tar 中文文件名导致车端 lane_proto 流式同步首次失败
+
+### 2026-08-18（13 条）→ [mistakes/2026-08-18.md](mistakes/2026-08-18.md)
+
+- OCR 分阶段停车误切 CymPlanner 车体模式导致降速
+- 旧 bridge 占用 11313 导致新仿真栈自清理
+- bridge 就绪检查未绑定启动子进程
+- 仿真 bridge 的 409 分支绕过 120 秒兜底
+- 仿真一键启动脚本只写入 Windows、未同步 WSL
+- WSL Bash 命令混入 PowerShell 的 Select-Object
+- PGM 文件白色像素实际为 254
+- 全局膨胀参数与 CymPlanner 局部判障范围不一致
+- PowerShell 组装 SCP 目标路径混用 Windows 分隔符
+- 误把延迟开启局部代价地图实现成关闭整个 local_costmap
+- 相机设备固定使用 `/dev/video0` 导致 QR 阶段启动失败
+- USB 热重连后 usb_cam 保留失效文件描述符
+- lane_common.py 墙线改动留下 Python 缩进错误

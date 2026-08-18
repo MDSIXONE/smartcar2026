@@ -1,32 +1,227 @@
 <launch>
-    <!-- 直道巡线测试原型: 可独立占用底盘/相机，也可由 2026.launch 常驻接管。
-         独立默认会启动底盘和直连相机；主流程必须传 start_base_driver:=false
-         use_ros_camera:=true，不能同时占用串口或 V4L2。
+    <!-- 直道巡线测试原型: 底盘驱动 + 巡线节点
+         两种用法:
+         A) 单独测试 —— 加 take_cam_on_start:=true, 自己独占 /dev/ucar_camera +
+            起底盘, 起来就跑。⚠ 这种模式别和 2026.launch 同时跑(抢串口/相机)。
+         B) 主流程交接(默认) —— 用共享的 ROS 相机话题, 不起第二套底盘,
+            先待在 STANDBY, 等 2026.launch 那边调:
+              rosservice call /lane_proto/set_active "data: true"
          常用:
-           roslaunch lane_proto lane_proto.launch                        # 空跑看决策
-           roslaunch lane_proto lane_proto.launch dry_run:=false linear_speed:=0
-           roslaunch lane_proto lane_proto.launch dry_run:=false linear_speed:=0.15 gain:=2.0
+           roslaunch lane_proto lane_proto.launch take_cam_on_start:=true            # 空跑看决策
+           roslaunch lane_proto lane_proto.launch take_cam_on_start:=true dry_run:=false linear_speed:=0
+           roslaunch lane_proto lane_proto.launch take_cam_on_start:=true dry_run:=false linear_speed:=0.15 gain:=2.0
          转向只有 gain 一个旋钮(大=猛), 曲线自动算:
            az = min_turn_speed + gain*(侵入深度 - min_intrusion), 上限 turn_max
          跑着的时候还能直接调, 不用重启:
            rosparam set /lane_follow/gain 2.0
     -->
     <arg name="dry_run" default="true"/>
-    <!-- 主流程交接模式：不启动第二套底盘驱动、不独占 V4L2，相机和底盘由
-         ucar_2026 常驻节点提供；巡线节点等待 /lane_proto/set_active。 -->
-    <arg name="start_base_driver" default="true"/>
-    <arg name="use_ros_camera" default="false"/>
+    <!-- ============ 相机/控制权归属 ============
+         take_cam_on_start:=true  单独测试: 自己独占 /dev/ucar_camera, 起来就跑
+         take_cam_on_start:=false 默认, 听主流程交接: 用共享的 ROS 相机话题,
+                                  先待在 STANDBY, 等 /lane_proto/set_active
+         下面三个默认 auto = 跟着上面那个总闸走, 单独指定才覆盖
+         (⚠ 三态参数必须 type="str", 否则 roslaunch 会把 auto 之外的值
+          自动转成 bool —— is_fork 当初就踩过这个坑) -->
+    <arg name="take_cam_on_start" default="false"/>
+    <arg name="use_ros_camera" default="auto"/>
+    <arg name="start_enabled" default="auto"/>
     <arg name="image_topic" default="/usb_cam/image_raw"/>
     <arg name="cmd_vel_topic" default="/cmd_vel"/>
     <arg name="odom_topic" default="/odom"/>
-    <arg name="start_enabled" default="true"/>
-    <arg name="require_fresh_odom" default="false"/>
-    <arg name="odom_fresh_timeout" default="0.5"/>
+    <!-- 交接模式下跑完退出进程让主流程往下走; 单独测试时留着看日志 -->
     <arg name="exit_on_stop" default="false"/>
+    <!-- 底盘由主流程起时置 false, 别起第二套(同串口) -->
+    <arg name="start_base_driver" default="true"/>
+    <!-- odom 断流兜底停车, 默认关 -->
+    <!-- odom 冻结兜底(退回 速度x时间 测距): 默认关。车停着时底盘不发新
+         odom, "位置没变"是正常的而不是故障, 开着容易误判成冻结。确认
+         odom 会真掉线再开。 -->
+    <!-- ============ 拦路板检测(2D 雷达) ============
+         board_in_lane:=true 启用。开着也可能一路没有板子, 所以判据只认
+         **有限宽的连通障碍**: 场地四周是连续围挡, 不管什么角度都会连成
+         一长条, 宽度必然超上限而被放行; 板子和车道同宽(42cm), 左右是空地。
+         调参就看日志里每秒一行的 [拦路板] d=/宽=/点=/簇= 。
+         需要 base_driver.launch 起雷达(start_lidar 默认 true)。 -->
+    <arg name="board_in_lane" default="false"/>
+    <!-- 终点横线的雷达复核: 板子的白色板面很容易被分割网判成白线, 车会
+         把它当终点停在半路。物理上两者可分 —— 真终点线是垫子上的胶带,
+         雷达什么也看不到; 板子是实物, 雷达一定看得见。所以视觉报终点时
+         用雷达复核一次, 看到**有限宽**的实体就否决(场地围挡太宽会放行)。
+         ⚠ 只复核终点那一支: 起点到 Y 岔口之间不会有板子, Y 岔口那条
+           横线照原样走。雷达没数据时放行并告警(拦住的话车永远到不了终点)。
+         auto = 跟着 board_in_lane 走 -->
+    <!-- 终点判据: vision=只看白线(旧逻辑) / wall=用围挡定位 / both=都行。
+         场地是 5x2.5m 封闭矩形, 终点框(实测 50x50cm)就塞在角落里。雷达
+         在里面同时看得到四面墙, 拟合出矩形直接给"离前墙还有多远"。
+         比看白线强: 不经分割网(板子的白面骗不到它); 量的是**垂直**距离,
+         车头没对正墙也准(单束读数偏 20° 会被 1/cos 放大 6%); 直接给出
+         还差多少米, 不用"检出横线->再盲走 N 米"。
+         仿真实测(杂物/板子/3cm噪声/两个角落/两种进入朝向)误差 <=0.3cm;
+         噪声 6cm 或一面墙被挡掉大半时长宽对不上会自动拒绝, 不误判。
+         ⚠ field_w/h 要按**实测**填: 图上那圈虚线是绘图外框(518x258cm),
+           不是墙。先用 goal_mode:=both 跑, 看日志里"量出 AxB"是多少。 -->
+    <arg name="goal_mode" default="vision"/>
+    <arg name="goal_wall_dist" default="0.25"/>
+    <arg name="field_w" default="5.0"/>
+    <arg name="field_h" default="2.5"/>
+    <arg name="field_tol" default="0.25"/>
+    <arg name="goal_need_clear" default="auto"/>
+    <arg name="goal_clear_range" default="1.5"/>
+    <!-- 走过这么远还没检出板子, 就判定本趟无板, 果断切回初赛逻辑:
+         关掉板子检测、放开终点白线检测(不再复核)。
+         从图上量的(图是准的): 板子在路程 52%~63%, 两臂 2.25m / Y 支路
+         2.02m(从黄线算); 终点 3.58m / 3.87m。换成代码测的"进 FOLLOW 后
+         走了多远"(起跑序列约占 0.5m): 最晚的板子 1.76m, 最早的终点
+         3.08m, 中间 1.32m 空档。2.40m 落在空档正中, 两头各留 0.64m。
+         ⚠ 那个 0.5m 是估的, 上车看日志里板子实际在"已走 X.XXm"处被
+           检出, 和 1.76/1.53 对一下就能校准。 -->
+    <arg name="board_clear_dist" default="3.00"/>
+    <!-- Y 支路从**岔口**重新起算(岔口是"检出横线"这个真事件, 不是从黄线
+         航位推算的, 所以不受起跑序列估值影响)。图上量: 从岔口起 板子
+         1.10m / 终点 2.94m, 阈值取中 2.00m, 两头各留 0.9m -->
+    <arg name="board_clear_dist_y" default="2.00"/>
+    <!-- Y 支路的早判: 转完 45° 后板子就在正前方 1.1m(张角 21.6°, 约 54
+         个点), 岔口这一下就能定死有没有板子, 不用等着开过去。
+         红绿灯在岔口尖端的岛上, 转完 45° 后落到侧后方, 不在前向走廊里。
+         两臂做不了早判(板子 1.76m 外, 而且臂是弯的, 那时不在正前方) -->
+    <arg name="board_look_ahead" default="1.60"/>
+    <arg name="board_early_dist" default="0.35"/>
+    <!-- 雷达串口, 会原样传给 base_driver.launch(第 292 行), 所以**这一份
+         才是实际生效的那个**。值必须和 ydlidar/launch/ydlidar.launch 一致。
+         雷达走板载串口(ttyTHS*), 不是 USB, ls /dev/ttyUSB* 找不到。 -->
+    <arg name="lidar_port" default="/dev/lidar_serial_port"/>
+    <arg name="scan_topic" default="/scan"/>
+    <!-- 板心到**车体中心**近到这个距离才触发停车/绕障。
+         ⚠ 这个和 go_around_keepout 是两回事, 别混:
+           board_stop_dist  = 什么时候开始绕(触发距离)
+           go_around_keepout = 绕的时候离板子留多少(避让余量)
+         0.55 换成保险杠只有 0.55-0.171=0.38m, 实车觉得太贴脸。
+         提早触发**不多走路**: 前进段 = d + 车半长 + 禁区, d 变大前进段
+         跟着变长, 但那段路本来就在赛道上要走完, 总路程不变, 只是反应
+         余量更足。下限是 车半长+禁区(0.371), 比这更近会先倒车再横移。 -->
+    <arg name="board_stop_dist" default="0.90"/>
+    <arg name="board_lane_half" default="0.25"/>  <!-- 车道半宽+余量 -->
+    <arg name="board_min_w" default="0.24"/>      <!-- 斜着看会变窄, 下限放宽 -->
+    <arg name="board_max_w" default="0.80"/>      <!-- 和围挡拉开的关键 -->
+    <arg name="board_gap" default="0.12"/>        <!-- 分簇的间隔阈值 -->
+    <arg name="board_min_pts" default="5"/>
+    <arg name="board_confirm" default="3"/>       <!-- 连续N帧才停 -->
+    <arg name="board_min_travel" default="0.50"/> <!-- 离开起点这么远才开查 -->
+    <!-- 航向闸: 相对**进场航向**转过这么多度才开始认板子。专治 Y 岔口那个
+         红绿灯箱体 —— 车正对岔口时(偏航≈0)箱体就在正前方, 而那时本来也
+         不该有板子; 拐上两臂(±60°)或拐进 Y 支路(45°)之后才开闸。
+         用 IMU 偏航算, IMU 掉线就退回按指令角度推算。0 = 关掉这道闸。 -->
+    <arg name="board_arm_deg" default="30.0"/>
+    <arg name="board_fov_deg" default="15.0"/>    <!-- 只认正前方 ±这么多度 -->
+    <!-- 常规检测的前视距离(m): 板子要落在这个纵深内才会被认出来。
+         0 = 自动: 两臂用 board_stop_dist + 0.6; 走中间那条(Y 支路)取
+         max(那个值, board_detect_range_y) —— Y 的板子离岔口只有 1.1m,
+         转完 45° 到触发之间可用距离本来就短, 前视太浅会来不及攒够
+         confirm 帧再站位/转正/横移。>0 = 两条路线都写死成这个值。 -->
+    <arg name="board_detect_range" default="0.0"/>
+    <arg name="board_detect_range_y" default="1.60"/>
+    <!-- 里程窗口(板子位置是固定的, 知道大概在哪段就能把别处全关掉):
+         "0.6:1.6" 或 "0.6:1.2,2.0:2.6", 从进 FOLLOW 起算的里程(m)。
+         空 = 不按里程卡, 只用航向闸 + board_min_travel。 -->
+    <arg name="board_dist_windows" default=""/>
+    <!-- ==== 绕障 go_around (只在 board_in_lane:=true 时生效) ====
+         麦轮底盘纯横移三段: 横让 side -> 前进 fwd -> 反向横回 side。
+         全程开环, 不看视觉(这几秒车根本不在车道上), 也不转车头
+         (转了再横回来航向就对不上了)。
+         go_around_dir: auto(默认) = 往"小半径侧"让, 也就是车拐弯的
+         那一侧 —— 两臂往圆心方向, Y 支路往远离红绿灯方向(右拐 45°
+         进支路后灯在左, 所以往右), 两条规则其实是同一条。雷达只做
+         一票否决: 那侧被挡住而另一侧空着就改道并打警告。
+         turn = 同上但不让雷达插嘴; left / right = 完全写死 -->
+    <arg name="go_around" default="false"/>
+    <arg name="go_around_dir" default="auto"/>
+    <!-- ==== 绕障走多远: 全部由"禁区"解算, 不再拍角度 ====
+         禁区是**长方形**(不是把线段膨胀成胶囊): 车全程横平竖直走,
+         航向角不变, 用不着圆角。横向和纵向两条约束互相独立:
+           ① 横让到位: |板端横向| >= 车半宽 + 禁区
+           ② 前进到位: 板心落到车心后方 >= 车半长 + 禁区
+           ③ 横回到位: 板心横向回到 0 (板心就在路中心线上)
+         用实测 footprint(半宽 0.128 半长 0.171)、板半长 0.21、禁区 0.20:
+           横让 0.538m, 前进到板心在车后 0.371m。
+         ⚠ 前提: 检出距离要 >= 车半长+禁区 = 0.371m, 否则横移时车是贴着
+           板面蹭过去的。检出太近会自动先倒一小段(AVOID_REV)再横移。
+         等效角度会随板子距离变(d=0.5 时约 47°/125°), 所以判据用几何量。
+         下面两个给 0 = 自动按上式算; 给正值就写死。 -->
+    <arg name="go_around_side" default="0.0"/>
+    <arg name="go_around_fwd" default="0.0"/>
+    <arg name="go_around_pass" default="0.0"/>
+    <arg name="go_around_keepout" default="0.20"/>  <!-- 板子周围禁区半径 -->
+    <arg name="car_half_width" default="0.128"/>    <!-- 实测 footprint -->
+    <arg name="car_half_length" default="0.171"/>
+    <!-- track = 雷达跟踪板子(卡尔曼, 融合 odom/IMU)闭环判断每段走完没有;
+         fixed = 纯开环按上面的距离走。闭环只允许在开环几何目标的
+         [min_frac, 1.25] 倍之间修正, 跟丢 miss_max 帧就退回开环。 -->
+    <arg name="go_around_mode" default="track"/>
+    <arg name="go_around_min_frac" default="0.85"/>
+    <!-- 信不信得过闭环, 看卡尔曼自己给的位置标准差, 不看"丢了几帧":
+         短暂看不见(雷达擦过板面那 0.25s)只让 sigma 涨 0.6cm, 照常闭环;
+         真丢了(板子被搬走/关联跑偏)sigma 一路涨, 到阈值自动退回开环。 -->
+    <arg name="go_around_max_sigma" default="0.08"/>
+    <!-- 不确定度直接进判决: 需要的净空 = 几何值 + k * sigma(分方向)。
+         估计越不准让得越开。0 = 不加余量 -->
+    <arg name="go_around_k_sigma" default="1.0"/>
+    <arg name="go_around_miss_max" default="8"/>
+    <arg name="go_around_back_tol" default="0.04"/>
+    <arg name="scan_stale" default="0.4"/>   <!-- 雷达帧多久算陈旧 -->
+    <arg name="go_around_speed" default="0.12"/>
+    <arg name="go_around_max" default="1"/>       <!-- 最多绕几次, 超了就停 -->
+    <arg name="go_around_cooldown" default="3.0"/><!-- 绕完多久内不认板子/横线 -->
+    <!-- 自车剔除余量(米)。车上两根小 WiFi 天线在 footprint 里面, 雷达扫得到。
+         按位置剔除: 车身矩形(±0.171 x ±0.128)再加这个余量之内的点全丢。
+         **不能改成按最小距离剔** —— 板子实测能停在 0.285m。
+         天线支出车外就调大; 0 = 只剔 footprint 内部。 -->
+    <!-- 触发绕障时往 dump/avoid_NN.png 画一张整圈雷达散点图。
+         这个是画面半宽(米), 2.0 = 4x4m 视野。 -->
+    <arg name="go_around_dump_span" default="2.0"/>
+    <!-- 绕障全程逐帧落盘: dump/avoid_trace_NN.jsonl, 一行一帧, 含原始
+         雷达 ranges(毫米整数) + 那一帧的所有判定量。约 0.4MB / 次绕障。
+         离线对账用(比如查 board_lidar_x 标定对不对)。 -->
+    <arg name="go_around_trace" default="true"/>
+    <!-- 绕障收尾时用板子把**航向**也归位(度, 0=不对齐)。
+         板子横跨赛道, 所以它的中垂线就是车道中心线、法向就是车道方向。
+         第三段"回中"改在板子系里量(离中垂线多远), 再加一段 AVOID_ALIGN
+         原地转到法向。不这么做的话: 车进场歪 theta, 绕完横向还差
+         (车半长+禁区)*tan(theta)(15° 时 7.3cm), 而且航向偏差原样留着,
+         后半程只会越走越偏。 -->
+    <arg name="go_around_align_deg" default="3.0"/>
+    <!-- 横回段的"过冲保护"要横移够这么远才上膛(m)。刚切进那一段时底盘
+         还在收前一段的速度, 车几乎没动, 而板子估计自己在漂 —— 太小会被
+         那几帧误触发, 三段绕障只跑两段就收了(实车 2026-08-16)。 -->
+    <arg name="go_around_back_arm" default="0.08"/>
+    <!-- 终点横线的里程闸(m): 从 FOLLOW/岔口起算, 没走够就不认终点线。
+         板子的白面在分割网眼里和终点白胶带是一回事, 而板子在路程一半
+         (两臂 2.21m / Y 支路离岔口 1.08m), 终点在 3.5~3.8m。
+         -1 = 自动(开了板子检测就用 2.40/2.00, 没开就不设闸); 0 = 关掉 -->
+    <arg name="goal_min_travel" default="-1.0"/>
+    <!-- goal_min_travel=-1(自动)时用的两个值, 和 board_clear_dist 解耦:
+         那个是"走这么远还没检出就判无板"(两臂 3.00), 这个是"走够这么远
+         才认终点线"。两臂最早的终点在 3.08m, 所以这里不能跟着抬到 3.00 -->
+    <arg name="goal_gate_arm" default="2.40"/>
+    <arg name="goal_gate_y" default="2.00"/>
+    <arg name="board_self_margin" default="0.03"/>
+    <arg name="board_lidar_x" default="-0.11"/>   <!-- 雷达相对 base_link -->
+    <arg name="board_lidar_yaw_deg" default="0.0"/>
+    <arg name="odom_fallback" default="false"/>
+    <arg name="odom_frozen_s" default="5.5"/>
+    <!-- 没有 /odom 就不许动。等 odom_wait_max 秒还没有就停机, 不盲跑。
+         真要在没有里程计的情况下跑(台架/演示)才传 require_odom:=false -->
+    <arg name="require_odom" default="true"/>
+    <arg name="odom_wait_max" default="10.0"/>
+    <arg name="require_fresh_odom" default="true"/>
+    <!-- ⚠ 别调回 0.5: 这台底盘 odom/imu 有约 1.0~1.04s 的固有发布间隙,
+         ucar_2026 那边 EKF sensor_timeout / 任务 odom 超时都给 3.0 -->
+    <arg name="odom_fresh_timeout" default="3.0"/>
     <arg name="linear_speed" default="0.10"/>   <!-- 0 = 原地只转车体 -->
     <arg name="gain" default="1.2"/>            <!-- 转向唯一旋钮, 大=猛 -->
     <arg name="mirror" default="true"/>         <!-- 该相机输出是镜像的 -->
-    <arg name="video_device" default="/dev/video0"/>
+    <!-- USB 插口换过, /dev/ucar_video 那条 udev 软链已经没有了 -->
+    <arg name="video_device" default="/dev/ucar_camera"/>
     <arg name="dump_every" default="1"/>        <!-- 每几帧写一张诊断图, 0=关 -->
     <!-- 控制环频率(Hz)。**以前这里是写死的 10, 命令行 rate:=20 给了也不生效**
          —— 就是这个原因。诊断图挪到后台线程后一帧只忙 ~50ms(实测 p90 48ms),
@@ -34,23 +229,48 @@
          一点补回来, 不会崩但周期开始抖, 而控制环最怕周期不稳。
          判据: rate <= 1000/[耗时]那行的"忙 p90" -->
     <arg name="rate" default="10.0"/>
-    <arg name="stats_every" default="2.0"/>     <!-- 每几秒打一行[耗时], 0=关 -->
+    <!-- 每几秒打一行 [耗时]。默认 0 = 关(它每 2 秒两行, 会把 [拦路板]
+         [对齐] [认灯] 这些真要看的日志刷没)。要看性能就 stats_every:=2 -->
+    <arg name="stats_every" default="0.0"/>
     <!-- 诊断图放后台线程画。实测同步时它平摊占一帧 44%(单张约190ms), 比分割
          还贵一倍, 而它对控制毫无贡献。后台忙不过来就丢图(只留最新一张),
          绝不阻塞控制。⚠ dump_every=1 时后台必然大量丢图(它一秒画不了10张),
          丢的只是图不影响控制; 想每张都留就把 dump_every 调大 -->
     <arg name="dump_async" default="true"/>
-    <!-- 相机: 默认都不动。启动日志会打出协商到的编码/帧率, 发现只有 ~10fps
-         再开 MJPG(很多 USB 相机 YUYV@640x480 只有 10fps, 带宽不够) -->
-    <arg name="fourcc" default=""/>
+    <!-- 相机: 节点用 CAP_V4L2 后端打开(不显式指定的话 cap.set(宽/高) 会被
+         静默忽略, 相机停在 1920x1080, 去畸变映射失配)。MJPG 才有 640x480@30,
+         YUYV 在 USB2 下只有 ~10fps。想退回"不设"就传 fourcc:=none。
+         协商结果和 640x480 对不上时节点会直接报错退出, 确认要带病跑再传
+         allow_size_mismatch:=true -->
+    <arg name="fourcc" default="MJPG"/>
+    <arg name="allow_size_mismatch" default="false"/>
     <arg name="cam_fps" default="0"/>
-    <!-- 终点框: 视觉检出正前方横线 -> 刹停打点 -> 再走一段 -> 停
-         use_lidar:=true 则检出即停(之后由激光雷达导航接管, 本节点不实现) -->
+    <!-- 终点框: use_lidar:=true 时视觉命中后直接进入雷达角落闭环；
+         两面墙稳定在目标距离后停车退出，不调用终点导航。若两面墙
+         仍有一面超过 corner_fallback_dist，则退回原来的 PAUSE+APPROACH。 -->
     <arg name="use_lidar" default="false"/>
     <arg name="goal_enable" default="true"/>
     <arg name="goal_pause" default="1.0"/>          <!-- 检出后刹停几秒打点 -->
     <arg name="goal_stop_distance" default="0.50"/> <!-- 打点后再走多远停 -->
     <arg name="goal_confirm" default="1"/>          <!-- 连续N帧检出才算数; 车快时留不住3帧 -->
+    <!-- 雷达角落停车: 距离是车心到墙的垂直距离；0.25±0.01 即 0.24~0.26m -->
+    <arg name="corner_target_dist" default="0.25"/>
+    <arg name="corner_target_tol" default="0.01"/>
+    <arg name="corner_max_fit_dist" default="2.00"/>
+    <arg name="corner_fallback_dist" default="1.00"/>
+    <arg name="corner_sector_half_width" default="0.45"/>
+    <arg name="corner_min_pts" default="8"/>
+    <arg name="corner_min_span" default="0.12"/>
+    <arg name="corner_max_residual" default="0.025"/>
+    <arg name="corner_wall_angle_tol_deg" default="10.0"/>
+    <arg name="corner_cluster_gap" default="0.05"/>
+    <arg name="corner_kp" default="0.80"/>
+    <arg name="corner_max_speed" default="0.08"/>
+    <arg name="corner_yaw_kp" default="0.80"/>
+    <arg name="corner_yaw_hold_deg" default="5.0"/>
+    <arg name="corner_max_yaw_speed" default="0.16"/>
+    <arg name="corner_stable_frames" default="5"/>
+    <arg name="corner_timeout" default="30.0"/>
     <!-- 只看画面最底下 (1-goal_y_lo) 的行 = 只认"很近的"横线。
          0.78 = 底部22%; 调小->更早触发->停得更远。dump 图上那条青色线
          就是它, 横线跌到线以下才算数 -->
@@ -135,13 +355,20 @@
     <!-- 兜底: 跑够这么久无条件停车(0=不限)。原型阶段防"停不下来又 Ctrl-C
          不掉"。随时也可以远程急停:
            rostopic pub -1 /lane_proto/estop std_msgs/Bool "data: true" -->
-    <arg name="max_runtime" default="300.0"/>
+    <!-- 0 = 永不超时(手动停). 以前是 300s, 但它兜底停车发的也是
+     STOPPED, 交接时会被主流程当成"跑完了"记成功 -->
+    <arg name="max_runtime" default="0.0"/>
     <arg name="distance_source" default="auto"/>    <!-- auto|odom|time|imu -->
     <!-- 空=用 config/red_template.png; 想试平行四边形版就指到
          $(find lane_proto)/config/red_template_band.png -->
     <arg name="template" default=""/>
+    <!-- 精简 bringup 现在也带雷达和 imu 的 TF。单独测试拦路板时它必须起,
+         交接模式下底盘/雷达由 2026.launch 提供, start_base_driver:=false -->
     <include if="$(arg start_base_driver)"
-             file="$(find ucar_controller_simple)/launch/base_driver.launch"/>
+             file="$(find ucar_controller_simple)/launch/base_driver.launch">
+        <arg name="start_lidar" value="$(arg board_in_lane)"/>
+        <arg name="lidar_port" value="$(arg lidar_port)"/>
+    </include>
     <node pkg="lane_proto" type="lane_follow.py" name="lane_follow"
           output="screen" required="false"
           launch-prefix="$(find ucar_2026)/scripts/run_melodic_python2.sh">
@@ -150,19 +377,90 @@
         <param name="gain" value="$(arg gain)"/>
         <param name="mirror" value="$(arg mirror)"/>
         <param name="video_device" value="$(arg video_device)"/>
-        <param name="use_ros_camera" value="$(arg use_ros_camera)"/>
-        <param name="image_topic" value="$(arg image_topic)"/>
-        <param name="cmd_vel_topic" value="$(arg cmd_vel_topic)"/>
-        <param name="odom_topic" value="$(arg odom_topic)"/>
-        <param name="start_enabled" value="$(arg start_enabled)"/>
-        <param name="require_fresh_odom" value="$(arg require_fresh_odom)"/>
-        <param name="odom_fresh_timeout" value="$(arg odom_fresh_timeout)"/>
-        <param name="exit_on_stop" value="$(arg exit_on_stop)"/>
+        <param name="take_cam_on_start" type="bool"
+               value="$(arg take_cam_on_start)"/>
+        <param name="use_ros_camera" type="str" value="$(arg use_ros_camera)"/>
+        <param name="start_enabled" type="str" value="$(arg start_enabled)"/>
+        <param name="image_topic" type="str" value="$(arg image_topic)"/>
+        <param name="cmd_vel_topic" type="str" value="$(arg cmd_vel_topic)"/>
+        <param name="odom_topic" type="str" value="$(arg odom_topic)"/>
+        <param name="exit_on_stop" type="bool" value="$(arg exit_on_stop)"/>
+        <param name="board_in_lane" type="bool" value="$(arg board_in_lane)"/>
+        <param name="goal_mode" type="str" value="$(arg goal_mode)"/>
+        <param name="goal_wall_dist" value="$(arg goal_wall_dist)"/>
+        <param name="field_w" value="$(arg field_w)"/>
+        <param name="field_h" value="$(arg field_h)"/>
+        <param name="field_tol" value="$(arg field_tol)"/>
+        <param name="goal_need_clear" type="str" value="$(arg goal_need_clear)"/>
+        <param name="goal_clear_range" value="$(arg goal_clear_range)"/>
+        <param name="board_clear_dist" value="$(arg board_clear_dist)"/>
+        <param name="board_clear_dist_y" value="$(arg board_clear_dist_y)"/>
+        <param name="board_look_ahead" value="$(arg board_look_ahead)"/>
+        <param name="board_early_dist" value="$(arg board_early_dist)"/>
+        <param name="scan_topic" type="str" value="$(arg scan_topic)"/>
+        <param name="board_stop_dist" value="$(arg board_stop_dist)"/>
+        <param name="board_lane_half" value="$(arg board_lane_half)"/>
+        <param name="board_min_w" value="$(arg board_min_w)"/>
+        <param name="board_max_w" value="$(arg board_max_w)"/>
+        <param name="board_gap" value="$(arg board_gap)"/>
+        <param name="board_min_pts" value="$(arg board_min_pts)"/>
+        <param name="board_confirm" value="$(arg board_confirm)"/>
+        <param name="board_min_travel" value="$(arg board_min_travel)"/>
+        <param name="board_arm_deg" value="$(arg board_arm_deg)"/>
+        <param name="board_fov_deg" value="$(arg board_fov_deg)"/>
+        <param name="board_detect_range"
+               value="$(arg board_detect_range)"/>
+        <param name="board_detect_range_y"
+               value="$(arg board_detect_range_y)"/>
+        <param name="board_dist_windows" type="str"
+               value="$(arg board_dist_windows)"/>
+        <param name="go_around" type="bool" value="$(arg go_around)"/>
+        <param name="go_around_dir" type="str" value="$(arg go_around_dir)"/>
+        <param name="go_around_side" value="$(arg go_around_side)"/>
+        <param name="go_around_fwd" value="$(arg go_around_fwd)"/>
+        <param name="go_around_pass" value="$(arg go_around_pass)"/>
+        <param name="go_around_keepout" value="$(arg go_around_keepout)"/>
+        <param name="car_half_width" value="$(arg car_half_width)"/>
+        <param name="car_half_length" value="$(arg car_half_length)"/>
+        <param name="go_around_mode" type="str" value="$(arg go_around_mode)"/>
+        <param name="go_around_min_frac" value="$(arg go_around_min_frac)"/>
+        <param name="go_around_max_sigma" value="$(arg go_around_max_sigma)"/>
+        <param name="go_around_k_sigma" value="$(arg go_around_k_sigma)"/>
+        <param name="go_around_miss_max" value="$(arg go_around_miss_max)"/>
+        <param name="go_around_back_tol" value="$(arg go_around_back_tol)"/>
+        <param name="scan_stale" value="$(arg scan_stale)"/>
+        <param name="go_around_speed" value="$(arg go_around_speed)"/>
+        <param name="go_around_max" value="$(arg go_around_max)"/>
+        <param name="go_around_cooldown" value="$(arg go_around_cooldown)"/>
+        <param name="go_around_back_arm"
+               value="$(arg go_around_back_arm)"/>
+        <param name="go_around_align_deg"
+               value="$(arg go_around_align_deg)"/>
+        <param name="go_around_trace" type="bool"
+               value="$(arg go_around_trace)"/>
+        <param name="go_around_dump_span"
+               value="$(arg go_around_dump_span)"/>
+        <param name="goal_min_travel" value="$(arg goal_min_travel)"/>
+        <param name="goal_gate_arm" value="$(arg goal_gate_arm)"/>
+        <param name="goal_gate_y" value="$(arg goal_gate_y)"/>
+        <param name="board_self_margin" value="$(arg board_self_margin)"/>
+        <param name="board_lidar_x" value="$(arg board_lidar_x)"/>
+        <param name="board_lidar_yaw_deg" value="$(arg board_lidar_yaw_deg)"/>
+        <param name="odom_fallback" type="bool" value="$(arg odom_fallback)"/>
+        <param name="odom_frozen_s" value="$(arg odom_frozen_s)"/>
+        <param name="require_odom" type="bool" value="$(arg require_odom)"/>
+        <param name="odom_wait_max" value="$(arg odom_wait_max)"/>
+        <param name="require_fresh_odom" type="bool"
+               value="$(arg require_fresh_odom)"/>
+        <param name="odom_fresh_timeout"
+               value="$(arg odom_fresh_timeout)"/>
         <param name="dump_every" value="$(arg dump_every)"/>
         <param name="dump_keep" value="0"/>   <!-- 0=不限额, 启动时清空目录 -->
         <param name="dump_async" type="bool" value="$(arg dump_async)"/>
         <param name="stats_every" value="$(arg stats_every)"/>
         <param name="fourcc" type="str" value="$(arg fourcc)"/>
+        <param name="allow_size_mismatch" type="bool"
+               value="$(arg allow_size_mismatch)"/>
         <param name="cam_fps" value="$(arg cam_fps)"/>
         <param name="template" value="$(arg template)"/>
         <!-- ⚠ 这里以前写死 10.0, 所以命令行 rate:=20 一直不生效 -->
@@ -172,6 +470,27 @@
         <param name="goal_pause" value="$(arg goal_pause)"/>
         <param name="goal_stop_distance" value="$(arg goal_stop_distance)"/>
         <param name="goal_confirm" value="$(arg goal_confirm)"/>
+        <param name="corner_target_dist" value="$(arg corner_target_dist)"/>
+        <param name="corner_target_tol" value="$(arg corner_target_tol)"/>
+        <param name="corner_max_fit_dist" value="$(arg corner_max_fit_dist)"/>
+        <param name="corner_fallback_dist" value="$(arg corner_fallback_dist)"/>
+        <param name="corner_sector_half_width"
+               value="$(arg corner_sector_half_width)"/>
+        <param name="corner_min_pts" value="$(arg corner_min_pts)"/>
+        <param name="corner_min_span" value="$(arg corner_min_span)"/>
+        <param name="corner_max_residual"
+               value="$(arg corner_max_residual)"/>
+        <param name="corner_wall_angle_tol_deg"
+               value="$(arg corner_wall_angle_tol_deg)"/>
+        <param name="corner_cluster_gap" value="$(arg corner_cluster_gap)"/>
+        <param name="corner_kp" value="$(arg corner_kp)"/>
+        <param name="corner_max_speed" value="$(arg corner_max_speed)"/>
+        <param name="corner_yaw_kp" value="$(arg corner_yaw_kp)"/>
+        <param name="corner_yaw_hold_deg" value="$(arg corner_yaw_hold_deg)"/>
+        <param name="corner_max_yaw_speed"
+               value="$(arg corner_max_yaw_speed)"/>
+        <param name="corner_stable_frames" value="$(arg corner_stable_frames)"/>
+        <param name="corner_timeout" value="$(arg corner_timeout)"/>
         <param name="goal_y_lo" value="$(arg goal_y_lo)"/>
         <param name="goal_half" value="$(arg goal_half)"/>
         <param name="goal_cover" value="$(arg goal_cover)"/>

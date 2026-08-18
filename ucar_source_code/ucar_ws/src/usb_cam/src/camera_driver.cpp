@@ -1,7 +1,9 @@
 #include <cstdio>
+#include <chrono>
 #include <linux/videodev2.h>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include "usb_cam/camera_driver.h"
 #include "usb_cam/converters.h"
@@ -38,7 +40,10 @@ std::vector<capture_format_t> AbstractV4LUSBCam::supported_formats = std::vector
 
 /* V4L camera parameters */
 bool AbstractV4LUSBCam::streaming_status = false;
-std::string AbstractV4LUSBCam::video_device_name = "/dev/video0";
+bool AbstractV4LUSBCam::capture_requested = false;
+double AbstractV4LUSBCam::reconnect_timeout = 8.0;
+double AbstractV4LUSBCam::reconnect_interval = 0.5;
+std::string AbstractV4LUSBCam::video_device_name = "/dev/ucar_camera";
 std::string AbstractV4LUSBCam::io_method_name = "mmap";
 std::string AbstractV4LUSBCam::pixel_format_name = "uyvy";
 unsigned int AbstractV4LUSBCam::v4l_pixel_format = V4L2_PIX_FMT_UYVY;
@@ -207,6 +212,12 @@ bool AbstractV4LUSBCam::start()
         printf("Video4Linux: cannot set desired framerate: %i fps (%i)\n", framerate,  errno);
     /* Final frame grabber setup */
     run_grabber(fmt.fmt.pix.sizeimage);
+
+    if(!device_ready())
+    {
+        printf("Video4linux: capture buffers were not initialized\n");
+        return false;
+    }
 
     image = reinterpret_cast<camera_image_t *>(calloc(1, sizeof(camera_image_t)));
 
@@ -377,8 +388,46 @@ bool AbstractV4LUSBCam::start_capture()
     if(streaming_status)
         return false;
 
+    capture_requested = true;
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(static_cast<int>(reconnect_timeout * 1000.0));
+    int error_code = ENODEV;
+    while(true)
+    {
+        if(!device_ready())
+        {
+            if(!recover_device())
+            {
+                error_code = errno;
+            }
+        }
+
+        if(device_ready() && start_capture_once(error_code))
+            return true;
+
+        if(!is_device_disconnect_error(error_code))
+        {
+            capture_requested = false;
+            return false;
+        }
+
+        mark_device_disconnected();
+        if(std::chrono::steady_clock::now() >= deadline)
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(
+            static_cast<int>(reconnect_interval * 1000.0)));
+    }
+
+    printf("USB_CAM_RECONNECT timeout after %.1f seconds\n", reconnect_timeout);
+    capture_requested = false;
+    return false;
+}
+
+bool AbstractV4LUSBCam::start_capture_once(int &error_code)
+{
     unsigned int i;
     enum v4l2_buf_type type;
+    error_code = 0;
 
     switch(io_method)
     {
@@ -395,7 +444,8 @@ bool AbstractV4LUSBCam::start_capture()
             buf.index = i;
             if(usb_cam::util::xioctl(file_dev, static_cast<int>(VIDIOC_QBUF), &buf) < 0)
             {
-                printf("Video4linux: unable to configure stream (%i)\n", errno);
+                error_code = errno;
+                printf("Video4linux: unable to configure stream (%i)\n", error_code);
                 return false;
             }
         }
@@ -412,26 +462,83 @@ bool AbstractV4LUSBCam::start_capture()
             buf.length = buffers[i].length;
             if(usb_cam::util::xioctl(file_dev, static_cast<int>(VIDIOC_QBUF), &buf) < 0)
             {
-                printf("Video4linux: unable to configure stream (%i)\n", errno);
+                error_code = errno;
+                printf("Video4linux: unable to configure stream (%i)\n", error_code);
                 return false;
             }
         }
         break;
     default:
         printf("Video4linux: attempt to start stream with unknown I/O method. Dropping request\n");
+        error_code = EINVAL;
+        return false;
     }
     type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (usb_cam::util::xioctl(file_dev, VIDIOC_STREAMON, &type) < 0)
     {
-        printf("Video4linux: unable to start stream (%i)\n", errno);
+        error_code = errno;
+        printf("Video4linux: unable to start stream (%i)\n", error_code);
         return false;
     }
     streaming_status = true;
     return true;
 }
 
+bool AbstractV4LUSBCam::recover_device()
+{
+    reset_device();
+    if(!start())
+    {
+        reset_device();
+        return false;
+    }
+    if(!controls.empty())
+        adjust_camera();
+    printf("USB_CAM_RECONNECT device reopened at %s\n", video_device_name.c_str());
+    return true;
+}
+
+void AbstractV4LUSBCam::reset_device()
+{
+    streaming_status = false;
+    if(buffers != nullptr)
+        release_device();
+    if(file_dev >= 0)
+        close_handlers();
+    if(image != nullptr)
+    {
+        free(image->image);
+        free(image);
+        image = nullptr;
+    }
+}
+
+void AbstractV4LUSBCam::mark_device_disconnected()
+{
+    printf("USB_CAM_RECONNECT device disconnected; waiting for %s\n",
+           video_device_name.c_str());
+    reset_device();
+}
+
+bool AbstractV4LUSBCam::device_ready()
+{
+    if(file_dev < 0 || buffers == nullptr)
+        return false;
+    if(io_method == IO_METHOD_READ)
+        return buffers[0].start != nullptr;
+    return buffers_count >= 2;
+}
+
+bool AbstractV4LUSBCam::is_device_disconnect_error(int error_code)
+{
+    return error_code == ENOENT || error_code == ENODEV ||
+           error_code == ENXIO || error_code == EPIPE ||
+           error_code == EIO;
+}
+
 bool AbstractV4LUSBCam::suspend()
 {
+    capture_requested = false;
     if(!streaming_status)
         return false;
     enum v4l2_buf_type type;
@@ -457,6 +564,11 @@ bool AbstractV4LUSBCam::suspend()
 
 void AbstractV4LUSBCam::release_device()
 {
+    if(buffers == nullptr)
+    {
+        buffers_count = 0;
+        return;
+    }
     unsigned int i;
     switch(io_method)
     {
@@ -478,10 +590,14 @@ void AbstractV4LUSBCam::release_device()
         printf("Attempt to free buffer for unknown I/O method\n");
     }
     free(buffers);
+    buffers = nullptr;
+    buffers_count = 0;
 }
 
 void AbstractV4LUSBCam::close_handlers()
 {
+    if(file_dev < 0)
+        return;
     int res = close(file_dev);
     file_dev = -1;
     if(res < 0)
@@ -514,7 +630,11 @@ camera_image_t *AbstractV4LUSBCam::read_frame()
     {
         if(errno == EINTR)
             return nullptr;
-        printf("Video4linux: frame mapping operation failed (%i)\n", errno);
+        int error_code = errno;
+        if(is_device_disconnect_error(error_code))
+            mark_device_disconnected();
+        printf("Video4linux: frame mapping operation failed (%i)\n", error_code);
+        return nullptr;
     }
     else if(r == 0)
     {
@@ -536,10 +656,12 @@ camera_image_t *AbstractV4LUSBCam::read_frame()
         {
             if(errno == EAGAIN)
                 return nullptr;
-            else if(errno == EIO){}
             else
             {
-                printf("Block device read failure (%i)\n", errno);
+                int error_code = errno;
+                if(is_device_disconnect_error(error_code))
+                    mark_device_disconnected();
+                printf("Block device read failure (%i)\n", error_code);
                 return nullptr;
             }
         }
@@ -553,10 +675,12 @@ camera_image_t *AbstractV4LUSBCam::read_frame()
         {
             if(errno == EAGAIN)
                 return nullptr;
-            else if(errno == EIO){}
             else
             {
-                printf("Memory mapping failure (%i)\n", errno);
+                int error_code = errno;
+                if(is_device_disconnect_error(error_code))
+                    mark_device_disconnected();
+                printf("Memory mapping failure (%i)\n", error_code);
                 return nullptr;
             }
         }
@@ -568,7 +692,10 @@ camera_image_t *AbstractV4LUSBCam::read_frame()
         // Process image
         if(usb_cam::util::xioctl(file_dev, static_cast<int>(VIDIOC_QBUF), &buf) < 0)
         {
-            printf("Unable to exchange buffer with driver (%i)\n", errno);
+            int error_code = errno;
+            if(is_device_disconnect_error(error_code))
+                mark_device_disconnected();
+            printf("Unable to exchange buffer with driver (%i)\n", error_code);
             return nullptr;
         }
         image->stamp = stamp;
@@ -581,10 +708,12 @@ camera_image_t *AbstractV4LUSBCam::read_frame()
         {
             if(errno == EAGAIN)
                 return nullptr;
-            else if(errno == EIO){}
             else
             {
-                printf("Unable to exchange poiner with driver (%i)\n", errno);
+                int error_code = errno;
+                if(is_device_disconnect_error(error_code))
+                    mark_device_disconnected();
+                printf("Unable to exchange poiner with driver (%i)\n", error_code);
                 return nullptr;
             }
         }
@@ -601,7 +730,10 @@ camera_image_t *AbstractV4LUSBCam::read_frame()
         // Process image
         if(usb_cam::util::xioctl(file_dev, static_cast<int>(VIDIOC_QBUF), &buf) < 0)
         {
-            printf("Unable to exchange buffer with driver (%i)\n", errno);
+            int error_code = errno;
+            if(is_device_disconnect_error(error_code))
+                mark_device_disconnected();
+            printf("Unable to exchange buffer with driver (%i)\n", error_code);
             return nullptr;
         }
         image->stamp = stamp;

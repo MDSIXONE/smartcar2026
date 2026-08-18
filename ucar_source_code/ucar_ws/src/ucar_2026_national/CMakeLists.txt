@@ -8,6 +8,7 @@ catkin_package()
 catkin_install_python(PROGRAMS
   scripts/cmd_vel_owner.py
   scripts/navigation_scan_relay.py
+  scripts/national_sprint_speed_debug.py
   scripts/production_camera_ocr.py
   scripts/production_task_2026.py
   scripts/production_task_geometry.py
@@ -29,6 +30,7 @@ install(DIRECTORY config launch urdf rviz
 )
 
 if(CATKIN_ENABLE_TESTING)
+  catkin_add_nosetests(test/test_national_sprint_speed_debug.py)
   catkin_add_nosetests(test/test_production_task_geometry.py)
   catkin_add_nosetests(test/test_production_task_perception.py)
   add_test(

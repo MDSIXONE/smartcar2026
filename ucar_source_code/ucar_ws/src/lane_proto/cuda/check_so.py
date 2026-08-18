@@ -133,7 +133,7 @@ def main():
                     help="图片通配符。⚠ 别用 dump/*.jpg(那是画了标注的诊断图, "
                          "分布外输入会让 fp16 分歧虚高好几倍), 用 --camera")
     ap.add_argument("--camera", default=None,
-                    help="直接抓原始帧测, 如 --camera /dev/video0 (推荐)")
+                    help="直接抓原始帧测, 如 --camera /dev/ucar_camera (推荐)")
     ap.add_argument("--save-raw", default=None,
                     help="把抓到的原始帧存下来, 方便下次复现同一组")
     ap.add_argument("--n", type=int, default=8, help="用几帧(基准库很慢)")
@@ -148,7 +148,7 @@ def main():
         if a.images and any("dump" in x for x in a.images):
             print("!! 你指的是 dump/ 里的诊断图(带标注叠加)。那是分布外输入,"
                   " fp16 分歧会虚高好几倍, 判不了 kernel 对不对。\n"
-                  "   建议改用: --camera /dev/video0 --n 40")
+                  "   建议改用: --camera /dev/ucar_camera --n 40")
         frames = load_frames(a.images or ["dump/*.jpg"], a.n)
     print("测试帧 %d 张: %s" % (len(frames),
                               ", ".join(n for n, _ in frames[:6]) +

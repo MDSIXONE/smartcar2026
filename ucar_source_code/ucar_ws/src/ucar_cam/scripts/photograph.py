@@ -1,6 +1,6 @@
 import cv2
 
-cap = cv2.VideoCapture("/dev/video0")
+cap = cv2.VideoCapture("/dev/ucar_camera")
 
 i = 0
 while True:

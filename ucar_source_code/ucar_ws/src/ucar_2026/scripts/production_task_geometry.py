@@ -12,6 +12,8 @@ import json
 import math
 
 
+DEFAULT_QR_OBSERVATION_NUMBERS = [262, 232, 295, 61, 41, 43]
+
 DEFAULT_PRODUCTION_ROUTE = [
     12, 22, 13, 23, 14, 24, 15, 25, 16, 26, 17, 27, 18, 28, 19, 29,
 ]
@@ -210,22 +212,22 @@ def load_middle_zone_geometry(path):
     return (x_min, x_max, y_min, y_max, side_length)
 
 
-def stop_point_for_wall_point(wall_coordinate, square_side_m, middle_bounds):
-    """Return the parking pose ``(x, y)`` half a cell inside a wall point.
+def stop_point_for_wall_point(wall_coordinate, inside_offset_m, middle_bounds):
+    """Return the parking pose ``(x, y)`` inside a wall point.
 
     ``middle_bounds`` is the ``(x_min, x_max, y_min, y_max)`` tuple returned by
     :func:`load_middle_zone_geometry`.  The wall point must lie on one of the
     four middle-zone boundaries; the stop point is the boundary coordinate
-    displaced by ``square_side_m / 2`` toward the inside of the zone.
+    displaced by ``inside_offset_m`` toward the inside of the zone.
     """
     x_min, x_max, y_min, y_max = middle_bounds
     wall_x = float(wall_coordinate[0])
     wall_y = float(wall_coordinate[1])
     if not is_finite(wall_x) or not is_finite(wall_y):
         raise TaskDefinitionError("wall point coordinate is not finite")
-    if not is_finite(square_side_m) or square_side_m <= 0.0:
-        raise TaskDefinitionError("square_side_m must be finite and positive")
-    offset = square_side_m / 2.0
+    if not is_finite(inside_offset_m) or inside_offset_m <= 0.0:
+        raise TaskDefinitionError("inside_offset_m must be finite and positive")
+    offset = float(inside_offset_m)
     tolerance = 1e-6
     if abs(wall_y - y_max) <= tolerance and x_min <= wall_x <= x_max:
         return (wall_x, y_max - offset)

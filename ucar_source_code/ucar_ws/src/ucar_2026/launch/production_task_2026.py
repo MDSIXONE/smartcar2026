@@ -168,7 +168,7 @@ class ProductionTask2026(object):
         self.camera_frame_timeout = float(
             rospy.get_param("~camera_frame_timeout", 1.0))
         self.video_device = str(
-            rospy.get_param("~video_device", "/dev/video0"))
+            rospy.get_param("~video_device", "/dev/ucar_camera"))
         self.camera_width = int(rospy.get_param("~camera_width", 640))
         self.camera_height = int(rospy.get_param("~camera_height", 480))
         self.camera_warmup_frames = max(

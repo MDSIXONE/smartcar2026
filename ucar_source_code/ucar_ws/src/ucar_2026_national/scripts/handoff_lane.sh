@@ -54,8 +54,8 @@ if [[ "$serial_ready" != true ]]; then
   echo "HANDOFF_ERROR chassis serial port did not become available" >&2
   exit 4
 fi
-if [[ ! -e /dev/video0 ]]; then
-  echo "HANDOFF_WARNING camera /dev/video0 not present" >&2
+if [[ ! -e /dev/ucar_camera ]]; then
+  echo "HANDOFF_WARNING camera /dev/ucar_camera not present" >&2
 fi
 
 unset ROS_HOSTNAME

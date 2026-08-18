@@ -17,6 +17,15 @@
 - **不是**：manual 模式（无二维码/语音/任务）；full 模式（历史 yolo2025 流程）
 - **权威来源**：`ucar_source_code/docs/new-computer-gui-simulation-mission.md` §7、`ucar_source_code/docs/operations.md`「2026 双物品主流程」
 
+## 国赛主流程
+
+- **等价说法**：国赛版主流程 / national mission
+- **含义**：使用 `ucar_2026_national/launch/2026.launch` 的国赛双物品生产任务主流程；与省赛流程共用任务逻辑，但使用国赛地图墙位。
+- **前置条件**：已同步最新 `lane_proto`；小车已具备 `/scan`、`/odom_raw` 和共享 ROS 相机话题。
+- **精确动作**：修改 `ucar_source_code/ucar_ws/src/ucar_2026_national/launch/2026.launch` 的常驻 `lane_proto` include；OCR 完成后的交接保持共享相机/单底盘模式，并启用新版板检测与绕板参数。
+- **不是**：省赛 `ucar_2026/launch/2026.launch`，也不是国赛现场随机任务副本 `ucar_2026_extra`。
+- **权威来源**：`ucar_source_code/docs/operations.md`「2026 主流程三场比赛副本」「常驻 lane_proto 无重启交接」
+
 ## 调节音量
 
 - **含义**：设置小车 USB 扬声器（UACDemoV1.0）的 PCM 播放音量

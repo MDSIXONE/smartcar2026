@@ -19,6 +19,8 @@
     <!-- No RViz/camera workload by default. Set false only when a manual
          session explicitly needs an immediately-live camera stream. -->
     <arg name="camera_start_suspended" default="true"/>
+    <!-- Stable udev alias; do not depend on the enumerated /dev/videoN index. -->
+    <arg name="camera_device" default="/dev/ucar_camera"/>
     <!-- RViz-only chassis model; it is a visual on the existing base_link and
          does not create TF, collision geometry, or a control dependency. -->
     <param name="robot_description" textfile="$(find ucar_2026)/urdf/ucar_2026_visual.urdf"/>
@@ -36,7 +38,7 @@
          session may opt in with camera_start_suspended:=false. -->
     <node name="usb_cam" pkg="usb_cam" type="usb_cam_node" output="screen"
           respawn="$(eval arg('task_enabled') != 'true')" respawn_delay="2.0">
-        <param name="video_device" value="/dev/video0"/>
+        <param name="video_device" value="$(arg camera_device)"/>
         <param name="image_width" value="640"/>
         <param name="image_height" value="480"/>
         <param name="pixel_format" value="yuyv"/>
@@ -44,6 +46,8 @@
         <param name="io_method" value="mmap"/>
         <param name="framerate" value="30"/>
         <param name="create_suspended" value="$(arg camera_start_suspended)"/>
+        <param name="reconnect_timeout" value="8.0"/>
+        <param name="reconnect_interval" value="0.5"/>
         <param name="camera_info_url" type="string"
                value="file://$(find ucar_cam)/camera_calibration.yaml"/>
     </node>
@@ -180,7 +184,9 @@
             <param name="ocr_helper_ready_timeout" value="90"/>
             <param name="ocr_capture_timeout" value="24"/>
             <param name="staging_point_number" value="52"/>
-            <rosparam param="qr_observation_numbers">[262, 232, 295]</rosparam>
+            <!-- QR scan directions from centre point 52:
+                 180° -> 90° -> -90° -> -135° -> 135° -> 45°. -->
+            <rosparam param="qr_observation_numbers">[262, 232, 295, 61, 41, 43]</rosparam>
             <!-- Each target is reached before one OCR search revolution.  A
                  candidate is centred/ranged; once both requested categories
                  are absent from this inner route, the perimeter fallback
@@ -204,6 +210,13 @@
                  is kept with its default 3.0 for launch compatibility and is
                  no longer used by the task code. -->
             <param name="processing_dwell_seconds" value="3.0"/>
+            <!-- OCR 识别成功后，内墙交点向场内内缩 29cm 作为停车坐标。 -->
+            <param name="ocr_stop_offset_m" value="0.29"/>
+            <!-- Normal route keeps the large local safety inflation.  The
+                 final OCR wall-parking leg temporarily uses a smaller local
+                 radius, while CymPlanner remains in front-point mode. -->
+            <param name="processing_parking_profile_enabled" value="true"/>
+            <param name="processing_parking_inflation_radius_m" value="0.10"/>
             <!-- Local simulation (host PC) coordination: only after the
                  real item has been parked and its completion announcement
                  has finished does the task park/start the simulation item. -->
@@ -249,6 +262,18 @@
             <!-- Drive to this waypoint after the QR phase (no OCR rotation),
                  then start the production route.  0 disables it. -->
             <param name="post_qr_waypoint_number" value="3"/>
+            <!-- Keep local dynamic obstacles/inflation off during the QR→point-3
+                 leg; production_task_2026 enables both after point 3 arrival. -->
+            <param name="local_costmap_layer_control_enabled" value="true"/>
+            <param name="local_costmap_enable_waypoint_number" value="3"/>
+            <param name="local_costmap_obstacle_layer"
+                   value="/move_base/local_costmap/obstacle_layer"/>
+            <param name="local_costmap_inflation_layer"
+                   value="/move_base/local_costmap/inflation_layer"/>
+            <!-- After point 3, keep the global inflation radius at 0.235 m. -->
+            <param name="global_costmap_inflation_layer"
+                   value="/move_base/global_costmap/inflation_layer"/>
+            <param name="global_costmap_inflation_radius_m" value="0.235"/>
             <!-- Heading the waypoint must face after arrival; 0 keeps the
                  current yaw (no rotation). -->
             <param name="post_qr_waypoint_heading_point_number" value="13"/>
@@ -286,7 +311,7 @@
             <param name="camera_service_timeout" value="10.0"/>
             <param name="use_ros_camera_for_ocr" value="true"/>
             <param name="camera_image_topic" value="/usb_cam/image_raw"/>
-            <param name="video_device" value="/dev/video0"/>
+            <param name="video_device" value="$(arg camera_device)"/>
             <param name="camera_width" value="640"/>
             <param name="camera_height" value="480"/>
             <param name="ocr_python" value="/usr/bin/python3"/>

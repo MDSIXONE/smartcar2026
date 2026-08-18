@@ -1,5 +1,231 @@
 # AI 改动记录
 
+## 2026-08-18｜国赛终点改为雷达角落闭环停车
+
+- **状态**：改动完成，已部署，待车端现场复测
+- **目标**：视觉发现终点后不再前进或调用终点导航，直接用雷达拟合相邻两面墙，控制车体前后/左右微调；距离稳定后发布 GOAL 并退出任务节点。
+- **影响文件**：`lane_proto/scripts/lane_common.py`、`lane_proto/scripts/lane_follow.py`、`lane_proto/launch/lane_proto.launch`、国赛 `2026.launch`、生产任务交接状态检查、测试与操作文档。
+- **结果**：国赛 launch 已启用雷达角落闭环；目标为两面墙 `0.25m ± 0.01m`，连续 5 帧稳定后发布 `GOAL`。任一墙面拟合距离大于 `1.0m` 时回退原来的 `PAUSE+APPROACH`；拟合失败或超时发布 `ABORT`。生产任务只有收到 `GOAL` 才发布最终 `SUCCEEDED`。
+- **验证**：17 项 lane 离线测试通过（3 项 ROS 环境跳过）；production 定向文件 15 项通过（其余 74 项因本机无 ROS 模块跳过）；3 个 Python 文件 `py_compile` 通过；2 个 launch XML 解析通过。已动态确认 `ucar-mini` 当前地址 `192.168.8.231`，5 个运行文件已上传且车端 SHA-256 与本地一致；车端 Python2 语法和 `task_enabled:=true` launch 展开通过。
+- **已知限制**：尚未在 Ubuntu 18.04 / ROS Melodic 车端实测四个角落的雷达点云和 profile 映射；部署后主流程保持停止，车端实测前必须确认 `/odom_raw`、TF 和 `/scan` 有限且车辆零速。
+
+## 2026-08-18｜bridge 端口占用提示补充
+
+- **状态**：改动完成
+- **目标**：当 `11313` 被旧 bridge 占用时，在启动器错误提示中直接给出按 PID 核对和终止命令。
+- **影响文件**：`simulation/scripts/start_simulation_stack.sh`、`ucar_source_code/docs/operations.md`、`ucar_source_code/docs/changes/`。
+- **结果**：启动失败时动态打印 `ps` 核对、`kill -TERM PID` 和 `kill -KILL PID` 命令；更新后的启动脚本已精确部署到 WSL，SHA-256 与本地一致。
+- **验证**：WSL 实际占用 PID `303639` 时成功输出三条可复制命令；Bash 语法通过。未自动终止当前 `state=done` bridge。
+- **已知限制**：当前 bridge PID `303639` 仍占用 `11313`，需按提示先核对后手工终止，下一轮启动才会进入正常流程。
+
+## 2026-08-18｜全局与局部常态膨胀调整为 0.24m
+
+- **状态**：改动完成，待车端现场复测
+- **目标**：将点 3 后 global inflation 由 `0.23m` 调整为 `0.24m`，并把 CymPlanner 使用的 local costmap 常态 inflation 由 `0.22m` 调整为 `0.24m`；OCR 停车临时局部膨胀和前式点模式保持不变。
+- **计划影响文件**：三套 2026 任务 launch、三套任务脚本默认值、testnav20260721 的 global/local costmap 配置、测试、操作文档和改动记录。
+- **验证计划**：本地 YAML/XML/Python 静态检查；车端 Python 2 定向回归和文件哈希；不启动 ROS Master、导航主流程或发送运动命令。
+- **结果**：点 3 后 global inflation 目标和任务脚本默认值调整为 `0.24m`，`testnav20260721` 的 local 常态 inflation 调整为 `0.24m`；OCR 停车仍为 local `0.10m` 临时配置并保持 `point` 模式。10 个源码/launch/YAML/测试文件已同步到 `ucar-mini`；标准/国赛各 88 项车端回归和额外版全局切换定向单测通过，Python 2 语法检查通过。
+- **已知限制**：车端当前未运行 `move_base`，因此未查询运行时 dynamic_reconfigure 服务；需在 `/odom_raw`、`odom -> base_link`、`map -> base_link` 有限且车辆零速时重启后复测。
+
+## 2026-08-18｜点 3 后全局膨胀切换为 0.23m
+
+- **状态**：改动完成，待车端现场复测
+- **目标**：到达点 3 后将 global costmap 的 inflation radius 从当前启动值切换为 `0.23m`，并保持到任务结束；local costmap 仍按既有点 3 时序启用。
+- **计划影响文件**：三套 2026 任务脚本、三套 `2026.launch`、对应改动记录和操作文档。
+- **验证计划**：本地 Python/launch 静态检查；车端 dynamic_reconfigure 服务、Python 2 语法和定向测试；不启动任务、不发送运动指令。
+- **结果**：点 3 到达和断点续跑均先设置 global inflation 为 `0.23m` 并回读校验，OCR 停车只切换 local inflation 且保持 `point` 模式；三套 launch 与三套脚本/测试已同步到 `ucar-mini`，标准/国赛车端各 88 项回归和额外版全局切换定向单测通过，9 个文件 SHA-256 一致。车端当前未运行 `move_base`，实际服务发现和运动复测留待安全重启后进行。
+
+## 2026-08-18｜撤销 OCR 停车车体模式
+
+- **状态**：改动完成
+- **目标**：保留分阶段 local inflation，但严格使用车端已验证正常的前视点模式，避免 `body_projection` 的低速控制参数影响停车和后续导航。
+- **触发**：用户实车反馈部署后速度明显变慢，并确认 CymPlanner 只能使用前视点模式。
+- **结果**：移除 OCR 停车阶段的 `body_projection` 切换，停车阶段显式保持 `point`；已同步 6 个修正脚本/测试文件到 `ucar-mini`，车端 Python 2 语法检查、标准/国赛各 87 项回归和额外版 point-only 单测通过。
+
+## 2026-08-18｜仿真 bridge 残留端口清理
+
+- **状态**：改动完成
+- **目标**：修复上一轮仿真结束后旧 HTTP bridge 仍占用 `11313`，导致下一轮启动误读旧 bridge 状态并继续运行的问题。
+- **影响文件**：`simulation/scripts/start_simulation_stack.sh`、`simulation/bridge/sim_bridge.py`、`ucar_source_code/docs/changes/`、`ucar_source_code/docs/operations.md`。
+- **结果**：启动前检查 `11313` 监听 PID，等待时绑定本次 bridge 子进程与端口所有权；`SIMULATION_BRIDGE_READY` 延后到 socket bind 后；Ctrl-C 清理增加 SIGINT/SIGTERM/SIGKILL 有界升级。
+- **验证**：WSL 现场确认旧 PID `78097` 为本项目 bridge 并已定向停止，`11313` 已无监听；本地修改版 `bash -n`、`--help`、`sim_bridge.py` Python 语法、端口所有权（空闲/临时监听）、bridge `/status`、标记顺序和清理升级回归通过；随后只精确部署两个运行文件到 WSL，SHA-256 与本地一致，部署后 Bash/Python 语法和帮助命令通过。
+- **已知限制**：WSL `/home/car/smartcar2026/simulation` 仍有既有 tracked/untracked 改动；本轮未做整仓库 fast-forward，也未启动完整 Gazebo/RViz 栈。
+
+## 2026-08-18｜OCR 内墙停车分阶段局部膨胀
+
+- **状态**：改动完成，待车端现场复测
+- **目标**：在正常轨迹规划保留较大局部膨胀的同时，避免 OCR 识别后的 `0.29m` 内墙停车目标被同一膨胀层判为不可达。
+- **结果**：三套 2026 主流程在最终内墙停车前临时将 local inflation 切换为 `0.10m`，始终使用 CymPlanner `point` 模式；停车结束后恢复进入前半径并再次确认 `point`。动态重配置失败会明确中止任务。
+- **验证**：已动态确认并部署到 `ucar-mini`（`192.168.8.231`），12 个任务脚本/geometry/launch/测试文件 SHA-256 与本地一致；车端 `dynamic_reconfigure` 导入、Python 2 语法检查通过；标准/国赛车端各 87 项全量回归通过，额外版新增 profile 单测通过。额外版全量仍有 1 个既有 `observe(stop_mode)` 测试桩错误，与本次改动无关。
+- **已知限制**：`0.10m` 尚未实车运动验证；未重启主流程，必须在 `/odom_raw` 和 TF 有限、车辆零速时再重启对应流程复测。
+
+## 2026-08-18｜OCR 识别后内墙停车偏移调整
+
+- **状态**：改动完成
+- **目标**：将 OCR 识别成功后根据内墙交点计算的停车坐标内缩距离由 `0.25m` 调整为 `0.29m`。
+- **影响文件**：三套 2026 主流程任务脚本与 `launch/2026.launch`、对应测试、`ucar_source_code/docs/changes/`、`ucar_source_code/docs/operations.md`。
+- **结果**：停车坐标函数改为接收显式内缩距离；三套 launch 均设置 `ocr_stop_offset_m=0.29`，地图网格 `square_side_m=0.5` 保持不变。
+- **验证**：三套几何回归通过（标准/国赛各 86 项、额外 101 项；ROS 依赖用例按既有条件跳过）；AST、launch XML、0.29m 坐标容差断言和 `git diff --check` 通过；未在本机编译、启动 ROS 或发送运动命令。
+- **已知限制**：尚未在 Ubuntu 18.04 / ROS Melodic 车端现场验证实际停车误差；参数生效需要重启对应主流程。
+
+## 2026-08-18｜usb_cam USB Hub 热重连自动恢复
+
+- **状态**：改动完成
+- **目标**：解决 USB Hub 整体断开并重新枚举摄像头后，`usb_cam` 继续使用旧 fd，导致 `/usb_cam/start_capture` 在 `VIDIOC_QBUF` 返回 `ENODEV(19)`。
+- **实现方式**：在 `usb_cam` 内增加设备断开识别、旧 fd/mmap 释放、稳定别名重新 open、缓冲区重建和运行中自动恢复；start service 在 8 秒内按 0.5 秒间隔等待重连。
+- **影响文件**：`ucar_source_code/ucar_ws/src/usb_cam/include/usb_cam/camera_driver.h`、`camera_driver.cpp`、`usb_cam.cpp`、对应 launch 以及 `ucar_source_code/docs/changes/`、`docs/operations.md`。
+- **验证**：本地 launch XML 和差异检查通过；车端已同步 7 个源码/launch 文件，Ubuntu 18.04 `usb_cam` 白名单构建通过；新二进制包含 `USB_CAM_RECONNECT` 日志；`roslaunch --nodes` 通过；未重启当前用户 ROS 主流程，未人为断开 Hub。
+- **已知限制**：尚未完成真实 USB Hub 断开/恢复回归；下一轮车辆静止且通过安全门后验证图像话题恢复和点 52 `/usb_cam/start_capture` 成功。
+
+## 2026-08-18｜摄像头改用稳定 udev 别名
+
+- **状态**：改动完成
+- **目标**：解决 USB 摄像头重新枚举为 `/dev/video1` 后，主流程仍固定打开 `/dev/video0` 导致点 52 后 QR 阶段失败的问题。
+- **实现计划**：为 RHX `0edc:2050` 摄像头新增 `/dev/ucar_camera` udev 别名；三套 2026 主流程、OCR、巡线交接和常用相机 launch 改用该别名，保留可变 `/dev/videoN` 仅在测试夹具/历史文档中。
+- **影响文件**：`ucar_source_code/ucar_ws/src/startup_scripts/ucar_camera.rules`、三套 2026 launch/任务脚本、QR/巡线/相机入口、`ucar_source_code/ucar_ws/src/usb_cam/src/camera_driver.cpp`、`ucar_source_code/docs/changes/`、`ucar_source_code/docs/operations.md`。
+- **验证**：本地 Python AST、launch XML、udev 规则和 `/dev/video0` 运行时引用检查通过；车端已同步 28 个文件并完成关键文件 SHA-256 校验；Ubuntu 18.04 车端 `usb_cam` 白名单构建通过；`/dev/ucar_camera -> /dev/video0` 且 `v4l2-ctl` 读取 1920×1080 MJPG 成功；未启动 ROS 或发送运动命令。
+- **验证**：本地 Python AST、launch XML、udev 规则和 `/dev/video0` 运行时引用检查通过；车端已同步 28 个文件并完成关键文件 SHA-256 校验；Ubuntu 18.04 车端 `usb_cam` 白名单构建通过；`/dev/ucar_camera` 可跟随从 `/dev/video0` 切换到 `/dev/video1`；两种格式直接 V4L2 采帧成功。
+- **新增发现**：真实 QR 流程在 USB Hub 热重连后仍失败；`usb_cam` 持有热重连前的旧 fd，在 `VIDIOC_QBUF` 处返回 `ENODEV(19)`。下一步需修复节点重连/重新 open 生命周期，不能继续只调整设备路径。
+- **已知限制**：热重连自动恢复尚未实现；在修复并回归前，USB Hub/摄像头链路必须保持稳定，启动前仍必须按安全门检查 `/odom_raw`、TF、/scan 和零速条件。
+
+## 2026-08-18｜局部代价地图延迟到点 3 启用
+
+- **状态**：改动完成
+- **目标**：让标准、省赛/国赛和额外任务主流程在前往点 3 前关闭 local costmap 的动态障碍与膨胀层，到达点 3 后再启用，避免过早的局部动态判障干扰点 3 之前的路线。
+- **影响文件**：`ucar_source_code/ucar_ws/src/ucar_2026*/scripts/production_task_2026.py`、对应 `package.xml` 与 `launch/2026.launch`、`ucar_source_code/docs/changes/`、`ucar_source_code/docs/operations.md`。
+- **实现方式**：不关闭 local costmap 容器和静态层，仅通过 dynamic_reconfigure 控制 `obstacle_layer`、`inflation_layer`；点 3 导航成功返回后才切换为 enabled。
+- **验证**：三套本地 Python AST、三套 launch/package XML 和生命周期断言通过；车端 dynamic_reconfigure Python2 导入、白名单 catkin 构建、`roslaunch --nodes ucar_2026_national 2026.launch task_enabled:=true` 通过；标准与国赛任务几何/感知回归各 86 项通过，额外任务保留 1 个既有 `observe()` 测试桩错误；9 个运行时/依赖文件和 3 个测试文件已同步到 `ucar-mini` 并完成哈希校验；未启动 ROS 或发送运动命令。
+- **已知限制**：尚未在真实任务运行中观察 `before_point_3` 到 `reached_point_3` 的动态重配置日志；下次启动前必须按安全门检查 `/odom_raw` 和 TF，启动后确认两个 dynamic_reconfigure 服务及点 3 前后日志时序。
+
+## 2026-08-18｜国赛 70 号点冲刺朝向恢复 180°
+
+- **状态**：改动完成
+- **目标**：将国赛到达 70 号点、进入冲刺段时的车头角度由 170° 恢复为 180°。
+- **影响文件**：`ucar_source_code/ucar_ws/src/ucar_2026_national/launch/2026.launch`、`ucar_source_code/docs/debug-rviz-observation.md`、`ucar_source_code/docs/operations.md`、`ucar_source_code/docs/changes/`。
+- **结果**：`sprint_yaw_deg=180`；冲刺速度、前向增益和航向 P 保持上一轮对比值；额外任务不受此参数影响。
+- **验证**：XML 解析、文本核对和 `git diff --check` 通过；已同步到车端并完成 SHA-256 校验，车端读取为 `180`；未启动任务或发送运动命令。
+- **风险**：180° 尚未完成本轮现场试跑，需在 odom/TF 安全检查通过后观察到达 70 点的实际车头误差。
+
+## 2026-08-18｜扩大局部代价地图与前视膨胀范围
+
+- **状态**：改动完成
+- **目标**：解决当前 local costmap `1.0×1.0 m`、局部膨胀 `0.07 m`、CymPlanner 前视 `0.25 m` 导致障碍判断滞后的问题。
+- **影响文件**：`ucar_source_code/ucar_ws/src/ucar_nav/config/testnav20260721/local_costmap_params.yaml`、`local_costmap_common.yaml`、`ucar_source_code/ucar_ws/src/cym_planner/config/ucar_cym_planner_params.yaml`、`ucar_source_code/docs/changes/2026-08-18-expand-local-costmap-lookahead.md`、`ucar_source_code/docs/operations.md`。
+- **结果**：local window `1.8×1.8 m`、local inflation `0.22 m`、三个模式前视距离 `0.8 m`；三份 YAML 已同步到 `ucar-mini`，本地与车端 SHA-256 一致。
+- **验证**：三份 YAML 解析和数值断言通过，车端 grep 值正确；未在本机编译、启动 ROS 或发送运动命令。
+- **已知限制**：同步期间未强制重启任务；最终核对时车端 ROS 主流程已不在运行，下一次启动会加载新配置。local inflation 扩大后窄通道可能更早暴露无路可走。
+
+## 2026-08-18｜仿真 409 状态进入 120 秒兜底
+
+- **状态**：改动完成
+- **目标**：HTTP bridge 返回 409（已有或残留运行状态）时不再中止生产任务，进入仿真状态轮询，并在 120 秒未完成后继续车辆终点流程。
+- **影响文件**：`ucar_ws/src/ucar_2026*/scripts/production_task_2026.py`、对应测试、`docs/changes/`、`docs/operations.md`。
+- **结果**：标准、国赛和额外三套主流程均将 HTTP 409 记录为告警并返回 `False`，继续 `/status` 轮询及 120 秒超时继续路径；对应回归测试已改为锁定该语义。
+- **验证**：三套主流程源码和两套测试文件 AST 解析通过；本机 `ucar_2026` 发现式回归 86 tests（71 skipped）、`ucar_2026_extra` 发现式回归 101 tests（86 skipped），其余通过；已在 `ucar-mini` Ubuntu 18.04 / ROS Melodic Python2 环境完成白名单 Catkin 构建（exit 0），`ucar_2026` 车端 86 tests 全部通过，额外任务新增 409 用例单独通过；相关文件 `git diff --check` 通过。
+- **已知限制**：额外任务全量测试仍有一个既有 `observe()` 测试桩不接受 `stop_mode` 参数的问题；本次未启动真实任务或车辆运动。
+
+## 2026-08-18｜膨胀区非零代价触发重规划
+
+- **状态**：改动完成
+- **目标**：将当前 CymPlanner 点/冲刺模式的路径阻塞判定从 `cost >= 253` 调整为任意非零代价，以便路径进入局部代价地图膨胀区时触发事件式全局重规划。
+- **影响文件**：`ucar_source_code/ucar_ws/src/cym_planner/config/ucar_cym_planner_params.yaml`、`ucar_source_code/docs/changes/2026-08-18-replan-on-any-inflation-cost.md`、`ucar_source_code/docs/operations.md`。
+- **结果**：三个模式的 `obstacle_cost_threshold` 均改为 `1`；参数文件已同步到 `ucar-mini`，车端文件与本地 SHA-256 一致。
+- **验证**：本机 YAML 解析和 `git diff --check` 通过；车端文件值为 `1`。车端当前 `move_base` 仍在运行，运行时参数仍为旧值 `253`，未强行重启任务。
+- **已知限制**：当前判定读取 local costmap；本轮后续已将 local inflation 同步为 `0.22 m`，并扩大窗口/前视距离，下一次安全重启 `move_base`/2026 主流程后配置才生效。
+
+## 2026-08-18｜生产地图墙体拐角与端点像素修正
+
+- **状态**：改动完成
+- **目标**：修正省赛运行地图正交墙拐角的缺角像素，并将 139、148、152 三处开放墙端各延长半个墙宽；国赛版在墙段由 148-159 平移至 147-158 后同步相同几何修正。
+- **影响范围**：`ucar_nav/maps/iflysse_field_walls_without_middle_vertices.pgm`、`iflysse_field_walls_national.pgm`、生产编号 PNG 及地图资源生成工具、`docs/changes/`、`docs/operations.md`。
+- **结果**：补齐 136、138、140、141、149、151 等拐角缺角；139、148、152（国赛对应平移后的 147）沿墙体方向延长半个墙宽；省赛、国赛、额外任务 PGM/PNG 资源已同步。
+- **验证**：PGM 像素级断言、国赛墙段平移关系、PNG 资源一致性和修正工具幂等性通过；`git diff --check`（限定本轮文件）通过；已动态确认车端 `ucar-mini` 为 Ubuntu 18.04.6，并完成两份 PGM 上传及车端/本地 SHA-256 校验；未在本机编译、启动 ROS 或动车。
+- **已知限制**：本次未启动或重启车端 ROS/导航主流程；若已有 `map_server` 常驻，需重启后才会重新加载地图。历史未被当前 2026 主流程引用的 `iflysse_2026_direct.pgm` 未修改。
+
+## 2026-08-18｜国赛 70 号点冲刺朝向调整
+
+- **状态**：改动完成
+- **目标**：将国赛到达 70 号点、进入冲刺段时的车头角度由 175° 调整为 170°。
+- **影响文件**：`ucar_source_code/ucar_ws/src/ucar_2026_national/launch/2026.launch`、`ucar_source_code/docs/debug-rviz-observation.md`、`ucar_source_code/docs/operations.md`、`ucar_source_code/docs/changes/`。
+- **生效方式**：launch 参数改动不需要重新编译，但必须重启国赛主流程；额外任务不受此参数影响。
+- **结果**：`sprint_yaw_deg=170`，冲刺速度、前向增益和航向 P 保持上一轮对比值。
+- **验证**：XML 解析、文本核对和 `git diff --check` 通过；已同步到车端并完成 SHA-256 校验，车端读取为 `170`；未启动任务或发送运动命令。
+- **风险**：170° 尚未完成现场试跑，需在 odom/TF 安全检查通过后观察到达 70 点的实际车头误差。
+
+## 2026-08-18｜国赛冲刺速度与加速响应对比
+
+- **状态**：改动完成
+- **目标**：将国赛 70→坡顶冲刺最大前向速度调至 2.7，并提高前向加速响应用于对比试跑。
+- **影响文件**：`ucar_source_code/ucar_ws/src/cym_planner/config/ucar_cym_planner_params.yaml`、`ucar_source_code/docs/changes/`、`ucar_source_code/docs/operations.md`。
+- **方案**：CymPlanner 当前没有独立加速度参数，本轮以 `linear_x_gain` 作为前向加速响应的控制项；不修改航向 P 和冲刺朝向。
+- **结果**：`mode3_sprint.linear_x_gain=13.5`、`max_vel_x=2.7`；`angular_gain=5.0`、`sprint_yaw_deg=175` 保持不变。
+- **验证**：YAML 解析、参数断言、启动链路静态检查和 `git diff --check` 通过；已同步到车端 `/home/ucar/ucar_ws`，本地与车端 SHA-256 一致并读取确认目标参数；未在本机编译或启动 ROS。
+- **风险**：更高速度和前向增益可能增加麦轮滚子打滑与制动距离，需在车端完成安全试跑。
+
+## 2026-08-18｜国赛冲刺航向环 P 减半
+
+- **状态**：改动完成
+- **目标**：降低国赛 70→坡顶冲刺段的航向角度环 P，改善到达 70 附近的角度控制表现。
+- **影响文件**：`ucar_source_code/ucar_ws/src/cym_planner/config/ucar_cym_planner_params.yaml`、`ucar_source_code/docs/changes/`、`ucar_source_code/docs/operations.md`。
+- **结果**：`mode3_sprint.angular_gain` 已由 `10.0` 调整为 `5.0`；`linear_x_gain`、`max_vel_x` 和任务层 `sprint_yaw_deg` 保持不变。
+- **验证**：YAML 解析通过；确认 `mode3_sprint.angular_gain=5.0`、`linear_x_gain=12.5`、`max_vel_x=2.5`，国赛 launch 仍为 `sprint_yaw_deg=175`；`git diff --check` 通过。
+- **风险**：尚未部署或在小车 Ubuntu 18.04 / ROS Melodic 上实测。
+
+## 2026-08-18｜以 WSL 源码同步 Windows 仿真分享目录（改动完成）
+
+- **状态**：改动完成
+- **目标**：以 WSL 当前实际运行的仿真源码为唯一基准，确保 Windows 分享目录与实际运行内容一致。
+- **影响范围**：WSL `/home/car/smartcar2026/simulation/` 到 Windows `simulation/` 的源码、配置、模型、测试和文档；排除 `build/`、`devel/`、`logs/`、`tmp/`、训练产物等生成文件。
+- **结果**：已完成 WSL → Windows 同步，并删除 Windows 侧不属于 WSL 基准且未被排除的旧文件；后续修改应先改 WSL，再按 `docs/operations.md` 同步。
+- **验证**：两端内容级 `diff -qr --strip-trailing-cr` 无差异；关键启动脚本、部署文档和 `math.world` 的 SHA-256 一致。Windows 挂载盘权限位差异不作为源码不一致；验证时 WSL 一键启动脚本已持有仿真栈，`/map` 和 bridge `state=waiting` 均已检查通过。
+- **收尾**：本次同步没有主动启动或终止仿真；当前运行栈结束后必须在一键启动终端按 Ctrl-C，避免残留进程。
+
+## 2026-08-18｜仿真三步启动合并（改动完成）
+
+- **状态**：改动完成
+- **目标**：将仿真专用 `roscore`、`task3_prepare.launch` 和 HTTP bridge 合并为一条 WSL 启动命令，并在启动前后保留 GUI 安全预检与按 Ctrl-C 清理。
+- **影响文件**：`simulation/scripts/start_simulation_stack.sh`、`simulation/README.md`、`simulation/bridge/README.md`、`ucar_source_code/docs/deployment.md`、`ucar_source_code/docs/operations.md`、`ucar_source_code/docs/operations-national.md`、`ucar_source_code/docs/operations-extra.md`、`ucar_source_code/docs/changes/`。
+- **结果**：新增 `simulation/scripts/start_simulation_stack.sh`，默认串行启动仿真 Master、Gazebo/RViz 和 HTTP bridge；bridge 等 `/map` 就绪并确认 `/status` 为 `state=waiting` 后输出单独一行 `OK`，Ctrl-C 按顺序清理三类进程；标准、国赛和额外流程文档均已切换到一键入口。
+- **验证**：Windows 与 WSL 两端脚本 SHA-256 一致；两端均通过 `bash -n` 和一键脚本 `--help`，并通过 `git diff --check`；尚未启动真实 WSL ROS/Gazebo GUI。
+- **风险**：尚未在 WSL Ubuntu 20.04 的真实 ROS Noetic/Gazebo GUI 环境运行；本机仅做脚本静态检查。
+
+## 2026-08-17｜额外任务 70 号点坐标同步
+
+- **状态**：改动完成
+- **目标**：将额外任务使用的国赛地图 70 号冲刺前点同步为 `x + 0.07m`、`y - 0.07m`。
+- **影响文件**：`ucar_source_code/ucar_ws/src/ucar_2026_extra/config/production_full_grid_all_numbered.json`、`ucar_source_code/docs/changes/`、`ucar_source_code/docs/operations.md`。
+- **结果**：额外任务 70 号点由 `(2.25, 1.75)` 调整为 `(2.32, 1.68)`，顶层 `points` 与 `grouped_points.centers` 两份记录一致。
+- **验证**：国赛与额外任务两份 JSON 的 70 号点联合容差核对通过；额外任务几何回归 101 项通过、86 项因本机缺 ROS 跳过；`git diff --check` 通过。
+- **风险**：尚未在小车 Ubuntu 18.04 / ROS Melodic 上启动或实测。
+
+## 2026-08-17｜国赛 70 号点坐标校准
+
+- **状态**：改动完成
+- **目标**：将国赛地图 70 号点坐标按现场标定结果调整为 `x + 0.07m`、`y - 0.07m`。
+- **影响文件**：`ucar_source_code/ucar_ws/src/ucar_2026_national/config/production_full_grid_all_numbered.json`、`ucar_source_code/docs/changes/`、`ucar_source_code/docs/operations.md`。
+- **结果**：国赛 70 号点由 `(2.25, 1.75)` 调整为 `(2.32, 1.68)`，顶层 `points` 与 `grouped_points.centers` 两份记录一致。
+- **验证**：JSON 解析、70 号点唯一性和 `x + 0.07m` / `y - 0.07m` 容差核对通过；国赛几何回归 86 项通过、71 项因本机缺 ROS 跳过；`git diff --check` 通过。
+- **风险**：尚未在小车 Ubuntu 18.04 / ROS Melodic 上启动或实测。
+
+## 2026-08-17｜国赛主流程接入新版 lane_proto
+
+- **状态**：改动完成
+- **目标**：在 OCR 完成后的巡线交接中，将已从小车同步的新版 `lane_proto` 应用到 `ucar_2026_national` 主流程，并启用板检测与绕板；保留主流程共享相机和单底盘约束。
+- **影响文件**：`ucar_ws/src/ucar_2026_national/launch/2026.launch`、`ucar_ws/src/lane_proto/test/test_lane_runtime.py`、`docs/lingo.md`、`docs/changes/`、`docs/operations.md`。
+- **参数**：`is_fork=yolo`、band2 模板、`yellow_target=0.90`、`align_offset=0.14`、`start_offset=0.23`、`goal_y_lo=0.85`、`linear_speed=0.2`、`gain=1.2`、`rate=20`、`dump_every=3`、`goal_pause=1.0`、`board_in_lane=true`、`go_around=true`、`board_stop_dist=0.321`、`go_around_keepout=0.15`。
+- **结果**：国赛 `2026.launch` 的常驻 `lane_proto` 在 OCR/生产任务完成后的交接阶段使用新版巡线逻辑；保留共享相机和单底盘模式，新增板检测与绕板参数。
+- **验证**：国赛 XML 与参数值检查通过；include 参数名与新版 `lane_proto.launch` 的 119 个参数 schema 对齐；lane_proto Python 语法检查通过；本机发现式回归 13 项中 10 项通过、3 项因缺少 ROS Melodic 跳过；`git diff --check` 通过。
+- **风险**：尚未启动 ROS 或车辆；启用板检测/绕板后需在小车 Ubuntu 18.04 / ROS Melodic 上做完整 Catkin 回归和现场复测。
+
+## 2026-08-17
+
+- **状态**：改动完成
+- **目标**：从小车 `192.168.8.231` 拉取最新 `lane_proto` 巡线源码、配置、启动文件、测试、工具和运行库到本地。
+- **影响文件**：`ucar_source_code/ucar_ws/src/lane_proto/`。
+- **结果**：已同步源码、配置、launch、测试、工具、CUDA 源码和 `lib` 运行库；排除了抓拍/缓存、Python 字节码、训练权重和编译中间产物。
+- **验证**：车端与本地纳入范围的 31 个文件 SHA-256 全部一致；本机 Python 语法检查通过；巡线回归 8 项中 5 项通过、3 项因缺少 ROS Melodic 跳过。
+- **风险**：排除小车端抓拍/缓存、Python 字节码和 CUDA 训练/编译产物；未启动 ROS 或车辆。
+
 ## 2026-08-15
 
 - **状态**：改动完成

@@ -1,5 +1,5 @@
 # testnav20260721 global costmap.  Keep the real vehicle footprint/frames and
-# the user-selected 0.22 m global safety inflation.
+# The task raises this startup value to 0.235 m after point 3.
 footprint: [[0.171, -0.128], [0.171, 0.128], [-0.171, 0.128], [-0.171, -0.128]]
 footprint_padding: 0.0
 transform_tolerance: 0.5
