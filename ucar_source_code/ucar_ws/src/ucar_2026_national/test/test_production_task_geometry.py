@@ -40,6 +40,7 @@ from production_task_geometry import (  # noqa: E402
     positive_turn_increment,
     require_points,
     shortest_yaw_delta,
+    stop_point_for_measured_wall_hit,
     stop_point_for_wall_point,
 )
 from production_task_perception import target_guard_scan_matches  # noqa: E402
@@ -291,6 +292,13 @@ class ProductionTaskGeometryTest(unittest.TestCase):
         with self.assertRaises(TaskDefinitionError):
             stop_point_for_wall_point((-2.5, 2.5), 0.25, bounds)
 
+    def test_stop_point_for_measured_wall_hit_uses_measured_along_wall_position(self):
+        bounds = (-2.5, 2.5, -0.5, 1.5)
+        actual_stop = stop_point_for_measured_wall_hit(
+            (0.82, 1.48), (0.75, 1.50), 0.25, bounds)
+        self.assertAlmostEqual(actual_stop[0], 0.82, places=9)
+        self.assertAlmostEqual(actual_stop[1], 1.23, places=9)
+
 
 @unittest.skipIf(
     task_module is None,
@@ -323,6 +331,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.middle_zone_square_side = 0.5
         self.task.ocr_stop_offset_m = 0.25
         self.task.middle_zone_bounds = (-2.5, 2.5, -0.5, 1.5)
+        self.task.wall_match_max_error = 0.18
         self.task.ocr_alignment_min_speed = 0.12
         self.task.spark_classify_enabled = False
         self.task.tts_enabled = False
@@ -513,6 +522,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
             "wall_point_number": 300,
             "wall_point_coordinate": [0.75, 1.50],
             "forward_ray_wall_intersection_map": [0.75, 1.50],
+            "measured_wall_hit_map": [0.80, 1.50],
         }
         self.task.points = {
             16: (0.25, 0.75),
@@ -540,7 +550,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
                 ("navigate", 0.31, 0.74, -1.20,
                  "processing observation point 16", True),
                 ("enter_profile",),
-                ("navigate", 0.75, 1.25, math.pi / 2.0,
+                ("navigate", 0.80, 1.25, math.pi / 2.0,
                  "processing stop point 300", True),
                 ("exit_profile",),
             ])
@@ -2479,6 +2489,7 @@ class ProductionTaskDualItemTest(unittest.TestCase):
                     "wall_point_number": 200,
                     "wall_point_coordinate": [1.0, 1.5],
                     "forward_ray_wall_intersection_map": [1.0, 1.5],
+                    "measured_wall_hit_map": [1.0, 1.5],
                 })
             if end_number == 13:
                 self.task.observations.append({
@@ -2486,6 +2497,7 @@ class ProductionTaskDualItemTest(unittest.TestCase):
                     "wall_point_number": 100,
                     "wall_point_coordinate": [0.0, 1.5],
                     "forward_ray_wall_intersection_map": [0.0, 1.5],
+                    "measured_wall_hit_map": [0.0, 1.5],
                 })
 
         self.task.navigate_target_and_scan = navigate_target_and_scan
@@ -2624,6 +2636,7 @@ class ProductionTaskDualItemTest(unittest.TestCase):
                     "wall_point_number": 100,
                     "wall_point_coordinate": [0.0, 1.5],
                     "forward_ray_wall_intersection_map": [0.0, 1.5],
+                    "measured_wall_hit_map": [0.0, 1.5],
                 })
 
         self.task.navigate_target_and_scan = navigate_target_and_scan

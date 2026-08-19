@@ -285,6 +285,50 @@ def stop_point_for_wall_point(wall_coordinate, inside_offset_m, middle_bounds):
         (wall_x, wall_y))
 
 
+def stop_point_for_measured_wall_hit(
+        measured_hit, wall_reference_hit, inside_offset_m, middle_bounds):
+    """Offset a measured wall hit inward using the map-selected wall side.
+
+    ``wall_reference_hit`` identifies which rectangular boundary the map ray
+    intersects.  The measured hit supplies both the along-wall coordinate and
+    the actual wall distance, so a local map displacement does not directly
+    become the processing stop position.
+    """
+    x_min, x_max, y_min, y_max = middle_bounds
+    try:
+        measured_x = float(measured_hit[0])
+        measured_y = float(measured_hit[1])
+        reference_x = float(wall_reference_hit[0])
+        reference_y = float(wall_reference_hit[1])
+        offset = float(inside_offset_m)
+    except (IndexError, TypeError, ValueError) as exc:
+        raise TaskDefinitionError(
+            "invalid measured wall hit or wall reference: %s" % exc)
+    if not all(is_finite(value) for value in (
+            measured_x, measured_y, reference_x, reference_y, offset)):
+        raise TaskDefinitionError(
+            "measured wall hit and wall reference must be finite")
+    if offset <= 0.0:
+        raise TaskDefinitionError("inside_offset_m must be finite and positive")
+
+    tolerance = 1e-6
+    if (abs(reference_y - y_max) <= tolerance and
+            x_min <= reference_x <= x_max):
+        return measured_x, measured_y - offset
+    if (abs(reference_y - y_min) <= tolerance and
+            x_min <= reference_x <= x_max):
+        return measured_x, measured_y + offset
+    if (abs(reference_x - x_min) <= tolerance and
+            y_min <= reference_y <= y_max):
+        return measured_x + offset, measured_y
+    if (abs(reference_x - x_max) <= tolerance and
+            y_min <= reference_y <= y_max):
+        return measured_x - offset, measured_y
+    raise TaskDefinitionError(
+        "wall reference (%.3f, %.3f) is not on the middle zone boundary" %
+        (reference_x, reference_y))
+
+
 def load_middle_target_guard_points(path, target_numbers):
     """Return the four numbered middle-grid vertices around each target.
 

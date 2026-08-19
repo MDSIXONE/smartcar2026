@@ -83,7 +83,7 @@ from production_task_geometry import (
     positive_turn_increment,
     require_points,
     shortest_yaw_delta,
-    stop_point_for_wall_point,
+    stop_point_for_measured_wall_hit,
 )
 from production_task_perception import (
     alignment_angular_speed,
@@ -95,6 +95,7 @@ from production_task_perception import (
     normalize_production_category,
     ocr_detection_bbox_area,
     odom_velocity_is_stopped,
+    projected_wall_hit,
     select_three_processing_observations,
     target_guard_scan_matches,
 )
@@ -3560,20 +3561,21 @@ class ProductionTask2026(object):
                 self.log_safe_text(category))
         wall_number = observation["wall_point_number"]
         wall_coordinate = observation["wall_point_coordinate"]
-        intersection = observation.get(
-            "forward_ray_wall_intersection_map", wall_coordinate)
-        stop_x, stop_y = stop_point_for_wall_point(
-            intersection, self.ocr_stop_offset_m,
+        map_intersection = observation["forward_ray_wall_intersection_map"]
+        measured_hit = observation["measured_wall_hit_map"]
+        stop_x, stop_y = stop_point_for_measured_wall_hit(
+            measured_hit, map_intersection, self.ocr_stop_offset_m,
             self.middle_zone_bounds)
-        # Park with the chassis front facing the measured wall intersection.
+        # The map hit selects the wall side; the measured hit selects the
+        # physical along-wall location and the final parking heading.
         parking_yaw = normalize_angle(
-            bearing((stop_x, stop_y), intersection))
+            bearing((stop_x, stop_y), measured_hit))
         self.publish_state("PROCESSING_STOP_%03d" % wall_number)
         rospy.loginfo(
             "PRODUCTION_PROCESSING_STOP wall_point=%d wall_coordinate=%s "
-            "intersection=%s stop=%.3f,%.3f item=%s",
-            wall_number, wall_coordinate, intersection, stop_x, stop_y,
-            self.log_safe_text(item))
+            "map_intersection=%s measured_hit=%s stop=%.3f,%.3f item=%s",
+            wall_number, wall_coordinate, map_intersection, measured_hit,
+            stop_x, stop_y, self.log_safe_text(item))
         route_point_number = observation["route_point_number"]
         ocr_aligned_pose = observation["ocr_aligned_pose_map"]
         parking_profile_enabled = getattr(
@@ -4520,19 +4522,24 @@ class ProductionTask2026(object):
             laser_pose, candidate_wall_points)
         if ray_intersection is None:
             raise MissionAbort("forward lidar ray does not meet a wall boundary")
-        ray_distance, hit = ray_intersection
+        ray_distance, map_hit = ray_intersection
         measured_distance = float(distance) + self.lidar_forward_offset
+        measured_hit = projected_wall_hit(
+            laser_pose, distance, self.lidar_forward_offset)
         range_residual = abs(measured_distance - ray_distance)
-        match = nearest_numbered_point(hit, candidate_wall_points)
+        wall_hit_disagreement = position_error(measured_hit, map_hit)
+        match = nearest_numbered_point(measured_hit, candidate_wall_points)
         if match is None:
             raise MissionAbort("grid has no wall reference candidates")
         wall_number, wall_coordinate, match_error = match
         observation.update({
             "front_distance_m": float(distance),
             "laser_pose_map": list(laser_pose),
-            "forward_ray_wall_intersection_map": list(hit),
+            "forward_ray_wall_intersection_map": list(map_hit),
+            "measured_wall_hit_map": list(measured_hit),
             "forward_ray_wall_distance_m": float(ray_distance),
             "range_residual_m": float(range_residual),
+            "wall_hit_disagreement_m": float(wall_hit_disagreement),
             "wall_point_number": int(wall_number),
             "wall_point_coordinate": list(wall_coordinate),
             "wall_match_error_m": float(match_error),
@@ -4544,12 +4551,21 @@ class ProductionTask2026(object):
                 route_point_number, wall_number, range_residual,
                 self.ray_range_agreement)
             observation.pop("wall_point_number", None)
+        elif match_error > self.wall_match_max_error:
+            rospy.logwarn(
+                "PRODUCTION_WALL_MATCH_REJECTED route_point=%d candidate=%d "
+                "match_error=%.3f limit=%.3f measured_hit=(%.3f,%.3f)",
+                route_point_number, wall_number, match_error,
+                self.wall_match_max_error, measured_hit[0], measured_hit[1])
+            observation.pop("wall_point_number", None)
         else:
             rospy.loginfo(
                 "PRODUCTION_WALL_RAY route_point=%d wall_point=%d "
-                "text=%s distance=%.3f ray_distance=%.3f residual=%.3f",
+                "text=%s measured_hit=(%.3f,%.3f) map_hit=(%.3f,%.3f) "
+                "distance=%.3f ray_distance=%.3f residual=%.3f",
                 route_point_number, wall_number,
                 json.dumps(observation["text"], ensure_ascii=True),
+                measured_hit[0], measured_hit[1], map_hit[0], map_hit[1],
                 distance, ray_distance, range_residual)
         return observation
 

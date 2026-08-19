@@ -71,6 +71,17 @@ OCR 对准前 5 次使用基础 `30px` 容差；第 6 次及以后临时使用 `
 并在 `PRODUCTION_OCR_BOX` 日志中打印本次 `tolerance_px`。这只防止误差已经接近中心但迟迟未进入基础门限时无限重试，
 不改变前五次的连续视觉伺服和两次发散即中止保护。
 
+### OCR 墙体位置：雷达实测点与地图交点联合
+
+OCR 墙面观察同时保存两种点：`measured_wall_hit_map` 是雷达地图位姿沿实测距离投影的命中点，
+`forward_ray_wall_intersection_map` 是同一雷达射线与 JSON 墙体边界的地图交点。两者必须满足
+`ray_range_agreement_m=0.30m`；墙点编号使用实测点匹配，并启用 `wall_match_max_error_m=0.18m`，
+超过门限的候选不进入已识别结果。
+
+处理区停车时，地图交点只用于判定墙体所在边，实测命中点用于沿墙位置、停车坐标和停车朝向；这样
+地图墙体有局部偏差时，停车点不会完全跟随地图坐标漂移。日志 `PRODUCTION_WALL_RAY` 会同时记录
+`measured_hit`、`map_hit` 和距离残差；部署后应重点观察三者是否稳定一致。
+
 2026-08-18 当前部署通过动态解析的 `ucar-mini` 地址同步 11 个运行时文件：三套任务的
 任务脚本、几何脚本和 `2026.launch`，以及 `lane_proto` 的 `lane_follow.py`、`lane_proto.launch`。
 同步前确认车端没有运行 2026 主流程、`move_base` 或 `roscore`；同步后两端 SHA-256 一致，
