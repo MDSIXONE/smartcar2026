@@ -540,11 +540,23 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
             lambda: events.append(("enter_profile",)))
         self.task.exit_processing_parking_profile = (
             lambda: events.append(("exit_profile",)))
-        self.task.confirm_processing_stop_ocr = (
-            lambda observation_value, category_value, yaw_value, stop_x, stop_y:
+        self.task.rotate_in_place_to_yaw = (
+            lambda yaw, label: events.append(("rotate", yaw, label)))
+
+        def confirm_recheck(
+                observation_value, category_value, yaw_value, stop_x, stop_y):
             events.append(("recheck",
                            observation_value["wall_point_number"],
-                           category_value, yaw_value, stop_x, stop_y)))
+                           category_value, yaw_value, stop_x, stop_y))
+            return {
+                "correction_applied": False,
+                "stop_x": stop_x,
+                "stop_y": stop_y,
+                "wall_facing_yaw": yaw_value,
+                "parking_yaw": -math.pi / 2.0,
+            }
+
+        self.task.confirm_processing_stop_ocr = confirm_recheck
 
         self.task.park_at_recorded_production_category(
             u"毛巾", u"日用品", announce=False)
@@ -557,8 +569,12 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
                 ("enter_profile",),
                 ("navigate", 0.80, 1.25, math.pi / 2.0,
                  "processing stop point 300", True),
-                ("exit_profile",),
                 ("recheck", 300, u"日用品", math.pi / 2.0, 0.80, 1.25),
+                ("navigate", 0.80, 1.25, math.pi / 2.0,
+                 "processing final approach point 300", True),
+                ("rotate", -math.pi / 2.0,
+                 "processing final tail-to-wall rotation 300"),
+                ("exit_profile",),
             ])
 
     def test_processing_stop_recheck_accepts_category_in_wall_angle_sweep(self):
@@ -572,6 +588,12 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.ocr_alignment_attempts = 3
         self.task.ocr_alignment_yaw_tolerance = 0.01
         self.task.ocr_scan_rotation_speed = 0.35
+        self.task.wall_reference_points = {
+            300: (0.75, 1.50),
+            302: (1.00, 1.50),
+            304: (1.25, 1.50),
+        }
+        self.task.wall_match_max_error = 0.18
         self.task.publish_state = lambda _state: None
         self.task.stop_motion = lambda: None
         self.task.wait_for_chassis_stop = lambda _context: None
@@ -591,10 +613,12 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
                         "confidence": 0.99,
                         "bbox": [10, 10, 20, 20],
                     },
+                    "capture_requested_pose_map": [0.80, 1.00,
+                                                     math.pi / 2.0],
                 })[1])
         self.task.log_safe_text = lambda value: value
 
-        self.task.confirm_processing_stop_ocr(
+        result = self.task.confirm_processing_stop_ocr(
             observation, u"日用品", math.pi / 2.0, 0.80, 1.25)
 
         self.assertEqual(len(rotations), 1)
@@ -602,10 +626,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.assertAlmostEqual(navigations[0][0], 0.80)
         self.assertAlmostEqual(navigations[0][1], 1.00)
         self.assertAlmostEqual(navigations[0][2], -math.pi / 2.0)
-        self.assertAlmostEqual(navigations[1][0], 0.80)
-        self.assertAlmostEqual(navigations[1][1], 1.25)
-        self.assertAlmostEqual(navigations[1][2], -math.pi / 2.0)
-        self.assertIn("final tail-to-wall parking", navigations[1][3])
+        self.assertEqual(len(navigations), 1)
         self.assertEqual(captures[0][0], 0.35)
         self.assertEqual(captures[0][2], 1)
         self.assertEqual(len(observation["processing_stop_rechecks"]), 1)
@@ -613,6 +634,55 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
             observation["processing_stop_recheck"]["category"], u"日用品")
         self.assertAlmostEqual(
             observation["processing_stop_final_parking_yaw"], -math.pi / 2.0)
+        self.assertFalse(result["correction_applied"])
+        self.assertAlmostEqual(result["stop_x"], 0.80)
+        self.assertAlmostEqual(result["stop_y"], 1.25)
+
+    def test_processing_stop_recheck_correction_snaps_to_wall_grid(self):
+        observation = {"wall_point_number": 300}
+        self.task.use_ros_camera_for_ocr = False
+        self.task.camera_streaming = False
+        self.task.ocr_recheck_backoff_m = 0.25
+        self.task.ocr_alignment_attempts = 3
+        self.task.ocr_alignment_yaw_tolerance = 0.01
+        self.task.ocr_scan_rotation_speed = 0.35
+        self.task.wall_reference_points = {
+            300: (1.00, 1.50),
+            302: (1.25, 1.50),
+            304: (1.50, 1.50),
+        }
+        self.task.wall_match_max_error = 0.18
+        self.task.publish_state = lambda _state: None
+        self.task.stop_motion = lambda: None
+        self.task.wait_for_chassis_stop = lambda _context: None
+        self.task.current_odom_yaw = lambda _context: math.pi / 4.0
+        self.task.rotate_in_place_to_yaw = lambda _yaw, _context: None
+        self.task.navigate_coordinates = lambda *_args, **_kwargs: None
+        self.task.capture_ocr_while_turning = (
+            lambda _speed, _label, _attempt: {
+                "image_path": "recheck.png",
+                "detection": {
+                    "text": u"日用品",
+                    "confidence": 0.99,
+                    "bbox": [10, 10, 20, 20],
+                },
+                "capture_requested_pose_map": [
+                    1.00, 1.00, math.atan2(0.50, 0.25)],
+            })
+        self.task.log_safe_text = lambda value: value
+
+        result = self.task.confirm_processing_stop_ocr(
+            observation, u"日用品", math.pi / 2.0, 1.00, 1.25)
+
+        self.assertTrue(result["correction_applied"])
+        self.assertEqual(result["corrected_wall_point_number"], 302)
+        self.assertEqual(result["corrected_wall_point_coordinate"],
+                         [1.25, 1.50])
+        self.assertAlmostEqual(result["grid_spacing_m"], 0.25)
+        self.assertAlmostEqual(result["stop_x"], 1.25)
+        self.assertAlmostEqual(result["stop_y"], 1.25)
+        self.assertAlmostEqual(result["wall_facing_yaw"], math.pi / 2.0)
+        self.assertAlmostEqual(result["parking_yaw"], -math.pi / 2.0)
 
     def test_observe_wall_records_ocr_aligned_pose(self):
         self.task.camera_width = 100

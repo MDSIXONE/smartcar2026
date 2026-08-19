@@ -83,6 +83,7 @@ from production_task_geometry import (
     positive_turn_increment,
     require_points,
     shortest_yaw_delta,
+    stop_point_for_wall_point,
     stop_point_for_measured_wall_hit,
 )
 from production_task_perception import (
@@ -3646,8 +3647,33 @@ class ProductionTask2026(object):
                 "processing stop point %d" % wall_number,
                 require_plan=True)
             self.stop_motion()
-            self.confirm_processing_stop_ocr(
+            final_parking = self.confirm_processing_stop_ocr(
                 observation, category, parking_yaw, stop_x, stop_y)
+            final_stop_x = final_parking["stop_x"]
+            final_stop_y = final_parking["stop_y"]
+            final_wall_facing_yaw = final_parking["wall_facing_yaw"]
+            final_parking_yaw = final_parking["parking_yaw"]
+            observation["processing_stop_final_parking_yaw"] = (
+                final_parking_yaw)
+            rospy.loginfo(
+                "PRODUCTION_PROCESSING_FINAL_PARK wall_point=%d "
+                "point=(%.3f,%.3f) yaw=%.3f tail_toward_wall=true "
+                "correction_applied=%s",
+                wall_number, final_stop_x, final_stop_y, final_parking_yaw,
+                final_parking["correction_applied"])
+            # Approach the final coordinate with the proven wall-facing yaw.
+            # Asking move_base to solve the 180-degree tail-facing orientation
+            # at the 25cm wall clearance can leave the local planner in
+            # recovery.  The final yaw is owned by the measured in-place turn.
+            self.navigate_coordinates(
+                final_stop_x, final_stop_y, final_wall_facing_yaw,
+                "processing final approach point %d" % wall_number,
+                require_plan=True)
+            self.stop_motion()
+            self.rotate_in_place_to_yaw(
+                final_parking_yaw,
+                "processing final tail-to-wall rotation %d" % wall_number)
+            self.stop_motion()
         finally:
             if parking_profile_enabled:
                 self.exit_processing_parking_profile()
@@ -3729,6 +3755,8 @@ class ProductionTask2026(object):
                     "wall_facing_yaw": float(current_yaw),
                     "yaw_offset_deg": math.degrees(
                         normalize_angle(current_yaw - wall_facing_yaw)),
+                    "capture_requested_pose_map": list(
+                        response["capture_requested_pose_map"]),
                 }
                 rechecks.append(recheck)
                 if detected_category == category:
@@ -3771,19 +3799,75 @@ class ProductionTask2026(object):
                     self.log_safe_text(category), wall_number))
         observation["processing_stop_rechecks"] = rechecks
         observation["processing_stop_recheck"] = confirmed
+        correction = self.processing_stop_correction_from_recheck(
+            observation, confirmed, wall_facing_yaw, stop_x, stop_y)
+        observation["processing_stop_correction"] = correction
+        return correction
+
+    def processing_stop_correction_from_recheck(
+            self, observation, confirmed, original_wall_facing_yaw,
+            original_stop_x, original_stop_y):
+        """Snap a recheck ray to the numbered 0.25m wall grid if it moved."""
+        capture_pose = confirmed.get("capture_requested_pose_map")
+        if capture_pose is None or len(capture_pose) != 3:
+            raise MissionAbort(
+                "processing stop recheck has no capture map pose for "
+                "grid correction")
+        wall_intersection = forward_ray_wall_intersection(
+            capture_pose, self.wall_reference_points)
+        if wall_intersection is None:
+            raise MissionAbort(
+                "processing stop recheck ray does not meet a wall boundary")
+        _ray_distance, wall_hit = wall_intersection
+        match = nearest_numbered_point(
+            wall_hit, self.wall_reference_points)
+        if match is None:
+            raise MissionAbort(
+                "processing stop recheck has no numbered wall grid point")
+        corrected_wall_number, corrected_wall_coordinate, match_error = match
+        if match_error > self.wall_match_max_error:
+            raise MissionAbort(
+                "processing stop recheck wall grid match error %.3f m "
+                "exceeds %.3f m" %
+                (match_error, self.wall_match_max_error))
+        original_wall_number = observation["wall_point_number"]
+        if int(corrected_wall_number) == int(original_wall_number):
+            final_wall_facing_yaw = normalize_angle(
+                float(original_wall_facing_yaw))
+            final_stop_x = float(original_stop_x)
+            final_stop_y = float(original_stop_y)
+            correction_applied = False
+        else:
+            final_stop_x, final_stop_y = stop_point_for_wall_point(
+                corrected_wall_coordinate, self.ocr_stop_offset_m,
+                self.middle_zone_bounds)
+            final_wall_facing_yaw = normalize_angle(
+                bearing((final_stop_x, final_stop_y),
+                        corrected_wall_coordinate))
+            correction_applied = True
+            rospy.logwarn(
+                "PRODUCTION_PROCESSING_CORRECTION wall_point=%d->%d "
+                "wall_hit=(%.3f,%.3f) snapped=(%.3f,%.3f) "
+                "stop=(%.3f,%.3f) grid=0.250",
+                original_wall_number, corrected_wall_number,
+                wall_hit[0], wall_hit[1], corrected_wall_coordinate[0],
+                corrected_wall_coordinate[1], final_stop_x, final_stop_y)
         final_parking_yaw = normalize_angle(
-            float(wall_facing_yaw) + math.pi)
-        observation["processing_stop_final_parking_yaw"] = (
-            final_parking_yaw)
-        rospy.loginfo(
-            "PRODUCTION_PROCESSING_FINAL_PARK wall_point=%d "
-            "point=(%.3f,%.3f) yaw=%.3f tail_toward_wall=true",
-            wall_number, stop_x, stop_y, final_parking_yaw)
-        self.navigate_coordinates(
-            stop_x, stop_y, final_parking_yaw,
-            "processing final tail-to-wall parking point %d" % wall_number,
-            require_plan=True)
-        self.stop_motion()
+            final_wall_facing_yaw + math.pi)
+        return {
+            "correction_applied": correction_applied,
+            "grid_spacing_m": 0.25,
+            "original_wall_point_number": int(original_wall_number),
+            "corrected_wall_point_number": int(corrected_wall_number),
+            "corrected_wall_point_coordinate": list(
+                corrected_wall_coordinate),
+            "recheck_wall_hit_map": list(wall_hit),
+            "wall_match_error_m": float(match_error),
+            "stop_x": float(final_stop_x),
+            "stop_y": float(final_stop_y),
+            "wall_facing_yaw": float(final_wall_facing_yaw),
+            "parking_yaw": float(final_parking_yaw),
+        }
 
     def new_target_guard_monitor(self, target_number, guard_points=None):
         """Start a new guard epoch; old scans may not affect a new target."""

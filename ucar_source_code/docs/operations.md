@@ -246,7 +246,11 @@ ssh "ucar@$CAR_IP" 'cd ~/ucar_ws && source /opt/ros/melodic/setup.bash && catkin
 
 ## OCR 识别后内墙停车坐标
 
-OCR 识别并完成墙面交点测量后，三套 2026 主流程先通过 `ocr_stop_offset_m=0.25m` 到达原先认定的停车点，车头朝向墙面；随后通过 `ocr_recheck_backoff_m=0.25m` 计算原停车点后方验证位，并用普通导航直接到达该坐标，不发送倒车速度指令。验证位从墙面法向 `-45°` 向 `+45°` 连续旋转，进行二次 OCR 确认，成功后回到认定停车区原坐标，并将最终朝向设为墙面法向反向，使车尾朝向挡板，再执行播报或仿真。生产网格的 `square_side_m=0.5` 不变。
+OCR 识别并完成墙面交点测量后，三套 2026 主流程先通过 `ocr_stop_offset_m=0.25m` 到达原先认定的停车点，车头朝向墙面；随后通过 `ocr_recheck_backoff_m=0.25m` 计算原停车点后方验证位，并用普通导航直接到达该坐标，不发送倒车速度指令。验证位从墙面法向 `-45°` 向 `+45°` 连续旋转，进行二次 OCR 确认。复核帧使用曝光请求时的 SLAM 地图位姿沿当前雷达朝向求地图墙交点，再匹配编号墙点：若发现错了一格，纠正后的墙点重新吸附到 `0.25m` 网格，并从该网格墙点向内计算 25cm 停车位；若墙点未变，则保留首次雷达实测的连续沿墙位置。确认成功后，先以车头朝墙面的姿态导航到最终停车坐标，再原地旋转到墙面法向反向，使车尾朝向挡板，最后执行播报或仿真。生产网格的 `square_side_m=0.5` 不变。
+
+因此最终停车不是把尾向姿态直接作为墙边 MoveBase 目标；日志应依次出现 `PRODUCTION_PROCESSING_FINAL_PARK`、`processing final approach point` 和 `processing final tail-to-wall rotation`。若复核发生纠正，日志还应出现 `PRODUCTION_PROCESSING_CORRECTION ... grid=0.250`。
+
+2026-08-20 本轮已将三套任务脚本同步至动态确认的 `ucar-mini`（`192.168.8.231`）。三份脚本均先上传到唯一临时文件并完成 SHA-256 比对，再原子替换目标；本地/车端哈希一致，车端 Python2 AST 与无 NUL 检查通过。同步后没有启动 2026 主流程、`move_base` 或 `roscore`，车辆没有收到运动指令。
 
 该参数位于三个包的 `launch/2026.launch`，只修改参数不需要编译，但必须重启对应主流程后生效。部署前在 `ucar_source_code` 目录执行本地核对：
 
