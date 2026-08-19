@@ -16,7 +16,9 @@
 | `OCR五组`、`分组扫描` | `production_route_groups` | 把 OCR 点按组组织，决定每组扫描的点号范围。 | `ucar_2026/launch/2026.launch` |
 | `外围兜底路线` | `fallback_production_route_numbers`、`fallback_production_observation_headings_deg` | 常规路线不可用时使用的备用点号顺序和观察朝向。 | `ucar_2026/launch/2026.launch` |
 | `二维码方向`、`QR扫描方向` | `qr_observation_numbers` | 配置二维码观察点及其扫描方向。 | `ucar_2026/launch/2026.launch` |
-| `OCR识别阈值`、`OCR扫描速度`、`OCR对准速度` | `ocr_min_confidence`、`ocr_scan_rotation_speed`、`ocr_alignment_*` | 分别控制 OCR 最低置信度、扫描旋转速度和识别后的对准动作。 | `ucar_2026/launch/2026.launch` |
+| `二维码固定面旋转`、`固定朝向切换` | `fixed_heading_rotation_speed=0.70 rad/s` | 二维码固定面之间的同点原地转向速度。 | `ucar_2026/launch/2026.launch` |
+| `二维码完整旋转`、`QR 360°扫描` | `qr_rotation_speed=0.18 rad/s` | 二维码未在固定面识别到时的完整 360°扫描速度。 | `ucar_2026/launch/2026.launch` |
+| `OCR识别阈值`、`OCR扫描速度`、`OCR对准速度` | `ocr_min_confidence`、`ocr_scan_rotation_speed=0.35 rad/s`、`ocr_alignment_*` | 分别控制 OCR 最低置信度、完整 360°扫描速度和识别后的对准动作。 | `ucar_2026/launch/2026.launch` |
 | `起点初始位姿`、`启动位置` | `initial_pose_x`、`initial_pose_y`、`initial_pose_a` | 启动任务时给导航系统的初始地图坐标和车头角度。 | `ucar_2026/launch/2026.launch` 的 launch arg |
 | `省赛巡线速度`、`终点巡线速度` | `linear_speed`、`gain`、`rate`、`goal_pause` | 控制省赛终点巡线的线速度、控制增益、循环频率和到点停留时间。 | `ucar_2026/launch/2026.launch` 的 `lane_proto` include |
 | `终点雷达角落闭环` | `use_lidar=self`、`goal_mode=visual` | 视觉命中终点后，由巡线节点读取 `/scan` 完成雷达角落闭环停车。 | `ucar_2026/launch/2026.launch` 的 `lane_proto` include |

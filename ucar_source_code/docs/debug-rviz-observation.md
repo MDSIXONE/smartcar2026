@@ -72,6 +72,16 @@ TF 正常，再发送运动目标。
 | `elastic_enabled`、`elastic_*` | body projection 的局部弹性绕行 | 属于安全策略参数，现场只做小范围对比；`escape_enabled` 当前被源码硬关闭，改成 `true` 也不会启用 |
 | `debug_images_enabled` | 是否发布 CymPlanner 调试图像 | 当前 `false`；临时改 `true` 要重启导航，并会增加 Wi-Fi/WSLg 负载 |
 
+任务扫描旋转参数位于三套流程各自的 `launch/2026.launch`，不在 CymPlanner YAML 中：
+
+| 参数 | 当前值 | 作用 |
+| --- | --- | --- |
+| `fixed_heading_rotation_speed` | `0.70 rad/s` | 二维码固定面之间的同点原地转向 |
+| `qr_rotation_speed` | `0.18 rad/s` | 二维码未在固定面识别到时的完整 360°扫描 |
+| `ocr_scan_rotation_speed` | `0.35 rad/s` | OCR 的完整 360°扫描 |
+
+三项只影响任务节点的旋转指令；修改后停止旧任务并重启对应 `2026.launch`，运行中的节点不会热加载。
+
 速度的实际生效上限还受底盘驱动文件限制。文件：
 `ucar_ws/src/ucar_controller/config/driver_params_mini.yaml`。
 

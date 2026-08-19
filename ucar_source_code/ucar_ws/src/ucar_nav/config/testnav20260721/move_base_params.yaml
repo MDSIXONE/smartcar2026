@@ -68,7 +68,7 @@ inflation_recovery:
   local_service: /move_base/local_costmap/inflation_layer/set_parameters
   global_service: /move_base/global_costmap/inflation_layer/set_parameters
   local_reduction_step: 0.02
-  global_reduction_step: 0.005925
+  global_reduction_step: 0.00395  # 1/3 of the 0.01185 m global grid
   minimum_radius: 0.05
 
 relax_inflation_01: {stage: 1}

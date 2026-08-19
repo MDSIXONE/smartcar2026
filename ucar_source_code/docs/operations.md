@@ -56,7 +56,7 @@ print('five-group OCR routes: 3 launch files OK')
 ### OCR 候选框面积门
 
 三套 2026 launch 当前使用 `ocr_alignment_tolerance_px=30.0`、
-`ocr_alignment_attempts=12`，并将进入 OCR 对准前的候选框面积门统一设为
+`ocr_alignment_attempts=12`、`ocr_alignment_retry_tolerance_increment_px=20.0`，并将进入 OCR 对准前的候选框面积门统一设为
 `ocr_candidate_min_bbox_area_px=1000.0`。该门只过滤
 面积小于阈值的 OCR 框；被记录为 `PRODUCTION_OCR_CANDIDATE_IGNORED_SMALL` 的帧不会停车或进入
 对准。同步脚本或 launch 后必须重启实际使用的 2026 主流程，运行中的 Python2 节点不会热加载。
@@ -66,6 +66,10 @@ print('five-group OCR routes: 3 launch files OK')
 在 1 秒新鲜窗口内重复使用同一帧；若相机在等待窗口内没有新帧，任务应暴露为相机帧失败，不能
 继续用旧图计算转向。该逻辑只涉及 Python 脚本，不需要 catkin 编译；同步后必须安全重启实际
 使用的任务节点才会加载。
+
+OCR 对准前 5 次使用基础 `30px` 容差；第 6 次及以后临时使用 `50px` 容差（基础值加 `20px`），
+并在 `PRODUCTION_OCR_BOX` 日志中打印本次 `tolerance_px`。这只防止误差已经接近中心但迟迟未进入基础门限时无限重试，
+不改变前五次的连续视觉伺服和两次发散即中止保护。
 
 2026-08-18 当前部署通过动态解析的 `ucar-mini` 地址同步 11 个运行时文件：三套任务的
 任务脚本、几何脚本和 `2026.launch`，以及 `lane_proto` 的 `lane_follow.py`、`lane_proto.launch`。
@@ -115,10 +119,10 @@ ssh "ucar@$CAR_IP" 'grep -n "obstacle_cost_threshold" ~/ucar_ws/src/cym_planner/
 当前 `move_base` 恢复列表先执行两次 `obstacle_layer` 清理；不再执行原地旋转恢复，
 因为车载雷达为 360°。清理失败后，追加 18 个 `cym_planner/InflationRecovery` 阶段。
 每次阶段先读取 local/global 当前 `inflation_radius`，再通过 dynamic-reconfigure 分辨率对齐地
-下调：local `0.020m`（一个 local 栅格），global `0.005925m`（约半个 global 栅格），
+下调：local `0.020m`（一个 local 栅格），global `0.00395m`（1/3 个 `0.01185m` global 栅格），
 并将控制权交回规划态；只有下一次规划仍失败才进入下一阶段。
-point3 前全局半径为 `0.21m`，因此首个全局恢复值为 `0.20m`；point3 后恢复为 `0.224m`，因此首个全局恢复值为
-`0.218075m`。局部半径按其当时实际值递减，最低保持在 `0.05m`。第 18 阶段仍无路径时，`move_base` 才按原有行为终止；
+point3 前全局半径为 `0.21m`，因此首个全局恢复值为 `0.20605m`；point3 后恢复为 `0.224m`，因此首个全局恢复值为
+`0.22005m`。局部半径按其当时实际值递减，最低保持在 `0.05m`。第 18 阶段仍无路径时，`move_base` 才按原有行为终止；
 若中途找到路径，当前半径保持，下一次主流程重启会重新加载启动配置。
 
 该恢复插件依赖车端的 `dynamic_reconfigure`，服务必须同时存在且返回目标半径；缺服务、调用失败或回读
@@ -698,18 +702,19 @@ rostopic pub -1 /cmd_vel geometry_msgs/Twist \
 同点判断复用 `arrival_tolerance=0.12m`；即使到点复核误差为现场曾出现的
 `0.068m`，也不会把同点负角度目标再次交给 `move_base`。日志应出现
 `PRODUCTION_QR_FACE_TURN`，而不是只出现 `PRODUCTION_TASK_GOAL` 后长时间无进展。
-本次只修改 Python2 脚本和测试，不需要 catkin 编译；同步后必须停止旧任务并按安全
-检查重启实际 `2026.launch`，运行中的任务节点不会热加载源码。
+本次修改三套 Python2 任务脚本和三套 `2026.launch` 参数，不需要 catkin 编译；同步后必须
+停止旧任务并按安全检查重启实际 `2026.launch`，运行中的任务节点不会热加载源码。
 
 固定朝向的短距离原地转向与完整旋转使用不同速度：
-`fixed_heading_rotation_speed=0.35rad/s`，用于同点朝向切换和 OCR 候选恢复朝向；
-`ocr_scan_rotation_speed=0.18rad/s`，仅用于 OCR 的完整 360°扫描；QR 完整旋转继续使用
-`qr_rotation_speed=0.18rad/s`。不要把 OCR 360°扫描速度直接改成固定朝向速度，否则会减少
-画面覆盖时间并降低识别稳定性。参数修改后必须安全重启对应主流程才会生效。
+`fixed_heading_rotation_speed=0.70rad/s`，用于二维码固定面切换；
+`ocr_scan_rotation_speed=0.35rad/s`，仅用于 OCR 的完整 360°扫描；QR 完整旋转继续使用
+`qr_rotation_speed=0.18rad/s`。三项都是 `2026.launch` 可调参数，修改后必须安全重启对应
+主流程才会生效；不要把 QR 完整旋转或 OCR 完整旋转误改成固定面转向参数。
 
-2026-08-20 已将标准、国赛、额外三套任务脚本和 `2026.launch` 共 6 个实际入口文件
-同步到 `ucar-mini`，SHA-256 与本地一致；车端 Python2 编译通过。同步期间未重启 ROS、
-未杀掉运行中的任务、未发送运动指令；当前已加载任务仍需下次安全重启后才使用新速度。
+2026-08-20 本轮已将标准、国赛、额外三套任务脚本和 `2026.launch` 共 6 个实际入口文件
+同步到 `ucar-mini (192.168.8.231)`，SHA-256 与本地一致；车端 Python2 编译和三套
+`roslaunch --nodes` 均通过。同步期间未重启 ROS、未杀掉运行中的任务、未发送运动指令；
+当前已加载任务仍需下次安全重启后才使用新速度。
 
 修改该序列后，先停止旧任务，再按当前动态发现的车端地址同步对应入口包的脚本和 launch；三套包若都要保留一致行为则全部同步：
 
@@ -822,10 +827,12 @@ rosrun car3 spawn_cubes.py
 
 ## 4.6 到点 OCR 候选重复转向
 
-如果日志中出现同一个 `PRODUCTION_OCR_TURN_xxx` 反复打印同一类别候选，并伴随多次
-`restore capture yaw`，应确认任务脚本已包含
-`PRODUCTION_CATEGORY_SKIP_RETRY`。当前逻辑对同一类别只执行一次停车、角度恢复和墙面对准；
-对准失败后继续当前方向完成本轮扫描，不再反向重试同一候选。
+OCR 候选识别后，任务会停车并直接使用当前姿态进入 `observe_wall` 重新抓取最新画面，
+不再执行 `restore capture yaw`，因此不会因异步识别请求时记录的旧 yaw 立即反向转动。
+如果日志中出现同一个 `PRODUCTION_OCR_TURN_xxx` 反复打印同一类别候选，应确认任务脚本已包含
+`PRODUCTION_CATEGORY_SKIP_RETRY`；对准失败后继续当前方向完成本轮扫描，不再反向重试同一候选。
+
+单点 OCR 的提前停止条件是当前扫描传入的 `record_categories` 全部已经记录。第一轮同时寻找两个类别时，先识别到其中一个不会停止，车辆会继续完成 360° 扫描；只有两个类别都记录后才允许提前停车。若本轮只要求一个类别，则记录该类别后可以提前停止；未满足条件时日志中的 `PRODUCTION_OCR_TURN_COMPLETE` 应接近 `progress=6.24`。
 
 如果通过临时文件覆盖车端 Python 节点脚本，覆盖后必须恢复执行权限并核对：
 

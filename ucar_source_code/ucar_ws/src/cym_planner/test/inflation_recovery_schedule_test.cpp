@@ -24,12 +24,12 @@ TEST(InflationRecoverySchedule, SupportsResolutionAlignedIndependentSteps)
     EXPECT_DOUBLE_EQ(
         0.204, cym_planner::nextInflationRecoveryRadius(0.224, 0.020));
     EXPECT_NEAR(
-        0.218075,
-        cym_planner::nextInflationRecoveryRadius(0.224, 0.005925),
+        0.22005,
+        cym_planner::nextInflationRecoveryRadius(0.224, 0.00395),
         1e-12);
     EXPECT_NEAR(
-        0.21215,
-        cym_planner::nextInflationRecoveryRadius(0.218075, 0.005925),
+        0.21610,
+        cym_planner::nextInflationRecoveryRadius(0.22005, 0.00395),
         1e-12);
 }
 

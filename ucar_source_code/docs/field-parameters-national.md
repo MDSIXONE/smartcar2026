@@ -28,7 +28,9 @@
 | `点3前全局膨胀` | `pre_point_3_global_costmap_inflation_radius_m=0.21` | 到达点 3 之前使用的全局代价地图膨胀半径。 | `ucar_2026_national/launch/2026.launch` |
 | `点3后全局膨胀`、`全局常态膨胀` | `global_costmap_inflation_radius_m=0.224` | 点 3 之后以及常态导航使用的全局膨胀半径。 | `ucar_2026_national/launch/2026.launch` |
 | `OCR路线`、`扫码点顺序`、`OCR五组` | `production_route_numbers`、`production_route_groups` | 决定常规生产任务依次访问哪些点，以及如何分组扫描。 | `ucar_2026_national/launch/2026.launch` |
-| `OCR识别阈值`、`OCR扫描速度`、`OCR对准速度` | `ocr_min_confidence`、`ocr_scan_rotation_speed`、`ocr_alignment_*` | 分别控制 OCR 最低置信度、扫描旋转速度和识别后的对准动作。 | `ucar_2026_national/launch/2026.launch` |
+| `二维码固定面旋转`、`固定朝向切换` | `fixed_heading_rotation_speed=0.70 rad/s` | 二维码固定面之间的同点原地转向速度。 | `ucar_2026_national/launch/2026.launch` |
+| `二维码完整旋转`、`QR 360°扫描` | `qr_rotation_speed=0.18 rad/s` | 二维码未在固定面识别到时的完整 360°扫描速度。 | `ucar_2026_national/launch/2026.launch` |
+| `OCR识别阈值`、`OCR扫描速度`、`OCR对准速度` | `ocr_min_confidence`、`ocr_scan_rotation_speed=0.35 rad/s`、`ocr_alignment_*` | 分别控制 OCR 最低置信度、完整 360°扫描速度和识别后的对准动作。 | `ucar_2026_national/launch/2026.launch` |
 | `70号点坐标`、`70点坐标还原`、`国赛70点原坐标` | `points`、`grouped_points.centers` 中的 70 号记录 `(2.25, 1.75)` | 同时修改网格中的两处 70 号坐标，恢复点位时不能只改一处。 | `ucar_2026_national/config/production_full_grid_all_numbered.json` |
 | `终点雷达角落闭环`、`终点停车` | `use_lidar=true`、`goal_mode=visual` | 视觉命中终点后，由巡线节点读取 `/scan` 完成雷达角落闭环停车。 | `ucar_2026_national/launch/2026.launch` 的 `lane_proto` include |
 | `地图坐标终点触发` | `goal_mode=both`、`goal_map_xy`、`goal_map_dist` | 用地图坐标和距离阈值触发终点；当前国赛入口未启用单点地图坐标。 | `lane_proto/launch/lane_proto.launch` |

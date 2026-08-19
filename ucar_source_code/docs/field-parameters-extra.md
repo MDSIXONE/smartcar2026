@@ -20,7 +20,9 @@
 | `wall停车`、`free停车`、`随机位置停车` | `stop_mode` | 选择靠墙停车、自由位置停车等停车方式。 | `ucar_2026_extra/config/ocr_route_profile.yaml` |
 | `额外任务识别目标`、`OCR目标文字` | `target_texts` | 配置本次额外任务要识别和匹配的文字列表。 | `ucar_2026_extra/config/ocr_route_profile.yaml` |
 | `OCR路线`、`默认生产路线`、`扫码点顺序` | `production_route_numbers`、`production_observation_headings_deg` | 决定默认生产任务依次访问哪些点，以及到点时使用的观察朝向。 | `ucar_2026_extra/launch/2026.launch` |
-| `OCR识别阈值`、`OCR扫描速度`、`OCR对准速度` | `ocr_min_confidence`、`ocr_scan_rotation_speed`、`ocr_alignment_*` | 分别控制 OCR 最低置信度、扫描旋转速度和识别后的对准动作。 | `ucar_2026_extra/launch/2026.launch` |
+| `二维码固定面旋转`、`固定朝向切换` | `fixed_heading_rotation_speed=0.70 rad/s` | 二维码固定面之间的同点原地转向速度。 | `ucar_2026_extra/launch/2026.launch` |
+| `二维码完整旋转`、`QR 360°扫描` | `qr_rotation_speed=0.18 rad/s` | 二维码未在固定面识别到时的完整 360°扫描速度。 | `ucar_2026_extra/launch/2026.launch` |
+| `OCR识别阈值`、`OCR扫描速度`、`OCR对准速度` | `ocr_min_confidence`、`ocr_scan_rotation_speed=0.35 rad/s`、`ocr_alignment_*` | 分别控制 OCR 最低置信度、完整 360°扫描速度和识别后的对准动作。 | `ucar_2026_extra/launch/2026.launch` |
 | `额外任务巡线速度`、`终点巡线速度` | `linear_speed`、`gain`、`rate`、`goal_pause` | 控制额外任务终点巡线的线速度、控制增益、循环频率和到点停留时间。 | `ucar_2026_extra/launch/2026.launch` 的 `lane_proto` include |
 | `起点初始位姿`、`启动位置` | `initial_pose_x`、`initial_pose_y`、`initial_pose_a` | 启动任务时给导航系统的初始地图坐标和车头角度。 | `ucar_2026_extra/launch/2026.launch` 的 launch arg |
 

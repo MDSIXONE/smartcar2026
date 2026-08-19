@@ -288,7 +288,7 @@ class ProductionTask2026(object):
         self.qr_rotation_speed = abs(float(
             rospy.get_param("~qr_rotation_speed", 0.18)))
         self.fixed_heading_rotation_speed = abs(float(
-            rospy.get_param("~fixed_heading_rotation_speed", 0.35)))
+            rospy.get_param("~fixed_heading_rotation_speed", 0.70)))
         self.rotation_control_rate = max(
             5.0, float(rospy.get_param("~rotation_control_rate", 20.0)))
         self.rotation_timeout_scale = max(
@@ -348,7 +348,7 @@ class ProductionTask2026(object):
         self.ocr_capture_timeout = float(
             rospy.get_param("~ocr_capture_timeout", 12.0))
         self.ocr_scan_rotation_speed = abs(float(rospy.get_param(
-            "~ocr_scan_rotation_speed", 0.18)))
+            "~ocr_scan_rotation_speed", 0.35)))
         self.ocr_scan_poll_period = float(rospy.get_param(
             "~ocr_scan_poll_period",
             rospy.get_param("~navigation_ocr_poll_period", 0.20)))
@@ -359,6 +359,9 @@ class ProductionTask2026(object):
             rospy.get_param("~ocr_min_confidence", 0.30))
         self.ocr_alignment_tolerance_px = float(
             rospy.get_param("~ocr_alignment_tolerance_px", 30.0))
+        self.ocr_alignment_retry_tolerance_increment_px = float(
+            rospy.get_param(
+                "~ocr_alignment_retry_tolerance_increment_px", 20.0))
         self.ocr_candidate_min_bbox_area_px = float(
             rospy.get_param(
                 "~ocr_candidate_min_bbox_area_px",
@@ -2005,8 +2008,9 @@ class ProductionTask2026(object):
         response = task["response"]
         if isinstance(response, dict):
             # The Python 3 helper owns recognition fields, while the Python 2
-            # task owns the map pose at exposure time.  Both are required to
-            # restore the candidate yaw safely after asynchronous inference.
+            # task owns the map pose at the exposure request time.  Preserve
+            # both fields for observation audit records after asynchronous
+            # inference; the parked observation uses the current yaw.
             response = dict(response)
             response["capture_requested_at"] = task["capture_requested_at"]
             response["capture_requested_pose_map"] = list(
@@ -3730,8 +3734,10 @@ class ProductionTask2026(object):
         """Complete one stationary 360-degree scan and record new classes.
 
         ``record_categories`` limits which categories may be persisted.  The
-        optional ``target_category`` is the category that stops the scan and
-        its enclosing cruise; other recordable categories continue scanning.
+        scan stops early only after every category in
+        ``record_categories`` has been recorded.  Otherwise the full
+        revolution is completed; ``target_category`` only identifies the
+        category hunted by the enclosing cruise.
         A (category, wall_point_number) pair already in served_wall_points is
         never recorded again, so a category can be stopped at once per wall.
         """
@@ -3741,6 +3747,17 @@ class ProductionTask2026(object):
             self.start_ros_camera_and_wait(scan_label)
         try:
             rejected_categories = set()
+            required_categories = (
+                tuple(record_categories)
+                if record_categories is not None else None)
+
+            def all_required_categories_recorded():
+                if required_categories is not None:
+                    return (bool(required_categories) and
+                            all(self.production_category_recorded(category)
+                                for category in required_categories))
+                return (target_category is not None and
+                        self.production_category_recorded(target_category))
 
             def handle_candidate(response, turn_progress):
                 detection = response["detection"]
@@ -3779,7 +3796,6 @@ class ProductionTask2026(object):
                     return False
                 self.stop_motion()
                 self.wait_for_chassis_stop(scan_label + " candidate")
-                self.restore_ocr_capture_yaw(response, scan_label)
                 observation_label = "%s_%s" % (
                     scan_label, category.encode("utf-8"))
                 self.publish_state(observation_label)
@@ -3830,7 +3846,8 @@ class ProductionTask2026(object):
                                     observation["wall_point_number"]
                                     for existing in self.observations):
                                 self.observations.append(observation)
-                            self._ocr_turn_stop_flag = True
+                            if all_required_categories_recorded():
+                                self._ocr_turn_stop_flag = True
                             event["outcome"] = (
                                 "processing_category_recorded")
                             rospy.loginfo(
@@ -3856,12 +3873,10 @@ class ProductionTask2026(object):
                     else:
                         self.served_wall_points.add(served_key)
                         self.observations.append(observation)
-                        # During the first pass, a simulation category may be
-                        # recorded before the real category.  Keep turning in
-                        # that case so the real location can still be found;
-                        # its physical announcement remains first.
-                        if (target_category is None or
-                                category == target_category):
+                        # A single wall can expose multiple recordable
+                        # categories.  Keep turning until all categories
+                        # required by this scan have been recorded.
+                        if all_required_categories_recorded():
                             self._ocr_turn_stop_flag = True
                         event["outcome"] = "processing_category_recorded"
                         rospy.loginfo(
@@ -3911,22 +3926,6 @@ class ProductionTask2026(object):
         finally:
             if self.use_ros_camera_for_ocr:
                 self.stop_ros_camera_streaming(required=not rospy.is_shutdown())
-
-    def restore_ocr_capture_yaw(self, response, context):
-        """Return to the candidate frame yaw before the alignment re-capture."""
-        capture_pose = response.get("capture_requested_pose_map")
-        if not isinstance(capture_pose, (list, tuple)) or len(capture_pose) != 3:
-            raise MissionAbort(
-                "%s OCR candidate has no capture pose" % context)
-        if not all(is_finite(float(value)) for value in capture_pose):
-            raise MissionAbort(
-                "%s OCR candidate capture pose is not finite" % context)
-        current = self.current_map_pose(context + " restore yaw start")
-        self.navigate_coordinates(
-            current[0], current[1], float(capture_pose[2]),
-            context + " restore capture yaw",
-            require_plan=False, require_action_success=True)
-        self.wait_for_chassis_stop(context + " restore capture yaw")
 
     def rotate_full_revolution_for_ocr(self, label, candidate_handler=None):
         """Turn one circle; a handler may stop/process multiple candidates.
@@ -3992,7 +3991,7 @@ class ProductionTask2026(object):
                         if self._ocr_turn_stop_flag:
                             self.stop_motion()
                             self.wait_for_chassis_stop(
-                                label + " target category found")
+                                label + " required categories found")
                             return response, progress
                     else:
                         self.discard_unmatched_motion_frame(response)
@@ -4328,13 +4327,18 @@ class ProductionTask2026(object):
             best_detection = detection
             best_path = image_path
             error = horizontal_pixel_error(detection, image_width)
+            alignment_tolerance_px = self.ocr_alignment_tolerance_px
+            if attempt > 5:
+                alignment_tolerance_px += (
+                    self.ocr_alignment_retry_tolerance_increment_px)
             rospy.loginfo(
                 "PRODUCTION_OCR_BOX point=%d attempt=%d text=%s "
-                "confidence=%.1f horizontal_error_px=%.1f",
+                "confidence=%.1f horizontal_error_px=%.1f "
+                "tolerance_px=%.1f",
                 route_point_number, attempt,
                 json.dumps(detection["text"], ensure_ascii=True),
-                detection["confidence"], error)
-            if abs(error) <= self.ocr_alignment_tolerance_px:
+                detection["confidence"], error, alignment_tolerance_px)
+            if abs(error) <= alignment_tolerance_px:
                 aligned = True
                 self.stop_motion()
                 self.wait_for_chassis_stop(

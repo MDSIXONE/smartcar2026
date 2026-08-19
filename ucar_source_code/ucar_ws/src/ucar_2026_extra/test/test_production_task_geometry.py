@@ -574,6 +574,62 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.assertEqual(
             observation["ocr_aligned_pose_map"], [1.10, 2.20, 0.70])
 
+    def test_observe_wall_expands_tolerance_after_five_attempts(self):
+        self.task.camera_width = 100
+        self.task.ocr_alignment_attempts = 6
+        self.task.ocr_alignment_tolerance_px = 30.0
+        self.task.ocr_alignment_retry_tolerance_increment_px = 20.0
+        self.task.ocr_alignment_kp = 0.0025
+        self.task.ocr_alignment_kd = 0.00035
+        self.task.ocr_alignment_max_speed = 0.22
+        self.task.camera_mirror = False
+        self.task.require_safe = lambda: None
+        self.task.stop_motion = lambda: None
+        self.task.wait_for_chassis_stop = lambda _context: None
+        captures = []
+
+        def capture(_label, attempt):
+            captures.append(attempt)
+            return {
+                "image_path": "frame-%d.png" % attempt,
+                "width": 100,
+                "detection": {
+                    "text": u"毛巾",
+                    "confidence": 0.99,
+                    "bbox": [80, 10, 20, 20],
+                },
+            }
+
+        self.task.capture_ocr = capture
+        self.task.capture_ocr_while_turning = (
+            lambda _speed, label, attempt: capture(label, attempt))
+        self.task.current_map_pose = (
+            lambda _context: (1.10, 2.20, 0.70))
+        self.task.wait_for_fresh_front_distance = (
+            lambda: (object(), 0.50))
+        self.task.laser_map_pose = (
+            lambda _scan: (1.10, 2.20, 0.70))
+        self.task.wall_reference_points = {300: (0.75, 1.50)}
+        self.task.lidar_forward_offset = 0.0
+        self.task.ray_range_agreement = 1.0
+
+        original_intersection = (
+            task_module.forward_ray_wall_intersection)
+        original_nearest = task_module.nearest_numbered_point
+        task_module.forward_ray_wall_intersection = (
+            lambda *_args: (1.0, (0.75, 1.50)))
+        task_module.nearest_numbered_point = (
+            lambda *_args: (300, (0.75, 1.50), 0.0))
+        try:
+            observation = self.task.observe_wall(16, "retry tolerance")
+        finally:
+            task_module.forward_ray_wall_intersection = (
+                original_intersection)
+            task_module.nearest_numbered_point = original_nearest
+
+        self.assertTrue(observation["aligned"])
+        self.assertEqual(captures, [1, 2, 3, 4, 5, 6])
+
     def test_point_three_global_inflation_is_applied_and_verified(self):
         inflation_state = [0.20]
         namespaces = []
@@ -1578,7 +1634,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.assertEqual(events[1][0], "camera_start")
         self.assertEqual(events[-1], ("camera_stop", True))
 
-    def test_arrival_scan_restores_capture_yaw_before_observing(self):
+    def test_arrival_scan_observes_from_current_yaw_without_restore(self):
         calls = []
         response = {
             "image_path": "turn.png",
@@ -1597,7 +1653,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
 
         self.task.rotate_full_revolution_for_ocr = turn_one_circle
         self.task.restore_ocr_capture_yaw = (
-            lambda _response, _label: calls.append("restore"))
+            lambda *_args: self.fail("OCR candidate must not restore old yaw"))
         self.task.stop_motion = lambda: None
         self.task.wait_for_chassis_stop = lambda _context: None
 
@@ -1615,10 +1671,9 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.assertIsNone(
             self.task.scan_production_point(1, 52, 12, "target"))
 
-        self.assertEqual(calls[0], "restore")
-        self.assertEqual(calls[1], ("observe", 12))
+        self.assertEqual(calls[0], ("observe", 12))
+        self.assertEqual(calls[1], "save")
         self.assertEqual(calls[2], "save")
-        self.assertEqual(calls[3], "save")
         self.assertEqual(
             self.task.observations[0]["turn_detection_pose_map"],
             [1.0, 2.0, 0.3])
@@ -1626,6 +1681,63 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.assertEqual(
             self.task.target_scan_events[0]["outcome"],
             "processing_category_recorded")
+
+    def test_arrival_scan_keeps_turning_until_all_record_categories_found(self):
+        calls = []
+        responses = [
+            {
+                "image_path": "real.png",
+                "capture_requested_at": "now",
+                "capture_requested_pose_map": [1.0, 2.0, 0.3],
+                "detection": {
+                    "text": u"电子产品生产车间", "confidence": 91.0},
+            },
+            {
+                "image_path": "sim.png",
+                "capture_requested_at": "later",
+                "capture_requested_pose_map": [1.0, 2.0, 0.5],
+                "detection": {
+                    "text": u"食品加工车间", "confidence": 92.0},
+            },
+        ]
+        self.task.use_ros_camera_for_ocr = False
+        self.task.target_scan_events = []
+        self.task.observations = []
+        self.task.publish_state = lambda _state: None
+        self.task.stop_motion = lambda: None
+        self.task.wait_for_chassis_stop = lambda _context: None
+        self.task.save_observation_summary = lambda: calls.append("save")
+
+        def observe(point_number, _label):
+            index = len([entry for entry in calls
+                         if isinstance(entry, tuple) and
+                         entry[0] == "observe"])
+            calls.append(("observe", point_number))
+            wall_point_number = [168, 297][index]
+            return {
+                "aligned": True,
+                "wall_point_number": wall_point_number,
+                "wall_point_coordinate": [-0.75, 1.5],
+                "text": responses[index]["detection"]["text"],
+            }
+
+        self.task.observe_wall = observe
+
+        def turn_one_circle(_label, candidate_handler=None, **_kwargs):
+            self.assertIsNotNone(candidate_handler)
+            self.assertTrue(candidate_handler(responses[0], 0.2))
+            self.assertFalse(self.task._ocr_turn_stop_flag)
+            self.assertTrue(candidate_handler(responses[1], 0.4))
+            self.assertTrue(self.task._ocr_turn_stop_flag)
+            return None, 0.4
+
+        self.task.rotate_full_revolution_for_ocr = turn_one_circle
+        self.assertIsNone(self.task.scan_production_point(
+            1, 52, 12, "target", target_category=u"电子产品",
+            record_categories=set([u"电子产品", u"食品"])))
+        self.assertEqual(
+            calls[:2], [("observe", 12), ("observe", 12)])
+        self.assertEqual(len(self.task.observations), 2)
 
     def test_rejected_candidate_is_not_reprocessed_in_same_turn(self):
         calls = []
@@ -1648,7 +1760,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
 
         self.task.rotate_full_revolution_for_ocr = turn_one_circle
         self.task.restore_ocr_capture_yaw = (
-            lambda _response, _label: calls.append("restore"))
+            lambda *_args: self.fail("OCR candidate must not restore old yaw"))
         self.task.stop_motion = lambda: None
         self.task.wait_for_chassis_stop = lambda _context: None
         self.task.observe_wall = (
@@ -1663,28 +1775,13 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.assertIsNone(self.task.scan_production_point(
             1, 52, 12, "target", target_category=u"电子产品",
             record_categories=set([u"电子产品"])))
-        self.assertEqual(calls, ["restore", "observe", "save", "save"])
+        self.assertEqual(calls, ["observe", "save", "save"])
         self.assertEqual(
             self.task.target_scan_events[0]["outcome"],
             "processing_category_rejected")
         self.assertEqual(
             self.task.target_scan_events[1]["outcome"],
             "ocr_full_turn_complete")
-
-    def test_restore_capture_yaw_precedes_alignment_recapture(self):
-        calls = []
-        self.task.current_map_pose = lambda _context: (1.0, 2.0, 0.9)
-        self.task.navigate_coordinates = (
-            lambda *args, **kwargs: calls.append((args, kwargs)))
-        self.task.wait_for_chassis_stop = (
-            lambda context: calls.append(("stop", context)))
-        self.task.restore_ocr_capture_yaw(
-            {"capture_requested_pose_map": [1.0, 2.0, 0.3]}, "test")
-
-        self.assertEqual(calls[0][0][0:3], (1.0, 2.0, 0.3))
-        self.assertFalse(calls[0][1]["require_plan"])
-        self.assertTrue(calls[0][1]["require_action_success"])
-        self.assertEqual(calls[1], ("stop", "test restore capture yaw"))
 
     def test_cancel_race_returns_succeeded_to_caller(self):
         class FakeMoveBase(object):
