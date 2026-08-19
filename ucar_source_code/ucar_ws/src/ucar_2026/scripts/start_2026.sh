@@ -62,6 +62,59 @@ else
   fi
 fi
 
+cleanup_orphan_roscore() {
+  local orphan_pids
+  local master_nodes
+  local orphan_pid
+  local still_running
+
+  orphan_pids="$(ps -eo pid=,ppid=,args= | awk '
+    $2 == 1 &&
+    $0 ~ /\/opt\/ros\/melodic\/bin\/roscore([[:space:]]|$)/ {
+      print $1
+    }')"
+  if [[ -z "$orphan_pids" ]]; then
+    return 0
+  fi
+
+  if ! master_nodes="$(timeout 2 "$python2_runner" \
+      /opt/ros/melodic/bin/rosnode list 2>/dev/null)"; then
+    echo "错误：发现孤儿 ROS Master（PID: $(tr '\n' ' ' <<<"$orphan_pids")），" \
+      "但无法读取节点列表；拒绝自动清理。" >&2
+    exit 3
+  fi
+  master_nodes="$(sed '/^[[:space:]]*$/d' <<<"$master_nodes")"
+  if [[ "$master_nodes" != "/rosout" ]]; then
+    echo "错误：发现孤儿 ROS Master（PID: $(tr '\n' ' ' <<<"$orphan_pids")），" \
+      "但其中存在活动节点：$master_nodes；拒绝自动清理。" >&2
+    exit 3
+  fi
+
+  echo "发现仅剩 /rosout 的孤儿 ROS Master（PID: $(tr '\n' ' ' <<<"$orphan_pids")），发送 SIGINT 清理。"
+  while read -r orphan_pid; do
+    if [[ -n "$orphan_pid" ]] && kill -0 "$orphan_pid" 2>/dev/null; then
+      kill -INT "$orphan_pid"
+    fi
+  done <<<"$orphan_pids"
+  for attempt in $(seq 1 10); do
+    still_running=0
+    while read -r orphan_pid; do
+      if [[ -n "$orphan_pid" ]] && kill -0 "$orphan_pid" 2>/dev/null; then
+        still_running=1
+        break
+      fi
+    done <<<"$orphan_pids"
+    if [[ "$still_running" -eq 0 ]]; then
+      echo "孤儿 ROS Master 已退出。"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "错误：孤儿 ROS Master 在 10 秒内未退出。" >&2
+  exit 3
+}
+cleanup_orphan_roscore
+
 if timeout 2 "$python2_runner" /opt/ros/melodic/bin/rosnode list \
   >/dev/null 2>&1; then
   echo "错误：$ROS_MASTER_URI 已有 ROS Master；本脚本只管理自己启动的 Master。" >&2

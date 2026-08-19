@@ -1,5 +1,21 @@
 # AI 改动记录
 
+## 2026-08-20｜启动脚本清理孤儿 ROS Master（改动完成）
+
+- **目标**：处理上次启动脚本异常退出后只剩孤立 `roscore`、导致下一次 `start_2026.sh` 被“已有 ROS Master”检查拦截的问题。
+- **计划改动**：启动前只匹配 PPID 为 1 且命令确认为车端 Melodic `roscore` 的孤儿进程；仅当 Master 节点列表只有 `/rosout` 时发送 `SIGINT`，发现其他节点则拒绝自动清理。
+- **影响范围**：车端 `start_2026.sh`、启动操作文档和无运动静态验证；不写死 PID，不修改导航任务逻辑。
+- **验证状态**：本地/车端 `bash -n` 通过；车端 `check` 模式实际清理孤儿 PID 9014，重新启动并退出自管 Master；启动脚本已同步且本地/车端 SHA-256 一致；未启动导航、未发送运动指令。
+- **已知限制**：只有孤立 Master 且节点列表仅含 `/rosout` 才会自动清理；有活动 ROS 节点时仍需人工确认和停止对应会话。
+
+## 2026-08-20｜CymPlanner 点模式前视距离收紧（改动完成）
+
+- **目标**：将 `mode1_point` 的 `obstacle_lookahead_distance` 从 `0.8m` 降至 `0.35m`，减少目标导航时过远前视引起的局部路径阻挡重规划。
+- **计划改动**：只修改 `ucar_cym_planner_params.yaml` 的 `mode1_point`，不改变 `obstacle_cost_threshold`，不修改 `body_projection` 参数。
+- **影响范围**：CymPlanner 点模式配置、实车配置同步和参数静态核对；不修改 C++ 控制逻辑。
+- **验证状态**：YAML 解析确认 `mode1=0.35m`、`mode2=0.8m`、`mode3=0.8m`；`git diff --check` 通过；参数文件已同步到 `ucar-mini` 且本地/车端 SHA-256 一致。同步时车端已有 `move_base`/`2026.launch`，未重启或发送运动指令。
+- **已知限制**：当前运行中的 `move_base` 不会热加载该 YAML；下一次安全重启导航/2026 主流程后才生效。
+
 ## 2026-08-20｜OCR 内墙停车朝向修正（改动完成）
 
 - **目标**：处理区停车目标的车头朝向墙面，避免车辆转到背向墙后因 CymPlanner 不支持倒车而停在目标前方。

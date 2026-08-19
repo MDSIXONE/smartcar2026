@@ -156,7 +156,7 @@ export ROS_MASTER_URI="http://<本次发现的WSL_MASTER_IP>:11311"
 
 ## 局部代价地图与前视范围
 
-当前实车配置使用 `1.8×1.8 m` rolling local costmap、`0.02 m` 分辨率、`0.224 m` local inflation 和 `0.8 m` CymPlanner 前视距离。局部窗口约为 `90×90` 格；三者应同时保持：窗口半边至少覆盖前视距离，local inflation 才能在前视点进入安全带前被采样到。修改这些 YAML 后不需要编译，但必须重启对应 `move_base`/2026 主流程；不在运行任务期间强制重启。
+当前实车配置使用 `1.8×1.8 m` rolling local costmap、`0.02 m` 分辨率、`0.224 m` local inflation 和 `0.35 m` CymPlanner 点模式前视距离。局部窗口约为 `90×90` 格；三者应同时保持：窗口半边至少覆盖前视距离，local inflation 才能在前视点进入安全带前被采样到。修改这些 YAML 后不需要编译，但必须重启对应 `move_base`/2026 主流程；不在运行任务期间强制重启。`mode1_point` 的 `obstacle_lookahead_distance` 与 `mode2_body_projection`、`mode3_sprint` 独立，后两者仍为 `0.8m`。
 
 ## 局部动态代价层在点 3 启用
 
@@ -635,6 +635,12 @@ state=waiting 后再操作小车。若这是新一轮任务，
 必须在该脚本终端按 Ctrl-C 完整停止后重新运行，不能复用已经返回 done 的 bridge。
 
 ## 3. 车端安全检查
+
+`start_2026.sh` 会在创建本轮车端 ROS Master 前动态检查 PPID 为 1 且命令确认为
+Melodic `roscore` 的孤儿进程。只有该 Master 的节点列表严格只有 `/rosout` 时，脚本才会
+对对应 PID 发送 `SIGINT` 并等待退出；存在其他 ROS 节点时拒绝自动清理。不要把固定的
+`9014` 写进命令或脚本，PID 每轮都可能变化。`check` 模式可无导航验证该清理和 Master
+生命周期。
 
 先做网络和运行环境检查：
 

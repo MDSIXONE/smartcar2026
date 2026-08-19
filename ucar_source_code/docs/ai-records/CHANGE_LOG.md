@@ -2,6 +2,19 @@
 
 > 此文件由项目记忆技能维护。仅记录本项目 AI 辅助完成的源代码、配置或资源改动。
 
+## 2026-08-20｜启动脚本清理孤儿 ROS Master（改动完成）
+
+- 状态：启动前动态识别孤儿 PID，仅对空 Master 发送 `SIGINT`；有其他 ROS 节点时保留原有拒绝启动保护。
+- 验证：车端 PID 9014 实际被 `check` 模式清理；启动器随后成功启动并退出自管 Master；本地/车端 `bash -n` 和 SHA-256 校验通过，未启动导航或发送运动指令。
+- 风险：活动 ROS Master 不会自动清理；需人工确认对应会话后再停止。
+
+## 2026-08-20｜CymPlanner 点模式前视距离收紧（改动完成）
+
+- 状态：本地 `mode1_point.obstacle_lookahead_distance` 已从 `0.8m` 调整为 `0.35m`，参数文件已同步到 `ucar-mini`；未重启运行中的 ROS。
+- 影响：只影响 CymPlanner 点模式；`mode2_body_projection`、`mode3_sprint` 和 `obstacle_cost_threshold` 不变。
+- 验证：YAML 解析、`git diff --check` 通过；本地/车端 SHA-256 一致；车端已有 `move_base`/`2026.launch`，未发送运动指令。
+- 风险：当前运行中的 `move_base` 不会热加载 YAML，下一次安全重启导航/2026 主流程后才生效。
+
 ## 2026-08-20｜OCR 内墙停车朝向修正（改动完成）
 
 - 状态：三套 2026 主流程及处理区几何回归测试已同步到 `ucar-mini`，未重启 ROS 或发送运动指令。

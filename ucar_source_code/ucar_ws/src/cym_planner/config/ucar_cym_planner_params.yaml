@@ -35,7 +35,7 @@ cym_planner/CymPlanner:
     final_yaw_max_vel: 1.00
     final_yaw_tolerance: 0.10
     final_linear_x_gain: 0.0
-    obstacle_lookahead_distance: 0.8
+    obstacle_lookahead_distance: 0.35
     # Any non-zero local cost means the path has entered an inflation band;
     # return false so move_base can request an event-driven global replan.
     obstacle_cost_threshold: 1
