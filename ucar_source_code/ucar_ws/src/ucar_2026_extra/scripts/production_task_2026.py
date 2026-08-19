@@ -632,6 +632,12 @@ class ProductionTask2026(object):
                 self.ocr_stop_offset_m <= 0.0):
             raise TaskDefinitionError(
                 "ocr_stop_offset_m must be finite and positive")
+        self.ocr_recheck_backoff_m = float(rospy.get_param(
+            "~ocr_recheck_backoff_m", 0.25))
+        if (not is_finite(self.ocr_recheck_backoff_m) or
+                self.ocr_recheck_backoff_m <= 0.0):
+            raise TaskDefinitionError(
+                "ocr_recheck_backoff_m must be finite and positive")
         if (not is_finite(self.processing_parking_inflation_radius_m) or
                 self.processing_parking_inflation_radius_m <= 0.0 or
                 self.processing_parking_inflation_radius_m >=
@@ -3639,12 +3645,13 @@ class ProductionTask2026(object):
                 stop_x, stop_y, parking_yaw,
                 "processing stop point %d" % wall_number,
                 require_plan=True)
+            self.stop_motion()
+            self.confirm_processing_stop_ocr(
+                observation, category, parking_yaw, stop_x, stop_y)
         finally:
             if parking_profile_enabled:
                 self.exit_processing_parking_profile()
         self.stop_motion()
-        self.confirm_processing_stop_ocr(
-            observation, category, parking_yaw)
         if announce:
             self.publish_state("PROCESSING_ANNOUNCE_%03d" % wall_number)
             rospy.loginfo(
@@ -3656,20 +3663,34 @@ class ProductionTask2026(object):
         return observation
 
     def confirm_processing_stop_ocr(
-            self, observation, category, wall_facing_yaw):
-        """Sweep from +45 to -45 degrees and confirm the OCR category."""
+            self, observation, category, wall_facing_yaw, stop_x, stop_y):
+        """Navigate to a 25cm rear verification point, then sweep OCR."""
         wall_number = observation["wall_point_number"]
         capture_label = "PROCESSING_RECHECK_%03d" % wall_number
         self.publish_state(capture_label)
+        backoff_distance = self.ocr_recheck_backoff_m
+        backoff_x = float(stop_x) - backoff_distance * math.cos(
+            float(wall_facing_yaw))
+        backoff_y = float(stop_y) - backoff_distance * math.sin(
+            float(wall_facing_yaw))
+        # This is a normal forward navigation goal behind the original stop;
+        # it deliberately does not issue a negative cmd_vel reverse command.
+        self.navigate_coordinates(
+            backoff_x, backoff_y,
+            normalize_angle(float(wall_facing_yaw) + math.pi),
+            capture_label + " backoff",
+            require_plan=True)
+        self.stop_motion()
+        self.wait_for_chassis_stop(capture_label + " backoff complete")
         camera_started = False
         if self.use_ros_camera_for_ocr and not self.camera_streaming:
             self.start_ros_camera_and_wait(capture_label)
             camera_started = True
         start_yaw = normalize_angle(
-            float(wall_facing_yaw) + math.radians(45.0))
+            float(wall_facing_yaw) - math.radians(45.0))
         self.rotate_in_place_to_yaw(
-            start_yaw, capture_label + " start_plus_45")
-        direction = -1.0
+            start_yaw, capture_label + " start_minus_45")
+        direction = 1.0
         required_progress = max(
             0.0, math.pi / 2.0 - self.ocr_alignment_yaw_tolerance)
         previous_yaw = self.current_odom_yaw(
@@ -3687,7 +3708,7 @@ class ProductionTask2026(object):
                 if progress >= required_progress:
                     break
                 response = self.capture_ocr_while_turning(
-                    -abs(self.ocr_scan_rotation_speed),
+                    abs(self.ocr_scan_rotation_speed),
                     capture_label, attempt)
                 detection = response.get("detection")
                 detected_category = None
@@ -3741,15 +3762,28 @@ class ProductionTask2026(object):
         if confirmed is None and progress < required_progress:
             raise MissionAbort(
                 "processing stop OCR sweep at wall %d did not reach "
-                "the -45 degree endpoint (progress=%.3f required=%.3f)" %
+                "the +45 degree endpoint (progress=%.3f required=%.3f)" %
                 (wall_number, progress, required_progress))
         if confirmed is None:
             raise MissionAbort(
                 "processing stop OCR did not confirm category %s at wall %d "
-                "within the +/-45 degree sweep" % (
+                "within the -45 to +45 degree sweep" % (
                     self.log_safe_text(category), wall_number))
         observation["processing_stop_rechecks"] = rechecks
         observation["processing_stop_recheck"] = confirmed
+        final_parking_yaw = normalize_angle(
+            float(wall_facing_yaw) + math.pi)
+        observation["processing_stop_final_parking_yaw"] = (
+            final_parking_yaw)
+        rospy.loginfo(
+            "PRODUCTION_PROCESSING_FINAL_PARK wall_point=%d "
+            "point=(%.3f,%.3f) yaw=%.3f tail_toward_wall=true",
+            wall_number, stop_x, stop_y, final_parking_yaw)
+        self.navigate_coordinates(
+            stop_x, stop_y, final_parking_yaw,
+            "processing final tail-to-wall parking point %d" % wall_number,
+            require_plan=True)
+        self.stop_motion()
 
     def new_target_guard_monitor(self, target_number, guard_points=None):
         """Start a new guard epoch; old scans may not affect a new target."""

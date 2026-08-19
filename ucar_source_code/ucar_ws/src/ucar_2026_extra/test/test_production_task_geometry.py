@@ -329,7 +329,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task._ocr_turn_stop_flag = False
         self.task.processing_dwell_seconds = 0.0
         self.task.middle_zone_square_side = 0.5
-        self.task.ocr_stop_offset_m = 0.40
+        self.task.ocr_stop_offset_m = 0.25
         self.task.middle_zone_bounds = (-2.5, 2.5, -0.5, 1.5)
         self.task.wall_match_max_error = 0.18
         self.task.ocr_alignment_min_speed = 0.12
@@ -541,10 +541,10 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.exit_processing_parking_profile = (
             lambda: events.append(("exit_profile",)))
         self.task.confirm_processing_stop_ocr = (
-            lambda observation_value, category_value, yaw_value:
+            lambda observation_value, category_value, yaw_value, stop_x, stop_y:
             events.append(("recheck",
                            observation_value["wall_point_number"],
-                           category_value, yaw_value)))
+                           category_value, yaw_value, stop_x, stop_y)))
 
         self.task.park_at_recorded_production_category(
             u"毛巾", u"日用品", announce=False)
@@ -555,18 +555,20 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
                 ("navigate", 0.31, 0.74, -1.20,
                  "processing observation point 16", True),
                 ("enter_profile",),
-                ("navigate", 0.80, 1.10, math.pi / 2.0,
+                ("navigate", 0.80, 1.25, math.pi / 2.0,
                  "processing stop point 300", True),
                 ("exit_profile",),
-                ("recheck", 300, u"日用品", math.pi / 2.0),
+                ("recheck", 300, u"日用品", math.pi / 2.0, 0.80, 1.25),
             ])
 
     def test_processing_stop_recheck_accepts_category_in_wall_angle_sweep(self):
         observation = {"wall_point_number": 300}
         rotations = []
         captures = []
+        navigations = []
         self.task.use_ros_camera_for_ocr = False
         self.task.camera_streaming = False
+        self.task.ocr_recheck_backoff_m = 0.25
         self.task.ocr_alignment_attempts = 3
         self.task.ocr_alignment_yaw_tolerance = 0.01
         self.task.ocr_scan_rotation_speed = 0.35
@@ -574,9 +576,12 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.stop_motion = lambda: None
         self.task.wait_for_chassis_stop = lambda _context: None
         self.task.current_odom_yaw = (
-            lambda _context: math.pi / 2.0 + math.pi / 4.0)
+            lambda _context: math.pi / 4.0)
         self.task.rotate_in_place_to_yaw = (
             lambda yaw, context: rotations.append((yaw, context)))
+        self.task.navigate_coordinates = (
+            lambda x, y, yaw, label, require_plan=True:
+            navigations.append((x, y, yaw, label, require_plan)))
         self.task.capture_ocr_while_turning = (
             lambda speed, label, attempt: (
                 captures.append((speed, label, attempt)), {
@@ -590,16 +595,24 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.log_safe_text = lambda value: value
 
         self.task.confirm_processing_stop_ocr(
-            observation, u"日用品", math.pi / 2.0)
+            observation, u"日用品", math.pi / 2.0, 0.80, 1.25)
 
         self.assertEqual(len(rotations), 1)
-        self.assertAlmostEqual(rotations[0][0],
-                               math.pi / 2.0 + math.pi / 4.0)
-        self.assertEqual(captures[0][0], -0.35)
+        self.assertAlmostEqual(rotations[0][0], math.pi / 4.0)
+        self.assertAlmostEqual(navigations[0][0], 0.80)
+        self.assertAlmostEqual(navigations[0][1], 1.00)
+        self.assertAlmostEqual(navigations[0][2], -math.pi / 2.0)
+        self.assertAlmostEqual(navigations[1][0], 0.80)
+        self.assertAlmostEqual(navigations[1][1], 1.25)
+        self.assertAlmostEqual(navigations[1][2], -math.pi / 2.0)
+        self.assertIn("final tail-to-wall parking", navigations[1][3])
+        self.assertEqual(captures[0][0], 0.35)
         self.assertEqual(captures[0][2], 1)
         self.assertEqual(len(observation["processing_stop_rechecks"]), 1)
         self.assertEqual(
             observation["processing_stop_recheck"]["category"], u"日用品")
+        self.assertAlmostEqual(
+            observation["processing_stop_final_parking_yaw"], -math.pi / 2.0)
 
     def test_observe_wall_records_ocr_aligned_pose(self):
         self.task.camera_width = 100
@@ -2134,7 +2147,7 @@ class ProductionTaskDualItemTest(unittest.TestCase):
         self.task._ocr_turn_stop_flag = False
         self.task.processing_dwell_seconds = 0.0
         self.task.middle_zone_square_side = 0.5
-        self.task.ocr_stop_offset_m = 0.40
+        self.task.ocr_stop_offset_m = 0.25
         self.task.middle_zone_bounds = (-2.5, 2.5, -0.5, 1.5)
         self.task.ocr_alignment_min_speed = 0.12
         self.task.spark_classify_enabled = False

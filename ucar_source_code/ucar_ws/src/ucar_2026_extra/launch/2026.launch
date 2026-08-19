@@ -229,8 +229,9 @@
                  is kept with its default 3.0 for launch compatibility and is
                  no longer used by the task code. -->
             <param name="processing_dwell_seconds" value="3.0"/>
-            <!-- OCR 识别成功后，内墙交点向场内内缩 40cm，再在墙面法向 +/-45°范围内二次识别。 -->
-            <param name="ocr_stop_offset_m" value="0.40"/>
+            <!-- OCR 先停在墙内 25cm；随后后退 25cm，在墙面法向 -45°到 +45°范围内二次识别。 -->
+            <param name="ocr_stop_offset_m" value="0.25"/>
+            <param name="ocr_recheck_backoff_m" value="0.25"/>
             <!-- Normal route keeps the large local safety inflation.  The
                  final OCR wall-parking leg temporarily uses 0.07m local
                  inflation only after reaching the OCR record point; the
