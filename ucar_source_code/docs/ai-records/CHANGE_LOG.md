@@ -2,6 +2,20 @@
 
 > 此文件由项目记忆技能维护。仅记录本项目 AI 辅助完成的源代码、配置或资源改动。
 
+## 2026-08-20｜OCR 候选框面积门调整为 1000px²（改动完成）
+
+- 状态：三套 2026 launch、任务脚本默认值、perception 回归测试和当前运维说明已同步调整；六个运行文件已上传车端。
+- 目标：将 `ocr_candidate_min_bbox_area_px` 从 `500px²` 提高到 `1000px²`，过滤更小的远距离或遮挡 OCR 框。
+- 验证：三套 perception 回归均 `13/13` 通过；三套 Python AST、launch XML、旧 `500px²` 残留扫描和 `git diff --check` 通过；车端三套 Python2 `py_compile`、三套 `roslaunch --nodes` 和六个文件 SHA-256 核对通过；未重启 ROS、未发送运动命令。
+- 风险：面积门提高后可能过滤远距离但真实有效的 OCR 框，需要通过下一轮日志确认有效框面积分布；运行中的 Python2 任务不会热加载。
+
+## 2026-08-20｜OCR 固定朝向与 360° 旋转速度分离（改动完成）
+
+- 状态：三套实际车端任务脚本和对应 launch 参数已修改并同步到 `ucar-mini`，未重启 ROS 或发送运动指令。
+- 改动：固定朝向原地旋转新增独立参数 `0.35rad/s`；OCR 360°扫描为 `0.18rad/s`；QR 完整旋转保持 `0.18rad/s`。
+- 验证：三套任务脚本 AST/语法、launch XML、参数值核对和 `git diff --check` 通过。
+- 风险：运行中的 Python2 任务不会热加载；需下一次安全启动实际 `2026.launch` 后进行实车转向验证。
+
 ## 2026-08-20｜启动脚本清理孤儿 ROS Master（改动完成）
 
 - 状态：启动前动态识别孤儿 PID，仅对空 Master 发送 `SIGINT`；有其他 ROS 节点时保留原有拒绝启动保护。
@@ -248,3 +262,19 @@
 - 涉及文件：`ucar_ws/src/ucar_2026_national/scripts/national_sprint_speed_debug.py`、`launch/national_sprint_speed_debug.launch`、`CMakeLists.txt`、定向测试、`docs/changes/2026-08-18-national-sprint-speed-debug.md`、`docs/operations.md`。
 - 验证结果：本机 2 项定向单测通过；车端 Ubuntu 18.04/ROS Melodic 构建成功、Python2 定向测试 2 项通过、launch 静态节点解析通过；4 个新增文件及依赖网格 JSON 已完成 SHA-256 校验；原车端白名单已恢复为 `usb_cam`，无导航残留进程。
 - 未解决风险：尚未执行实车运动验证；日志统计的是 `/cmd_vel` 请求速度，不是实际轮速。
+
+## 2026-08-20｜OCR 同类候选重复转向抑制
+
+- 状态：改动完成，待车端回归
+- 目标：修复到点 OCR 识别到同一类别但墙面对准失败后，反复停车、反向恢复候选角度并再次丢失的问题。
+- 涉及文件：三套 `ucar_2026*` 生产任务脚本和几何测试、`docs/changes/2026-08-20-ocr-candidate-retry-suppression.md`、`docs/operations.md`。
+- 结果：每个到点 OCR 整圈为同一类别维护拒绝集合；第一次对准失败后，后续同类候选只丢弃并保持原方向旋转。
+- 验证：三套脚本 Python 语法检查和 `git diff --check` 通过；本机无 ROS Melodic，ROS 依赖测试按现有约定跳过，待车端 Python 2/Catkin 回归。
+- 未解决风险：同一物理点本轮首次对准失败后，不再在同一整圈重复尝试该类别；后续路线仍可在其他点继续识别。
+
+## 2026-08-20｜车端任务脚本执行权限恢复
+
+- 状态：已处理
+- 问题：临时文件同步后脚本权限变为 `0644`，`roslaunch` 报无法定位 `production_task_2026.py`。
+- 处理：恢复三套车端任务脚本的执行位为 `0755`，并用 Melodic 环境的 `roslaunch --nodes` 完成静态节点解析。
+- 结果：`ucar_2026/production_task_2026.py` 已可被 ROS 识别；未启动任务、未发送运动指令。

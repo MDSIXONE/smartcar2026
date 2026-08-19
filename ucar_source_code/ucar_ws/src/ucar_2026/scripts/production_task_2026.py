@@ -287,6 +287,8 @@ class ProductionTask2026(object):
             rospy.get_param("~qr_hold_seconds", 2.0)))
         self.qr_rotation_speed = abs(float(
             rospy.get_param("~qr_rotation_speed", 0.18)))
+        self.fixed_heading_rotation_speed = abs(float(
+            rospy.get_param("~fixed_heading_rotation_speed", 0.35)))
         self.rotation_control_rate = max(
             5.0, float(rospy.get_param("~rotation_control_rate", 20.0)))
         self.rotation_timeout_scale = max(
@@ -346,7 +348,7 @@ class ProductionTask2026(object):
         self.ocr_capture_timeout = float(
             rospy.get_param("~ocr_capture_timeout", 12.0))
         self.ocr_scan_rotation_speed = abs(float(rospy.get_param(
-            "~ocr_scan_rotation_speed", 0.30)))
+            "~ocr_scan_rotation_speed", 0.18)))
         self.ocr_scan_poll_period = float(rospy.get_param(
             "~ocr_scan_poll_period",
             rospy.get_param("~navigation_ocr_poll_period", 0.20)))
@@ -360,7 +362,7 @@ class ProductionTask2026(object):
         self.ocr_candidate_min_bbox_area_px = float(
             rospy.get_param(
                 "~ocr_candidate_min_bbox_area_px",
-                500.0))
+                1000.0))
         self.ocr_alignment_kp = float(
             rospy.get_param("~ocr_alignment_kp", 0.0025))
         self.ocr_alignment_kd = float(
@@ -444,6 +446,9 @@ class ProductionTask2026(object):
 
         if self.qr_rotation_speed <= 0.0:
             raise TaskDefinitionError("qr_rotation_speed must be positive")
+        if self.fixed_heading_rotation_speed <= 0.0:
+            raise TaskDefinitionError(
+                "fixed_heading_rotation_speed must be positive")
         if (not is_finite(self.processing_dwell_seconds) or
                 self.processing_dwell_seconds < 0.0):
             raise TaskDefinitionError(
@@ -2992,7 +2997,7 @@ class ProductionTask2026(object):
             return
 
         direction = 1.0 if target_delta > 0.0 else -1.0
-        speed = self.qr_rotation_speed * direction
+        speed = self.fixed_heading_rotation_speed * direction
         timeout = (
             target_progress / abs(speed) * self.rotation_timeout_scale + 2.0)
         deadline = rospy.Time.now() + rospy.Duration(timeout)
@@ -3735,6 +3740,8 @@ class ProductionTask2026(object):
         if self.use_ros_camera_for_ocr:
             self.start_ros_camera_and_wait(scan_label)
         try:
+            rejected_categories = set()
+
             def handle_candidate(response, turn_progress):
                 detection = response["detection"]
                 category = normalize_production_category(detection.get("text"))
@@ -3748,6 +3755,12 @@ class ProductionTask2026(object):
                         category.encode("utf-8"),
                         self.log_safe_text(sorted(record_categories)),
                         point_number)
+                    return False
+                if category in rejected_categories:
+                    rospy.loginfo(
+                        "PRODUCTION_CATEGORY_SKIP_RETRY category=%s "
+                        "route_point=%d reason=alignment_rejected",
+                        category.encode("utf-8"), point_number)
                     return False
                 # A category already recorded during this cruise (first pass
                 # pre-record of the simulation category) must not trigger the
@@ -3862,6 +3875,7 @@ class ProductionTask2026(object):
                             json.dumps(
                                 observation["text"], ensure_ascii=True))
                 else:
+                    rejected_categories.add(category)
                     event["outcome"] = "processing_category_rejected"
                     rospy.logwarn(
                         "PRODUCTION_CATEGORY_REJECTED category=%s "

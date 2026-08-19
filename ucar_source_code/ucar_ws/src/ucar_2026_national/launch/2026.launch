@@ -327,6 +327,9 @@
             <!-- Timeout only: a fresh QR event advances immediately. -->
             <param name="qr_search_timeout" value="2.0"/>
             <param name="qr_rotation_speed" value="0.18"/>
+            <!-- Short same-position heading turns use a faster dedicated
+                 speed; complete QR revolutions keep qr_rotation_speed. -->
+            <param name="fixed_heading_rotation_speed" value="0.35"/>
             <!-- Recenter before the 12 cm arrival acceptance limit. -->
             <param name="post_turn_recenter_trigger" value="0.06"/>
             <param name="post_turn_recenter_attempts" value="2"/>
@@ -371,9 +374,9 @@
             <param name="ocr_side" value="640"/>
             <param name="camera_mirror" value="true"/>
             <param name="ocr_min_confidence" value="0.30"/>
-            <param name="ocr_scan_rotation_speed" value="0.30"/>
-            <!-- The earlier 0.25 rad/s command measured about 0.14 rad/s;
-                 confirm 0.30 on vehicle and retain a generous 360deg budget. -->
+            <!-- A complete OCR revolution stays slower to preserve frame
+                 coverage and recognition stability. -->
+            <param name="ocr_scan_rotation_speed" value="0.18"/>
             <param name="rotation_timeout_scale" value="3.5"/>
             <param name="ocr_scan_poll_period" value="0.20"/>
             <param name="ocr_scan_candidate_confidence" value="60.0"/>
@@ -400,8 +403,8 @@
             <param name="stopped_odom_samples" value="3"/>
             <param name="ocr_alignment_tolerance_px" value="30.0"/>
             <!-- Ignore distant/partially occluded OCR boxes before parking;
-                 this is an explicit 500px² visible-area gate. -->
-            <param name="ocr_candidate_min_bbox_area_px" value="500.0"/>
+                 this is an explicit 1000px² visible-area gate. -->
+            <param name="ocr_candidate_min_bbox_area_px" value="1000.0"/>
             <param name="ocr_alignment_kp" value="0.0025"/>
             <param name="ocr_alignment_kd" value="0.00035"/>
             <param name="ocr_alignment_max_speed" value="0.22"/>

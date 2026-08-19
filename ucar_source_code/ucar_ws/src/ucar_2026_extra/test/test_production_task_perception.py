@@ -82,10 +82,10 @@ class ProductionTaskPerceptionTest(unittest.TestCase):
             valid["detection"]), 2501.0)
         self.assertAlmostEqual(ocr_detection_bbox_area(
             small["detection"]), 400.0)
-        self.assertFalse(is_navigation_ocr_candidate(small, 60.0, 500.0))
+        self.assertFalse(is_navigation_ocr_candidate(small, 60.0, 1000.0))
         self.assertTrue(is_navigation_ocr_candidate(
-            borderline, 60.0, 500.0))
-        self.assertTrue(is_navigation_ocr_candidate(valid, 60.0, 500.0))
+            borderline, 60.0, 1000.0))
+        self.assertTrue(is_navigation_ocr_candidate(valid, 60.0, 1000.0))
 
     def test_odom_stop_gate_checks_all_planar_axes(self):
         self.assertTrue(odom_velocity_is_stopped(

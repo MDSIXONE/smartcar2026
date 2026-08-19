@@ -57,7 +57,7 @@ print('five-group OCR routes: 3 launch files OK')
 
 三套 2026 launch 当前使用 `ocr_alignment_tolerance_px=30.0`、
 `ocr_alignment_attempts=12`，并将进入 OCR 对准前的候选框面积门统一设为
-`ocr_candidate_min_bbox_area_px=500.0`。该门只过滤
+`ocr_candidate_min_bbox_area_px=1000.0`。该门只过滤
 面积小于阈值的 OCR 框；被记录为 `PRODUCTION_OCR_CANDIDATE_IGNORED_SMALL` 的帧不会停车或进入
 对准。同步脚本或 launch 后必须重启实际使用的 2026 主流程，运行中的 Python2 节点不会热加载。
 只改 Python/launch 不需要编译，但部署后仍需按上面的零速、odom、TF 和雷达安全门做静态核对。
@@ -701,6 +701,16 @@ rostopic pub -1 /cmd_vel geometry_msgs/Twist \
 本次只修改 Python2 脚本和测试，不需要 catkin 编译；同步后必须停止旧任务并按安全
 检查重启实际 `2026.launch`，运行中的任务节点不会热加载源码。
 
+固定朝向的短距离原地转向与完整旋转使用不同速度：
+`fixed_heading_rotation_speed=0.35rad/s`，用于同点朝向切换和 OCR 候选恢复朝向；
+`ocr_scan_rotation_speed=0.18rad/s`，仅用于 OCR 的完整 360°扫描；QR 完整旋转继续使用
+`qr_rotation_speed=0.18rad/s`。不要把 OCR 360°扫描速度直接改成固定朝向速度，否则会减少
+画面覆盖时间并降低识别稳定性。参数修改后必须安全重启对应主流程才会生效。
+
+2026-08-20 已将标准、国赛、额外三套任务脚本和 `2026.launch` 共 6 个实际入口文件
+同步到 `ucar-mini`，SHA-256 与本地一致；车端 Python2 编译通过。同步期间未重启 ROS、
+未杀掉运行中的任务、未发送运动指令；当前已加载任务仍需下次安全重启后才使用新速度。
+
 修改该序列后，先停止旧任务，再按当前动态发现的车端地址同步对应入口包的脚本和 launch；三套包若都要保留一致行为则全部同步：
 
 ~~~powershell
@@ -809,6 +819,26 @@ rosrun car3 spawn_cubes.py
 不会复位小车或重新执行省赛任务。若提示 `Unable to register with master node`
 并指向 `11311` 或 `11312`，先回到仿真一键启动终端确认 ROS Master 仍在运行，
 不要反复重试 `rosrun`。
+
+## 4.6 到点 OCR 候选重复转向
+
+如果日志中出现同一个 `PRODUCTION_OCR_TURN_xxx` 反复打印同一类别候选，并伴随多次
+`restore capture yaw`，应确认任务脚本已包含
+`PRODUCTION_CATEGORY_SKIP_RETRY`。当前逻辑对同一类别只执行一次停车、角度恢复和墙面对准；
+对准失败后继续当前方向完成本轮扫描，不再反向重试同一候选。
+
+如果通过临时文件覆盖车端 Python 节点脚本，覆盖后必须恢复执行权限并核对：
+
+~~~bash
+chmod +x ~/ucar_ws/src/ucar_2026/scripts/production_task_2026.py
+stat -c '%A %n' ~/ucar_ws/src/ucar_2026/scripts/production_task_2026.py
+source /opt/ros/melodic/setup.bash
+source ~/ucar_ws/devel/setup.bash
+roslaunch --nodes ucar_2026 2026.launch task_enabled:=true
+~~~
+
+`roslaunch --nodes` 只做节点解析，不启动任务；权限应包含 `x`，否则会出现
+`Cannot locate node of type [production_task_2026.py]`。
 
 ## 5. 停止和清理
 

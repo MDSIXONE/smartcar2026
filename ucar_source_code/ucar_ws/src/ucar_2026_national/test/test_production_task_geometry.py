@@ -1626,6 +1626,50 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
             self.task.target_scan_events[0]["outcome"],
             "processing_category_recorded")
 
+    def test_rejected_candidate_is_not_reprocessed_in_same_turn(self):
+        calls = []
+        response = {
+            "image_path": "turn.png",
+            "capture_requested_at": "now",
+            "capture_requested_pose_map": [1.0, 2.0, 0.3],
+            "detection": {
+                "text": u"电子产品生产车间", "confidence": 91.0},
+        }
+        self.task.use_ros_camera_for_ocr = False
+        self.task.target_scan_events = []
+        self.task.observations = []
+        self.task.publish_state = lambda _state: None
+
+        def turn_one_circle(_label, candidate_handler=None):
+            self.assertTrue(candidate_handler(response, 1.2))
+            self.assertFalse(candidate_handler(response, 1.3))
+            return None, 2.0 * math.pi
+
+        self.task.rotate_full_revolution_for_ocr = turn_one_circle
+        self.task.restore_ocr_capture_yaw = (
+            lambda _response, _label: calls.append("restore"))
+        self.task.stop_motion = lambda: None
+        self.task.wait_for_chassis_stop = lambda _context: None
+        self.task.observe_wall = (
+            lambda _point, _label: (
+                calls.append("observe"), {
+                    "aligned": False,
+                    "wall_point_number": None,
+                    "text": u"电子产品生产车间",
+                })[1])
+        self.task.save_observation_summary = lambda: calls.append("save")
+
+        self.assertIsNone(self.task.scan_production_point(
+            1, 52, 12, "target", target_category=u"电子产品",
+            record_categories=set([u"电子产品"])))
+        self.assertEqual(calls, ["restore", "observe", "save", "save"])
+        self.assertEqual(
+            self.task.target_scan_events[0]["outcome"],
+            "processing_category_rejected")
+        self.assertEqual(
+            self.task.target_scan_events[1]["outcome"],
+            "ocr_full_turn_complete")
+
     def test_restore_capture_yaw_precedes_alignment_recapture(self):
         calls = []
         self.task.current_map_pose = lambda _context: (1.0, 2.0, 0.9)
