@@ -104,6 +104,10 @@ class MissionAbort(RuntimeError):
     pass
 
 
+NON_NAVIGABLE_TARGET_GUARD_POINTS = frozenset(
+    (446, 447, 448, 449, 450, 451))
+
+
 # Warehouse names announced after QR classification.  The wording matches the
 # OCR workshop signs on the field; the electronics sign reads
 # "电子产品生产车间" (production, not 加工).
@@ -361,7 +365,7 @@ class ProductionTask2026(object):
             rospy.get_param("~ocr_alignment_tolerance_px", 30.0))
         self.ocr_alignment_retry_tolerance_increment_px = float(
             rospy.get_param(
-                "~ocr_alignment_retry_tolerance_increment_px", 20.0))
+                "~ocr_alignment_retry_tolerance_increment_px", 30.0))
         self.ocr_candidate_min_bbox_area_px = float(
             rospy.get_param(
                 "~ocr_candidate_min_bbox_area_px",
@@ -3169,7 +3173,10 @@ class ProductionTask2026(object):
             return False
 
         reached = self.navigate_coordinates(
-            target[0], target[1], target_yaw, label, require_plan=True,
+            target[0], target[1], target_yaw, label,
+            # Fallback candidates must enter move_base directly so its
+            # recovery state machine can handle a blocked target.
+            require_plan=not fallback_navigation,
             abort_on_navigation_failure=not fallback_navigation,
             goal_timeout=(self.target_guard_fallback_timeout
                           if fallback_navigation else None),
@@ -3208,7 +3215,8 @@ class ProductionTask2026(object):
         blocked = set(monitor.get("hit_counts", {}).keys())
         return [
             number for number in sorted(guard_points)
-            if number not in blocked]
+            if (number not in blocked and
+                number not in NON_NAVIGABLE_TARGET_GUARD_POINTS)]
 
     def reset_grouped_production_route(self):
         """Reset the forward-group and reverse-completion OCR scheduler."""
@@ -3308,7 +3316,9 @@ class ProductionTask2026(object):
             target_yaw, target_category, record_categories, next_point,
             candidates):
         """Try clear corner poses around a guard-blocked grouped target."""
-        remaining = list(candidates)
+        remaining = [
+            number for number in candidates
+            if number not in NON_NAVIGABLE_TARGET_GUARD_POINTS]
         target_guard_points = self.target_guard_points[point_number]
         while remaining:
             candidate = remaining.pop(0)

@@ -24,7 +24,7 @@
 第五组 [19, 20, 29, 30]
 ~~~
 
-从点 3 进入后，每组前向只尝试一个尚未尝试的可达点；如果某点被当前激光守卫判定为不可达，先从该点四个守卫顶点中选择当前未命中的顶点作为备用 OCR 导航位置。备用点单次导航最多等待 `25s`；若 CymPlanner 或 move_base 判定该备用点不可达，记录 `target_navigation_failed` 并立即尝试下一个候选，不再等待普通目标的 `180s`。四个顶点都不安全或不可达才在同组继续尝试下一个逻辑点。当前点完成 360° OCR 后直接进入下一组，不在当前点预判远处同组点。第五组完成后，调度器从第五组到第一组反向补齐本轮仍为 `untried` 的点。被守卫命中的点只加入当前任务的 `ignored` 状态，不会永久删除路线点；正常到达并完成 OCR 的点记为 `scanned`。11、20、21、30 位于中间区侧墙，目标守卫使用网格中的 446–451 侧墙顶点。
+从点 3 进入后，每组前向只尝试一个尚未尝试的可达点；如果某点被当前激光守卫判定为不可达，先从该点四个守卫顶点中选择当前未命中的、允许导航的顶点作为备用 OCR 导航位置。备用点单次导航最多等待 `25s`；fallback 候选直接向 `move_base` 发送 action goal，不再先调用 `/move_base/make_plan` 预检查，这样目标确实进入 CymPlanner/move_base 后才可能触发已配置的 recovery list。若 action 导航仍失败，记录 `target_navigation_failed` 并立即尝试下一个候选，不再等待普通目标的 `180s`；普通路径仍保留 `make_plan` 预检查。446、447、448、449、450、451 六个墙点永远不进入 fallback 导航候选；如果剩余候选为空，该逻辑目标直接按守卫跳过，不向墙点发目标。当前点完成 360° OCR 后直接进入下一组，不在当前点预判远处同组点。第五组完成后，调度器从第五组到第一组反向补齐本轮仍为 `untried` 的点。被守卫命中的点只加入当前任务的 `ignored` 状态，不会永久删除路线点；正常到达并完成 OCR 的点记为 `scanned`。11、20、21、30 位于中间区侧墙，446、447、448、449、450、451 全部是墙点，仅作为当前守卫/墙参考编号；本次不替换为内侧可导航点。
 
 如果主路线仍未找到所需类别，原有外围兜底路线继续执行。额外任务配置非空
 `ocr_route_profile` 时，仍使用快捷路线，不经过这套默认分组调度。
@@ -56,7 +56,7 @@ print('five-group OCR routes: 3 launch files OK')
 ### OCR 候选框面积门
 
 三套 2026 launch 当前使用 `ocr_alignment_tolerance_px=30.0`、
-`ocr_alignment_attempts=12`、`ocr_alignment_retry_tolerance_increment_px=20.0`，并将进入 OCR 对准前的候选框面积门统一设为
+`ocr_alignment_attempts=12`、`ocr_alignment_retry_tolerance_increment_px=30.0`，并将进入 OCR 对准前的候选框面积门统一设为
 `ocr_candidate_min_bbox_area_px=1000.0`。该门只过滤
 面积小于阈值的 OCR 框；被记录为 `PRODUCTION_OCR_CANDIDATE_IGNORED_SMALL` 的帧不会停车或进入
 对准。同步脚本或 launch 后必须重启实际使用的 2026 主流程，运行中的 Python2 节点不会热加载。
@@ -67,7 +67,7 @@ print('five-group OCR routes: 3 launch files OK')
 继续用旧图计算转向。该逻辑只涉及 Python 脚本，不需要 catkin 编译；同步后必须安全重启实际
 使用的任务节点才会加载。
 
-OCR 对准前 5 次使用基础 `30px` 容差；第 6 次及以后临时使用 `50px` 容差（基础值加 `20px`），
+OCR 对准前 5 次使用基础 `30px` 容差；第 6 次及以后临时使用 `60px` 容差（基础值加 `30px`），
 并在 `PRODUCTION_OCR_BOX` 日志中打印本次 `tolerance_px`。这只防止误差已经接近中心但迟迟未进入基础门限时无限重试，
 不改变前五次的连续视觉伺服和两次发散即中止保护。
 
@@ -116,11 +116,14 @@ ssh "ucar@$CAR_IP" 'grep -n "obstacle_cost_threshold" ~/ucar_ws/src/cym_planner/
 
 ## 恢复行为末尾逐级降低膨胀
 
-当前 `move_base` 恢复列表先执行两次 `obstacle_layer` 清理；不再执行原地旋转恢复，
-因为车载雷达为 360°。清理失败后，追加 18 个 `cym_planner/InflationRecovery` 阶段。
-每次阶段先读取 local/global 当前 `inflation_radius`，再通过 dynamic-reconfigure 分辨率对齐地
-下调：local `0.020m`（一个 local 栅格），global `0.00395m`（1/3 个 `0.01185m` global 栅格），
-并将控制权交回规划态；只有下一次规划仍失败才进入下一阶段。
+当前 `move_base` 恢复列表不执行原地旋转恢复，因为车载雷达为 360°。
+恢复列表共 18 组、54 个行为；每组严格按 `conservative_reset_N`、`aggressive_reset_N`、
+`relax_inflation_N` 执行，即每一个膨胀恢复阶段前都重新清理两次 `obstacle_layer`，而不是
+只在整个恢复序列开头清理两次。每个行为完成后返回规划态；只有下一次规划仍失败，才会继续
+当前组之后的下一组。
+每次 `relax_inflation_N` 先读取 local/global 当前 `inflation_radius`，再通过 dynamic-reconfigure
+分辨率对齐地下调：local `0.020m`（一个 local 栅格），global `0.00395m`（1/3 个 `0.01185m`
+global 栅格），并将控制权交回规划态。
 point3 前全局半径为 `0.21m`，因此首个全局恢复值为 `0.20605m`；point3 后恢复为 `0.224m`，因此首个全局恢复值为
 `0.22005m`。局部半径按其当时实际值递减，最低保持在 `0.05m`。第 18 阶段仍无路径时，`move_base` 才按原有行为终止；
 若中途找到路径，当前半径保持，下一次主流程重启会重新加载启动配置。

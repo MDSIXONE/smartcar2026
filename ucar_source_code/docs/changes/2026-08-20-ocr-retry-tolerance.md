@@ -8,10 +8,10 @@ OCR 对准时误差从 `65px` 缓慢下降到 `35px` 左右，前五次仍未进
 
 ## 修复
 
-三套 2026 主流程新增 `ocr_alignment_retry_tolerance_increment_px=20.0`：
+三套 2026 主流程使用 `ocr_alignment_retry_tolerance_increment_px=30.0`：
 
 - 第 1～5 次使用基础 `ocr_alignment_tolerance_px=30.0`；
-- 第 6 次及以后使用 `50.0px` 临时容差；
+- 第 6 次及以后使用 `60.0px` 临时容差；
 - `PRODUCTION_OCR_BOX` 日志打印当前实际 `tolerance_px`，便于确认是否触发放宽；
 - 保留连续视觉伺服、相机帧新鲜度检查和两次发散中止。
 

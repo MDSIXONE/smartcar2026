@@ -369,7 +369,8 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
     def test_target_guard_fallback_tries_next_candidate_after_navigation_failure(self):
         calls = []
         self.task.target_guard_points = {
-            11: {428: (-2.0, 0.5), 446: (-2.5, 1.0)}}
+            11: {428: (-2.0, 0.5), 445: (2.0, 0.0),
+                 446: (-2.5, 1.0)}}
         self.task.production_route_numbers = [11, 12]
         self.task.grouped_route_attempt_index = 0
 
@@ -384,10 +385,22 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.navigate_target_and_scan = navigate
         outcome = self.task.try_grouped_target_guard_fallback(
             "forward", 0, 11, 3, math.radians(-45.0), u"日用品", None,
-            12, [428, 446])
+            12, [428, 446, 445])
 
         self.assertEqual(outcome, "target_guard_skipped")
-        self.assertEqual(calls, [(428, True), (446, True)])
+        self.assertEqual(calls, [(428, True), (445, True)])
+
+    def test_target_guard_fallback_excludes_wall_reference_points(self):
+        wall_points = dict(
+            (number, (-2.5, 0.0))
+            for number in (446, 447, 448, 449, 450, 451))
+        guard_points = {428: (-2.0, 0.5), 445: (2.0, 0.0)}
+        guard_points.update(wall_points)
+        monitor = {"guard_points": guard_points, "hit_counts": {}}
+
+        self.assertEqual(
+            self.task.target_guard_fallback_candidates(11, monitor),
+            [428, 445])
 
     def test_target_guard_fallback_uses_short_timeout_and_returns_failure(self):
         navigation = []
@@ -412,6 +425,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
             guard_points_override={}, fallback_navigation=True)
 
         self.assertEqual(len(navigation), 1)
+        self.assertFalse(navigation[0]["require_plan"])
         self.assertFalse(navigation[0]["abort_on_navigation_failure"])
         self.assertEqual(navigation[0]["goal_timeout"], 25.0)
 
@@ -578,7 +592,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.camera_width = 100
         self.task.ocr_alignment_attempts = 6
         self.task.ocr_alignment_tolerance_px = 30.0
-        self.task.ocr_alignment_retry_tolerance_increment_px = 20.0
+        self.task.ocr_alignment_retry_tolerance_increment_px = 30.0
         self.task.ocr_alignment_kp = 0.0025
         self.task.ocr_alignment_kd = 0.00035
         self.task.ocr_alignment_max_speed = 0.22
@@ -901,6 +915,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
             "the OCR scan must not start after guard scan loss")
 
         def navigate_with_guard(*_args, **kwargs):
+            self.assertTrue(kwargs["require_plan"])
             self.assertTrue(kwargs["guard_callback"]())
             events.append("cancelled_by_navigation_supervisor")
             return False

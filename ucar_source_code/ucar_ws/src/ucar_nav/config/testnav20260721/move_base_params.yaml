@@ -19,48 +19,116 @@ max_planning_retries: 3
 recovery_behavior_enabled: true
 clearing_rotation_allowed: false
 recovery_behaviors:
-  - name: 'conservative_reset'
+  # Every inflation recovery stage starts with both costmap clears.
+  # move_base consumes this list sequentially and returns to PLANNING after
+  # each behavior, so each stage is: conservative clear -> aggressive clear
+  # -> one inflation-radius reduction.
+  - name: 'conservative_reset_01'
     type: 'clear_costmap_recovery/ClearCostmapRecovery'
-  - name: 'aggressive_reset'
+  - name: 'aggressive_reset_01'
     type: 'clear_costmap_recovery/ClearCostmapRecovery'
-  # All standard recovery behaviors failed: lower local inflation by one
-  # local grid (2cm) and global inflation by half a global grid per stage,
-  # then return to PLANNING. The next stage is reached only when move_base
-  # still cannot find a path.
   - name: 'relax_inflation_01'
     type: 'cym_planner/InflationRecovery'
+  - name: 'conservative_reset_02'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  - name: 'aggressive_reset_02'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
   - name: 'relax_inflation_02'
     type: 'cym_planner/InflationRecovery'
+  - name: 'conservative_reset_03'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  - name: 'aggressive_reset_03'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
   - name: 'relax_inflation_03'
     type: 'cym_planner/InflationRecovery'
+  - name: 'conservative_reset_04'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  - name: 'aggressive_reset_04'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
   - name: 'relax_inflation_04'
     type: 'cym_planner/InflationRecovery'
+  - name: 'conservative_reset_05'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  - name: 'aggressive_reset_05'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
   - name: 'relax_inflation_05'
     type: 'cym_planner/InflationRecovery'
+  - name: 'conservative_reset_06'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  - name: 'aggressive_reset_06'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
   - name: 'relax_inflation_06'
     type: 'cym_planner/InflationRecovery'
+  - name: 'conservative_reset_07'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  - name: 'aggressive_reset_07'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
   - name: 'relax_inflation_07'
     type: 'cym_planner/InflationRecovery'
+  - name: 'conservative_reset_08'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  - name: 'aggressive_reset_08'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
   - name: 'relax_inflation_08'
     type: 'cym_planner/InflationRecovery'
+  - name: 'conservative_reset_09'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  - name: 'aggressive_reset_09'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
   - name: 'relax_inflation_09'
     type: 'cym_planner/InflationRecovery'
+  - name: 'conservative_reset_10'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  - name: 'aggressive_reset_10'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
   - name: 'relax_inflation_10'
     type: 'cym_planner/InflationRecovery'
+  - name: 'conservative_reset_11'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  - name: 'aggressive_reset_11'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
   - name: 'relax_inflation_11'
     type: 'cym_planner/InflationRecovery'
+  - name: 'conservative_reset_12'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  - name: 'aggressive_reset_12'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
   - name: 'relax_inflation_12'
     type: 'cym_planner/InflationRecovery'
+  - name: 'conservative_reset_13'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  - name: 'aggressive_reset_13'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
   - name: 'relax_inflation_13'
     type: 'cym_planner/InflationRecovery'
+  - name: 'conservative_reset_14'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  - name: 'aggressive_reset_14'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
   - name: 'relax_inflation_14'
     type: 'cym_planner/InflationRecovery'
+  - name: 'conservative_reset_15'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  - name: 'aggressive_reset_15'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
   - name: 'relax_inflation_15'
     type: 'cym_planner/InflationRecovery'
+  - name: 'conservative_reset_16'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  - name: 'aggressive_reset_16'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
   - name: 'relax_inflation_16'
     type: 'cym_planner/InflationRecovery'
+  - name: 'conservative_reset_17'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  - name: 'aggressive_reset_17'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
   - name: 'relax_inflation_17'
     type: 'cym_planner/InflationRecovery'
+  - name: 'conservative_reset_18'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  - name: 'aggressive_reset_18'
+    type: 'clear_costmap_recovery/ClearCostmapRecovery'
   - name: 'relax_inflation_18'
     type: 'cym_planner/InflationRecovery'
 
@@ -90,11 +158,147 @@ relax_inflation_16: {stage: 16}
 relax_inflation_17: {stage: 17}
 relax_inflation_18: {stage: 18}
 
-conservative_reset:
+conservative_reset_01:
   reset_distance: 1.0
   layer_names: [obstacle_layer]
 
-aggressive_reset:
+aggressive_reset_01:
+  reset_distance: 0.0
+  layer_names: [obstacle_layer]
+
+conservative_reset_02:
+  reset_distance: 1.0
+  layer_names: [obstacle_layer]
+
+aggressive_reset_02:
+  reset_distance: 0.0
+  layer_names: [obstacle_layer]
+
+conservative_reset_03:
+  reset_distance: 1.0
+  layer_names: [obstacle_layer]
+
+aggressive_reset_03:
+  reset_distance: 0.0
+  layer_names: [obstacle_layer]
+
+conservative_reset_04:
+  reset_distance: 1.0
+  layer_names: [obstacle_layer]
+
+aggressive_reset_04:
+  reset_distance: 0.0
+  layer_names: [obstacle_layer]
+
+conservative_reset_05:
+  reset_distance: 1.0
+  layer_names: [obstacle_layer]
+
+aggressive_reset_05:
+  reset_distance: 0.0
+  layer_names: [obstacle_layer]
+
+conservative_reset_06:
+  reset_distance: 1.0
+  layer_names: [obstacle_layer]
+
+aggressive_reset_06:
+  reset_distance: 0.0
+  layer_names: [obstacle_layer]
+
+conservative_reset_07:
+  reset_distance: 1.0
+  layer_names: [obstacle_layer]
+
+aggressive_reset_07:
+  reset_distance: 0.0
+  layer_names: [obstacle_layer]
+
+conservative_reset_08:
+  reset_distance: 1.0
+  layer_names: [obstacle_layer]
+
+aggressive_reset_08:
+  reset_distance: 0.0
+  layer_names: [obstacle_layer]
+
+conservative_reset_09:
+  reset_distance: 1.0
+  layer_names: [obstacle_layer]
+
+aggressive_reset_09:
+  reset_distance: 0.0
+  layer_names: [obstacle_layer]
+
+conservative_reset_10:
+  reset_distance: 1.0
+  layer_names: [obstacle_layer]
+
+aggressive_reset_10:
+  reset_distance: 0.0
+  layer_names: [obstacle_layer]
+
+conservative_reset_11:
+  reset_distance: 1.0
+  layer_names: [obstacle_layer]
+
+aggressive_reset_11:
+  reset_distance: 0.0
+  layer_names: [obstacle_layer]
+
+conservative_reset_12:
+  reset_distance: 1.0
+  layer_names: [obstacle_layer]
+
+aggressive_reset_12:
+  reset_distance: 0.0
+  layer_names: [obstacle_layer]
+
+conservative_reset_13:
+  reset_distance: 1.0
+  layer_names: [obstacle_layer]
+
+aggressive_reset_13:
+  reset_distance: 0.0
+  layer_names: [obstacle_layer]
+
+conservative_reset_14:
+  reset_distance: 1.0
+  layer_names: [obstacle_layer]
+
+aggressive_reset_14:
+  reset_distance: 0.0
+  layer_names: [obstacle_layer]
+
+conservative_reset_15:
+  reset_distance: 1.0
+  layer_names: [obstacle_layer]
+
+aggressive_reset_15:
+  reset_distance: 0.0
+  layer_names: [obstacle_layer]
+
+conservative_reset_16:
+  reset_distance: 1.0
+  layer_names: [obstacle_layer]
+
+aggressive_reset_16:
+  reset_distance: 0.0
+  layer_names: [obstacle_layer]
+
+conservative_reset_17:
+  reset_distance: 1.0
+  layer_names: [obstacle_layer]
+
+aggressive_reset_17:
+  reset_distance: 0.0
+  layer_names: [obstacle_layer]
+
+conservative_reset_18:
+  reset_distance: 1.0
+  layer_names: [obstacle_layer]
+
+aggressive_reset_18:
   reset_distance: 0.0
   layer_names: [obstacle_layer]
 
