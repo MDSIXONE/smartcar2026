@@ -1735,7 +1735,8 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
             1, 52, 12, "target", target_category=u"电子产品",
             record_categories=set([u"电子产品", u"食品"])))
         self.assertEqual(
-            calls[:2], [("observe", 12), ("observe", 12)])
+            [entry for entry in calls if isinstance(entry, tuple)],
+            [("observe", 12), ("observe", 12)])
         self.assertEqual(len(self.task.observations), 2)
 
     def test_arrival_scan_skips_repeated_target_category_after_first_candidate(self):
@@ -1771,7 +1772,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.wait_for_chassis_stop = lambda _context: None
         self.task.save_observation_summary = lambda: calls.append("save")
 
-        def observe(point_number, _label):
+        def observe(point_number, _label, **_kwargs):
             index = len([entry for entry in calls
                          if isinstance(entry, tuple) and
                          entry[0] == "observe"])
@@ -1785,7 +1786,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
 
         self.task.observe_wall = observe
 
-        def turn_one_circle(_label, candidate_handler=None):
+        def turn_one_circle(_label, candidate_handler=None, **_kwargs):
             self.assertIsNotNone(candidate_handler)
             self.assertTrue(candidate_handler(responses[0], 0.2))
             self.assertFalse(candidate_handler(responses[1], 0.3))
