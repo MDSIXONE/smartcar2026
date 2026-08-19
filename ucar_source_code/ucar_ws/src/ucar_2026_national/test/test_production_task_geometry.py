@@ -1645,7 +1645,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.target_scan_events = []
         self.task.observations = []
         self.task.publish_state = lambda _state: None
-        def turn_one_circle(_label, candidate_handler=None):
+        def turn_one_circle(_label, candidate_handler=None, **_kwargs):
             self.assertIsNotNone(candidate_handler)
             self.assertTrue(candidate_handler(response, 1.2))
             return None, 2.0 * math.pi
@@ -1656,7 +1656,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.stop_motion = lambda: None
         self.task.wait_for_chassis_stop = lambda _context: None
 
-        def observe(point_number, _label):
+        def observe(point_number, _label, **_kwargs):
             calls.append(("observe", point_number))
             return {
                 "aligned": True,
@@ -1707,7 +1707,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.wait_for_chassis_stop = lambda _context: None
         self.task.save_observation_summary = lambda: calls.append("save")
 
-        def observe(point_number, _label):
+        def observe(point_number, _label, **_kwargs):
             index = len([entry for entry in calls
                          if isinstance(entry, tuple) and
                          entry[0] == "observe"])
@@ -1736,6 +1736,71 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
             record_categories=set([u"电子产品", u"食品"])))
         self.assertEqual(
             calls[:2], [("observe", 12), ("observe", 12)])
+        self.assertEqual(len(self.task.observations), 2)
+
+    def test_arrival_scan_skips_repeated_target_category_after_first_candidate(self):
+        calls = []
+        responses = [
+            {
+                "image_path": "electronic-1.png",
+                "capture_requested_at": "now",
+                "capture_requested_pose_map": [1.0, 2.0, 0.3],
+                "detection": {
+                    "text": u"电子产品生产车间", "confidence": 91.0},
+            },
+            {
+                "image_path": "electronic-2.png",
+                "capture_requested_at": "later",
+                "capture_requested_pose_map": [1.0, 2.0, 0.4],
+                "detection": {
+                    "text": u"电子产品生产车间", "confidence": 91.0},
+            },
+            {
+                "image_path": "food.png",
+                "capture_requested_at": "latest",
+                "capture_requested_pose_map": [1.0, 2.0, 0.5],
+                "detection": {
+                    "text": u"食品加工车间", "confidence": 92.0},
+            },
+        ]
+        self.task.use_ros_camera_for_ocr = False
+        self.task.target_scan_events = []
+        self.task.observations = []
+        self.task.publish_state = lambda _state: None
+        self.task.stop_motion = lambda: None
+        self.task.wait_for_chassis_stop = lambda _context: None
+        self.task.save_observation_summary = lambda: calls.append("save")
+
+        def observe(point_number, _label):
+            index = len([entry for entry in calls
+                         if isinstance(entry, tuple) and
+                         entry[0] == "observe"])
+            calls.append(("observe", point_number))
+            return {
+                "aligned": True,
+                "wall_point_number": [168, 168, 297][index],
+                "wall_point_coordinate": [-0.75, 1.5],
+                "text": responses[index]["detection"]["text"],
+            }
+
+        self.task.observe_wall = observe
+
+        def turn_one_circle(_label, candidate_handler=None, **_kwargs):
+            self.assertIsNotNone(candidate_handler)
+            self.assertTrue(candidate_handler(responses[0], 0.2))
+            self.assertFalse(candidate_handler(responses[1], 0.3))
+            self.assertFalse(self.task._ocr_turn_stop_flag)
+            self.assertTrue(candidate_handler(responses[2], 0.4))
+            self.assertTrue(self.task._ocr_turn_stop_flag)
+            return None, 0.4
+
+        self.task.rotate_full_revolution_for_ocr = turn_one_circle
+        self.assertIsNone(self.task.scan_production_point(
+            1, 52, 12, "target", target_category=u"电子产品",
+            record_categories=set([u"电子产品", u"食品"])))
+        self.assertEqual(
+            [entry for entry in calls if isinstance(entry, tuple)],
+            [("observe", 12), ("observe", 12)])
         self.assertEqual(len(self.task.observations), 2)
 
     def test_rejected_candidate_is_not_reprocessed_in_same_turn(self):

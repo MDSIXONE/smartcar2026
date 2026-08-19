@@ -3747,6 +3747,7 @@ class ProductionTask2026(object):
             self.start_ros_camera_and_wait(scan_label)
         try:
             rejected_categories = set()
+            handled_categories = set()
             required_categories = (
                 tuple(record_categories)
                 if record_categories is not None else None)
@@ -3779,12 +3780,17 @@ class ProductionTask2026(object):
                         "route_point=%d reason=alignment_rejected",
                         category.encode("utf-8"), point_number)
                     return False
-                # A category already recorded during this cruise (first pass
-                # pre-record of the simulation category) must not trigger the
-                # full stop/align/range cycle again: that repeated the same
-                # wall point forever at route point 13 / wall 448 and never
-                # advanced the turn.  Skip such candidates and keep turning.
-                # (2026-08-11: ALREADY_SERVED infinite turn loop fix, round 2.)
+                # A category may be visible repeatedly while the vehicle
+                # continues the same revolution.  Run the expensive
+                # stop/align/range cycle only once per category in this scan;
+                # a pre-recorded target category is still allowed to enter
+                # once on its second pass.
+                if category in handled_categories:
+                    rospy.loginfo(
+                        "PRODUCTION_CATEGORY_SKIP_TURN_DUPLICATE "
+                        "category=%s route_point=%d",
+                        category.encode("utf-8"), point_number)
+                    return False
                 if (category != target_category and
                         self.production_category_recorded(category)):
                     rospy.loginfo(
@@ -3794,6 +3800,7 @@ class ProductionTask2026(object):
                         json.dumps(detection.get("text"),
                                    ensure_ascii=True))
                     return False
+                handled_categories.add(category)
                 self.stop_motion()
                 self.wait_for_chassis_stop(scan_label + " candidate")
                 observation_label = "%s_%s" % (
