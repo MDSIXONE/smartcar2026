@@ -8,7 +8,7 @@
 - 入口包：ucar_2026_extra。
 - 默认地图：iflysse_field_walls_national.yaml。
 - OCR 模板文件：ucar_ws/src/ucar_2026_extra/config/ocr_route_profile.yaml。
-- 当前模板默认为 ocr_route_profile: []，因此默认行为沿用国赛 OCR 路线。
+- 当前模板默认为空列表 `[]`，因此默认行为沿用国赛 OCR 路线；该文件通过 launch 的 `param="ocr_route_profile"` 加载，不能再添加同名顶层键。
 - 只有在车端明确部署并审核过模板内容后，才会按模板执行指定点、朝向、旋转角度、
   旋转方向和 wall/free 停车模式。
 
@@ -74,7 +74,7 @@ manual、重启底盘/定位链路，恢复后再继续。
 sed -n '1,160p' ~/ucar_ws/src/ucar_2026_extra/config/ocr_route_profile.yaml
 ~~~
 
-ocr_route_profile: [] 表示使用默认国赛路线；非空模板必须由现场负责人确认点号、
+空列表 `[]` 表示使用默认国赛路线；非空模板必须由现场负责人确认点号、
 朝向、旋转方向和停车模式，不能在车辆运动时修改。
 
 ## 4. 启动额外主流程

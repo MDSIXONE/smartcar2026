@@ -54,6 +54,39 @@ def load_scanner_module():
 
 class QRCodeScannerCacheTest(unittest.TestCase):
 
+    def test_image_callback_publishes_all_codes_from_one_frame(self):
+        module = load_scanner_module()
+        scanner = object.__new__(module.QRCodeScanner)
+        scanner.scan_enabled = True
+        scanner.image_message_to_bgr = lambda _message: "frame"
+        scanner.decode = lambda _image: ["http://qr.example/a",
+                                         "http://qr.example/b"]
+        scanner.last_text = ""
+        scanner.last_publish_time = 0.0
+        scanner.same_code_cooldown_sec = 1.0
+        scanner.api_enabled = False
+        published = []
+        scanner.result_pub = types.SimpleNamespace(publish=published.append)
+
+        scanner.image_callback(object())
+
+        self.assertEqual(
+            published,
+            ["http://qr.example/a", "http://qr.example/b"])
+
+    def test_opencv_decoder_returns_all_codes(self):
+        module = load_scanner_module()
+        scanner = object.__new__(module.QRCodeScanner)
+        scanner.wechat_detector = None
+
+        class Detector(object):
+            def detectAndDecodeMulti(self, _image):
+                return True, ("a", "b"), None, None
+
+        scanner.open_cv_detector = Detector()
+
+        self.assertEqual(scanner.decode(object()), ["a", "b"])
+
     def test_successful_url_lookup_is_republished_from_process_cache(self):
         module = load_scanner_module()
         scanner = object.__new__(module.QRCodeScanner)

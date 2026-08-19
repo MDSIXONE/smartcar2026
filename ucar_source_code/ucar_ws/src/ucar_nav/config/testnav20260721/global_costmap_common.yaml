@@ -1,5 +1,5 @@
 # testnav20260721 global costmap.  Keep the real vehicle footprint/frames and
-# The task raises this startup value to 0.224 m after point 3.
+# Keep the normal recovery start radius aligned with local costmap at 0.224 m.
 footprint: [[0.171, -0.128], [0.171, 0.128], [-0.171, 0.128], [-0.171, -0.128]]
 footprint_padding: 0.0
 transform_tolerance: 0.5
@@ -29,5 +29,5 @@ obstacle_layer:
 
 inflation_layer:
   enabled: true
-  inflation_radius: 0.217
+  inflation_radius: 0.224
   cost_scaling_factor: 0.05

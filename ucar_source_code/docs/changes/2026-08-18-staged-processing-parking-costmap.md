@@ -44,5 +44,6 @@
 ## 后续参数调整（2026-08-18）
 
 - 三套 2026 主流程共用的 `testnav20260721` local costmap 常态膨胀半径调整为 `0.224m`。
-- OCR 内墙停车阶段的临时 local 膨胀半径调整为 `0.05m`；全局 costmap 的目标值调整为 `0.224m`，CymPlanner 的 `point` 模式保持不变。
+- OCR 内墙停车阶段的临时 local 膨胀半径调整为 `0.20m`；全局 costmap 的目标值调整为 `0.224m`，CymPlanner 的 `point` 模式保持不变。
 - 三套 launch、任务脚本默认值和几何测试已同步；三套几何回归、Python AST、launch XML、YAML 和 `git diff --check` 均通过。未启动 ROS、不发送运动命令。
+- 2026-08-19 后续 OCR 停车临时值 `0.20m` 已同步到车端三套任务脚本和 launch；6 个文件本地/车端 SHA-256 一致，车端未启动 ROS 或主流程。

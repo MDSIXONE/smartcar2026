@@ -1,0 +1,8 @@
+# 恢复国赛额外任务 70 号点原坐标
+
+- 日期：2026-08-19
+- 目的：撤销国赛额外任务 70 号点的临时坐标偏移，与国赛正式版统一。
+- 改动：额外任务 `production_full_grid_all_numbered.json` 中顶层 `points` 与
+  `grouped_points.centers` 的 70 号点均由 `(2.32, 1.68)` 恢复为 `(2.25, 1.75)`。
+- 部署：已同步到 `ucar-mini` 的 `ucar_2026_extra/config/`；本地与车端 SHA-256 一致，未启动 ROS、任务或车辆运动。
+- 验证：JSON 解析、两处记录一致性、国赛/额外任务坐标矩阵核对和 `git diff --check`。

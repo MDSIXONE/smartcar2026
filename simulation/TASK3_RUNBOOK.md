@@ -8,7 +8,7 @@
 在 WSL Ubuntu-20.04 的普通用户下进入工作区：
 
 ```bash
-cd /home/car/smartcar2026-simulation
+cd ~/smartcar2026/simulation
 source /opt/ros/noetic/setup.bash
 source devel/setup.bash
 export ROS_MASTER_URI=http://127.0.0.1:11312
@@ -89,7 +89,41 @@ roslaunch car3 task3_execute.launch \
 
 类别可写 `food/食品`、`daily/日用品`、`electronics/电子产品`。
 
-## 4. 正常日志顺序
+## 4. 仿真执行后给裁判展示场景
+
+任务完成并输出 `DONE:` 后，如需重新随机生成物块和锥桶供裁判查看，保持
+Gazebo 和终端 A 的主流程继续运行，打开新的终端 C。终端 C 必须完整执行下面
+的环境命令，不能只复制最后一行 `rosrun`：
+
+```bash
+cd ~/smartcar2026/simulation
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+export ROS_MASTER_URI=http://127.0.0.1:11312
+unset ROS_IP ROS_HOSTNAME
+```
+
+先确认终端 C 已连接到仿真 Master：
+
+```bash
+rostopic list
+```
+
+能列出 ROS 话题后，再执行：
+
+```bash
+rosrun car3 spawn_cubes.py
+```
+
+如果提示 `Unable to register with master node`，说明仿真 Master 没有运行或终端
+C 仍连接到了默认的 `11311`；不要继续重试 `rosrun`，回到终端 A 确认主流程仍在
+运行，并重新执行本节的环境命令。看到终端输出物块坐标、`锥桶: 10/10 个` 和
+`完成` 后，即可让裁判查看 Gazebo 窗口中的新场景。
+
+该命令会先删除旧的 `cube_*` 和 `cone_*`，再生成一组新的随机场景；不会重启
+Gazebo、复位车辆或重新执行任务。不要在任务执行过程中运行。
+
+## 5. 正常日志顺序
 
 搜索先在同一 XY 原地按以下方向进行：
 

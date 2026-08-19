@@ -132,24 +132,34 @@
             <arg name="require_fresh_odom" value="true"/>
             <arg name="odom_fresh_timeout" value="4.0"/>
             <arg name="exit_on_stop" value="true"/>
+            <!-- 额外流程无国赛地图定点终点，按省赛方式使用 V29 自读雷达；
+                 不启用拦路板检测/绕板。 -->
+            <arg name="use_lidar" value="self"/>
+            <arg name="goal_mode" value="visual"/>
+            <arg name="board_in_lane" value="false"/>
+            <arg name="go_around" value="false"/>
+            <arg name="board_stop_dist" value="0.321"/>
+            <arg name="go_around_keepout" value="0.08"/>
+            <arg name="board_arc_lat_scale" value="0.3"/>
             <!-- 2026-08-15：交接后必须走起跑序列（黄线对齐 → 认灯 → 进三岔口
                  → 巡线 → 终点横线 STOPPED）。缺 is_fork:=yolo 时交接点画面里的
                  黄线会在 FOLLOW 相位被 goal_block 当终点横线立即触发
                  APPROACH/STOPPED，整段巡线被跳过。以下起跑与性能参数与已实车
                  验证的 handoff_lane.sh（2026-08-12 最终值）对齐。 -->
             <arg name="is_fork" value="yolo"/>
-            <arg name="template" value="$(find lane_proto)/config/red_template_band2.png"/>
+            <arg name="template" value="$(find lane_proto)/config/red_template_band.png"/>
             <arg name="yellow_target" value="0.90"/>
             <arg name="align_offset" value="0.14"/>
             <arg name="start_offset" value="0.23"/>
-            <arg name="goal_y_lo" value="0.85"/>
+            <arg name="goal_y_lo" value="0.75"/>
             <!-- 2026-08-16：0.35 -> 0.25。实车巡线容易出线，
                  降速 30% 给视觉修正留出反应时间。 -->
-            <arg name="linear_speed" value="0.25"/>
+            <arg name="linear_speed" value="0.2"/>
             <arg name="gain" value="1.2"/>
             <arg name="rate" value="20"/>
-            <arg name="dump_every" value="3"/>
+            <arg name="dump_every" value="5"/>
             <arg name="goal_pause" value="1.0"/>
+            <arg name="goal_half" value="40"/>
         </include>
 
         <!-- ucar_2026_extra already owns the camera.  Keep decoding disabled until
@@ -177,10 +187,12 @@
             <param name="safe_start_timeout" value="90"/>
             <param name="plan_timeout" value="30"/>
             <param name="goal_timeout" value="180"/>
-            <!-- 2026-08-11：0.10→0.15。CymPlanner 已降速（max_vel_x 0.35）
-                 减少撞障碍概率；放宽到点容差 5cm 省回终点对准/回旋时间。
-                 仍远小于点间距 0.5m，不影响生产停入精度。 -->
-            <param name="arrival_tolerance" value="0.15"/>
+            <param name="target_guard_fallback_timeout" value="25"/>
+            <!-- 2026-08-19：任务层位置到点验收收紧为 3cm，配合
+                 CymPlanner 终点位置进入阈值 3cm 进行实车试验；航向容差不变。 -->
+            <param name="arrival_tolerance" value="0.12"/>
+            <param name="navigation_arrival_retry_attempts" value="3"/>
+            <param name="continue_on_arrival_error" value="true"/>
             <param name="ocr_helper_ready_timeout" value="90"/>
             <param name="ocr_capture_timeout" value="24"/>
             <param name="staging_point_number" value="52"/>
@@ -193,12 +205,15 @@
                  route below is scanned.  If either category remains absent
                  after both routes, the task proceeds directly to point 441
                  for the next lane-follow task. -->
-            <rosparam param="production_route_numbers">[12, 22, 13, 23, 14, 24, 15, 25, 16, 26, 17, 27, 18, 28, 19, 29]</rosparam>
+            <!-- OCR 主路线按五个 2x2 目标组调度：前向每组先尝试一个可达点，
+                 末组完成后反向补齐本次仍未尝试的点。守卫命中只忽略当前任务该点。 -->
+            <rosparam param="production_route_numbers">[11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21]</rosparam>
+            <rosparam param="production_route_groups">[[11, 12, 21, 22], [13, 14, 23, 24], [15, 16, 25, 26], [17, 18, 27, 28], [19, 20, 29, 30]]</rosparam>
             <!-- OCR 快捷任务模板：非空时按模板逐点巡航（点序/朝向/旋转角/方向/停车模式），
                  空/缺省时完全沿用国赛 production_route_numbers 逻辑。 -->
             <rosparam file="$(find ucar_2026_extra)/config/ocr_route_profile.yaml"
                       param="ocr_route_profile"/>
-            <rosparam param="production_observation_headings_deg">[-45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45]</rosparam>
+            <rosparam param="production_observation_headings_deg">[-45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45]</rosparam>
             <!-- Perimeter fallback: 1-10, 20, 30, 40, 39-31, 21, 11.
                  Each heading starts its 360-degree OCR scan facing inward. -->
             <rosparam param="fallback_production_route_numbers">[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 21, 11]</rosparam>
@@ -217,10 +232,11 @@
             <!-- OCR 识别成功后，内墙交点向场内内缩 25cm 作为停车坐标。 -->
             <param name="ocr_stop_offset_m" value="0.25"/>
             <!-- Normal route keeps the large local safety inflation.  The
-                 final OCR wall-parking leg temporarily uses a smaller local
-                 radius, while CymPlanner remains in front-point mode. -->
+                 final OCR wall-parking leg temporarily uses 0.07m local
+                 inflation only after reaching the OCR record point; the
+                 approach remains at normal safety inflation. -->
             <param name="processing_parking_profile_enabled" value="true"/>
-            <param name="processing_parking_inflation_radius_m" value="0.05"/>
+            <param name="processing_parking_inflation_radius_m" value="0.07"/>
             <!-- Local simulation (host PC) coordination: only after the
                  real item has been parked and its completion announcement
                  has finished does the task park/start the simulation item. -->
@@ -228,8 +244,8 @@
             <param name="simulation_host" value="$(arg simulation_host)"/>
             <param name="simulation_start_timeout" value="60"/>
             <param name="simulation_start_retries" value="3"/>
-            <!-- 仿真状态断连或未完成最多等 120 秒；到时继续小车终点流程。 -->
-            <param name="simulation_done_timeout" value="120"/>
+            <!-- 仿真状态断连或未完成最多等 75 秒；到时继续小车终点流程。 -->
+            <param name="simulation_done_timeout" value="75"/>
             <param name="simulation_poll_period" value="2.0"/>
             <!-- Synchronous announcement budget; a timeout terminates the
                  TTS helper and continues the mission. -->
@@ -275,16 +291,19 @@
                    value="/move_base/local_costmap/obstacle_layer"/>
             <param name="local_costmap_inflation_layer"
                    value="/move_base/local_costmap/inflation_layer"/>
-            <!-- After point 3, keep the global inflation radius at 0.224 m. -->
+            <!-- Use 0.21 m before point 3 and restore 0.224 m after point 3. -->
             <param name="global_costmap_inflation_layer"
                    value="/move_base/global_costmap/inflation_layer"/>
+            <param name="pre_point_3_global_costmap_inflation_radius_m"
+                   value="0.21"/>
             <param name="global_costmap_inflation_radius_m" value="0.224"/>
             <!-- Heading the waypoint must face after arrival; 0 keeps the
                  current yaw (no rotation). -->
             <param name="post_qr_waypoint_heading_point_number" value="13"/>
             <!-- Timeout only: a fresh QR event advances immediately. -->
-            <param name="qr_search_timeout" value="8.0"/>
+            <param name="qr_search_timeout" value="2.0"/>
             <param name="qr_rotation_speed" value="0.18"/>
+            <!-- Recenter before the 12 cm arrival acceptance limit. -->
             <param name="post_turn_recenter_trigger" value="0.06"/>
             <param name="post_turn_recenter_attempts" value="2"/>
             <param name="require_distinct_qr_codes" value="true"/>
@@ -355,10 +374,14 @@
             <param name="tf_timeout" value="4.0"/>
             <param name="stopped_odom_speed_epsilon" value="0.02"/>
             <param name="stopped_odom_samples" value="3"/>
-            <param name="ocr_alignment_tolerance_px" value="20.0"/>
+            <param name="ocr_alignment_tolerance_px" value="30.0"/>
+            <!-- Ignore distant/partially occluded OCR boxes before parking;
+                 this is an explicit 500px² visible-area gate. -->
+            <param name="ocr_candidate_min_bbox_area_px" value="500.0"/>
             <param name="ocr_alignment_kp" value="0.0025"/>
             <param name="ocr_alignment_kd" value="0.00035"/>
             <param name="ocr_alignment_max_speed" value="0.22"/>
+            <param name="ocr_alignment_attempts" value="12"/>
             <param name="ocr_alignment_step_seconds" value="0.30"/>
             <param name="ocr_alignment_yaw_tolerance_rad" value="0.01"/>
             <param name="ocr_alignment_turn_timeout" value="5.0"/>

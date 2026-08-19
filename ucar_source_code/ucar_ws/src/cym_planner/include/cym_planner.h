@@ -141,6 +141,7 @@ private:
     PlannerTuning point_tuning_;
     PlannerTuning body_projection_tuning_;
     PlannerTuning sprint_tuning_;
+    PlannerTuning destination_tuning_;
     bool debug_images_enabled_;
     bool escape_enabled_;
     double escape_blocked_timeout_;
@@ -170,6 +171,7 @@ private:
     bool body_projection_enabled_;
     bool sprint_enabled_;
     bool transverse_enabled_;
+    bool destination_enabled_;
     bool elastic_active_;
     int elastic_end_plan_index_;
     int elastic_last_side_;

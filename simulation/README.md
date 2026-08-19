@@ -87,6 +87,23 @@ roslaunch car3 task3_execute.launch \
 rostopic echo -n 1 /sim_task3/done
 ```
 
+## 仿真执行后给裁判展示场景
+
+任务完成并输出 `DONE:` 后，如需重新随机生成物块和锥桶供裁判查看，保持
+Gazebo 运行，在新的终端执行：
+
+```bash
+cd ~/smartcar2026/simulation
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+export ROS_MASTER_URI=http://127.0.0.1:11312
+unset ROS_IP ROS_HOSTNAME
+rosrun car3 spawn_cubes.py
+```
+
+该命令会先删除旧的 `cube_*` 和 `cone_*`，再生成一组新的随机场景；不会重启
+Gazebo、复位车辆或重新执行任务。不要在任务执行过程中运行，以免改变比赛场景。
+
 ## 常改配置
 
 | 目的 | 文件 |

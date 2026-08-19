@@ -22,7 +22,6 @@ namespace
 {
 
 const double kTargetDistance = 0.20;
-const double kGoalPositionTolerance = 0.05;
 const double kPi = 3.14159265358979323846;
 
 double clampValue(double value, double minimum, double maximum)
@@ -118,8 +117,9 @@ cym_planner::PlannerTuning pointDefaults()
     tuning.max_vel_theta = 1.0;
     tuning.final_yaw_gain = 2.0;
     tuning.final_yaw_max_vel = 1.0;
-    tuning.final_yaw_tolerance = 0.05;
+    tuning.final_yaw_tolerance = 0.10;
     tuning.final_linear_x_gain = 1.0;
+    tuning.goal_position_tolerance = 0.07;
     tuning.obstacle_lookahead_distance = 0.25;
     tuning.obstacle_cost_threshold = 253;
     tuning.carry_speed_scale = 1.0;
@@ -162,7 +162,7 @@ cym_planner::PlannerTuning sprintDefaults()
     tuning.max_vel_theta = 0.80;
     tuning.final_yaw_gain = 2.0;
     tuning.final_yaw_max_vel = 1.0;
-    tuning.final_yaw_tolerance = 0.05;
+    tuning.final_yaw_tolerance = 0.10;
     tuning.final_linear_x_gain = 0.6;
     tuning.obstacle_lookahead_distance = 0.25;
     tuning.obstacle_cost_threshold = 253;
@@ -174,6 +174,14 @@ cym_planner::PlannerTuning sprintDefaults()
     tuning.approach_min_vel_x = 0.12;
     tuning.lateral_gain = 12.5;
     tuning.max_vel_y = 2.5;
+    return tuning;
+}
+
+cym_planner::PlannerTuning destinationDefaults()
+{
+    cym_planner::PlannerTuning tuning = pointDefaults();
+    tuning.final_linear_x_gain = 1.0;
+    tuning.goal_position_tolerance = 0.04;
     return tuning;
 }
 
@@ -218,6 +226,10 @@ void readTuning(
                      prefix + "/final_linear_x_gain",
                      tuning.final_linear_x_gain,
                      defaults.final_linear_x_gain);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/goal_position_tolerance",
+                     tuning.goal_position_tolerance,
+                     defaults.goal_position_tolerance);
     readPlannerParam(primary, canonical, legacy,
                      prefix + "/obstacle_lookahead_distance",
                      tuning.obstacle_lookahead_distance,
@@ -275,6 +287,8 @@ void sanitizeTuning(cym_planner::PlannerTuning& tuning)
         clampValue(tuning.final_yaw_tolerance, 0.01, kPi);
     tuning.final_linear_x_gain =
         std::max(0.0, tuning.final_linear_x_gain);
+    tuning.goal_position_tolerance = clampValue(
+        tuning.goal_position_tolerance, 0.01, 1.0);
     tuning.obstacle_lookahead_distance =
         std::max(0.0, tuning.obstacle_lookahead_distance);
     tuning.obstacle_cost_threshold = static_cast<int>(
@@ -333,6 +347,7 @@ CymPlanner::CymPlanner()
       body_projection_enabled_(false),
       sprint_enabled_(false),
       transverse_enabled_(false),
+      destination_enabled_(false),
       elastic_active_(false),
       elastic_end_plan_index_(-1),
       elastic_last_side_(0),
@@ -394,9 +409,13 @@ void CymPlanner::initialize(std::string name, tf2_ros::Buffer* /* tf */,
     readTuning(
         planner_nh, canonical_nh, legacy_nh,
         "mode3_sprint", sprintDefaults(), sprint_tuning_);
+    readTuning(
+        planner_nh, canonical_nh, legacy_nh,
+        "mode4_destination", destinationDefaults(), destination_tuning_);
     sanitizeTuning(point_tuning_);
     sanitizeTuning(body_projection_tuning_);
     sanitizeTuning(sprint_tuning_);
+    sanitizeTuning(destination_tuning_);
     if(body_projection_tuning_.command_sweep_time <= 0.0)
     {
         ROS_ERROR(
@@ -540,12 +559,21 @@ void CymPlanner::navigationModeCallback(const std_msgs::String::ConstPtr& messag
     bool requested_body_mode = body_projection_enabled_;
     bool requested_sprint_mode = sprint_enabled_;
     bool requested_transverse_mode = transverse_enabled_;
-    if(mode == "body" || mode == "body_projection" || mode == "footprint" ||
+    bool requested_destination_mode = destination_enabled_;
+    if(mode == "destination" || mode == "handoff" || mode == "final")
+    {
+        requested_body_mode = false;
+        requested_sprint_mode = false;
+        requested_transverse_mode = false;
+        requested_destination_mode = true;
+    }
+    else if(mode == "body" || mode == "body_projection" || mode == "footprint" ||
        mode == "laser_avoidance")
     {
         requested_body_mode = true;
         requested_sprint_mode = false;
         requested_transverse_mode = false;
+        requested_destination_mode = false;
     }
     else if(mode == "point" || mode == "path_point" || mode == "direct_line" ||
             mode == "main" || mode == "main_legacy")
@@ -553,34 +581,40 @@ void CymPlanner::navigationModeCallback(const std_msgs::String::ConstPtr& messag
         requested_body_mode = false;
         requested_sprint_mode = false;
         requested_transverse_mode = false;
+        requested_destination_mode = false;
     }
     else if(mode == "sprint" || mode == "fast")
     {
         requested_body_mode = false;
         requested_sprint_mode = true;
         requested_transverse_mode = false;
+        requested_destination_mode = false;
     }
     else if(mode == "transverse" || mode == "lateral" || mode == "strafe")
     {
         requested_body_mode = false;
         requested_sprint_mode = false;
         requested_transverse_mode = true;
+        requested_destination_mode = false;
     }
     else
     {
         ROS_WARN("cym_planner: unsupported navigation mode '%s'; "
-                 "use point, body_projection, sprint or transverse",
+                 "use point, destination, body_projection, sprint or "
+                 "transverse",
                  message->data.c_str());
         return;
     }
 
     if(requested_body_mode == body_projection_enabled_ &&
        requested_sprint_mode == sprint_enabled_ &&
-       requested_transverse_mode == transverse_enabled_)
+       requested_transverse_mode == transverse_enabled_ &&
+       requested_destination_mode == destination_enabled_)
         return;
     body_projection_enabled_ = requested_body_mode;
     sprint_enabled_ = requested_sprint_mode;
     transverse_enabled_ = requested_transverse_mode;
+    destination_enabled_ = requested_destination_mode;
     resetControllerState();
     resetEscapeRecovery();
     clearElasticPlan();
@@ -589,10 +623,11 @@ void CymPlanner::navigationModeCallback(const std_msgs::String::ConstPtr& messag
     ROS_WARN(
         "cym_planner switched to %s | linear P/D %.2f/%.2f "
         "angular P/D %.2f/%.2f max %.2f m/s %.2f rad/s",
-        sprint_enabled_ ? "mode3_sprint" :
-            (transverse_enabled_ ? "mode3_sprint (transverse)" :
-                (body_projection_enabled_ ?
-                    "mode2_body_projection" : "mode1_point")),
+        destination_enabled_ ? "mode4_destination" :
+            (sprint_enabled_ ? "mode3_sprint" :
+                (transverse_enabled_ ? "mode3_sprint (transverse)" :
+                    (body_projection_enabled_ ?
+                        "mode2_body_projection" : "mode1_point"))),
         tuning.linear_x_gain, tuning.linear_x_kd,
         tuning.angular_gain, tuning.angular_kd,
         tuning.max_vel_x, tuning.max_vel_theta);
@@ -610,6 +645,8 @@ void CymPlanner::resetControllerState()
 
 const PlannerTuning& CymPlanner::activeTuning() const
 {
+    if(destination_enabled_)
+        return destination_tuning_;
     if(sprint_enabled_ || transverse_enabled_)
         return sprint_tuning_;
     return selectPlannerTuning(
@@ -1757,10 +1794,11 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         final_pose.pose.position.x, final_pose.pose.position.y);
     if(!std::isfinite(final_distance))
         return false;
-    if(!pose_adjusting_ && final_distance < kGoalPositionTolerance)
+    const PlannerTuning& tuning = activeTuning();
+    if(!pose_adjusting_ &&
+       final_distance < tuning.goal_position_tolerance)
         pose_adjusting_ = true;
 
-    const PlannerTuning& tuning = activeTuning();
     const double motion_scale =
         carry_mode_ ? tuning.carry_speed_scale : 1.0;
     if(pose_adjusting_)
@@ -1779,7 +1817,9 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
             tuning.max_vel_x * motion_scale);
         const bool final_yaw_reached =
             std::abs(final_yaw) < tuning.final_yaw_tolerance;
-        if(final_yaw_reached)
+        const bool final_position_reached =
+            final_distance <= tuning.goal_position_tolerance;
+        if(final_yaw_reached && final_position_reached)
         {
             cmd_vel = geometry_msgs::Twist();
         }
@@ -1790,7 +1830,7 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
             cmd_vel = geometry_msgs::Twist();
             return false;
         }
-        if(final_yaw_reached)
+        if(final_yaw_reached && final_position_reached)
         {
             goal_reached_ = true;
             ROS_WARN("cym_planner: goal reached");

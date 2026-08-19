@@ -15,10 +15,19 @@ import math
 DEFAULT_QR_OBSERVATION_NUMBERS = [262, 232, 295, 61, 41, 43]
 
 DEFAULT_PRODUCTION_ROUTE = [
-    12, 22, 13, 23, 14, 24, 15, 25, 16, 26, 17, 27, 18, 28, 19, 29,
+    11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+    30, 29, 28, 27, 26, 25, 24, 23, 22, 21,
 ]
 DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG = [
-    -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45,
+    -45, 45, -45, 45, -45, 45, -45, 45, -45, 45,
+    -45, 45, -45, 45, -45, 45, -45, 45, -45, 45,
+]
+DEFAULT_PRODUCTION_ROUTE_GROUPS = [
+    [11, 12, 21, 22],
+    [13, 14, 23, 24],
+    [15, 16, 25, 26],
+    [17, 18, 27, 28],
+    [19, 20, 29, 30],
 ]
 
 # The primary zig-zag only covers the inner production lanes.  When a required
@@ -35,6 +44,35 @@ DEFAULT_FALLBACK_PRODUCTION_OBSERVATION_HEADINGS_DEG = (
 )
 
 
+def normalize_production_route_groups(raw_groups, route_numbers):
+    """Validate and normalize the grouped OCR route definition."""
+    if not isinstance(raw_groups, (list, tuple)) or not raw_groups:
+        raise TaskDefinitionError("production route groups are empty")
+    normalized = []
+    flattened = []
+    seen = set()
+    for group_index, raw_group in enumerate(raw_groups):
+        if not isinstance(raw_group, (list, tuple)) or not raw_group:
+            raise TaskDefinitionError(
+                "production route group %d is empty" % group_index)
+        group = []
+        for raw_number in raw_group:
+            number = int(raw_number)
+            if number in seen:
+                raise TaskDefinitionError(
+                    "production route point %d appears in multiple groups" %
+                    number)
+            seen.add(number)
+            group.append(number)
+            flattened.append(number)
+        normalized.append(group)
+    expected = [int(number) for number in route_numbers]
+    if sorted(flattened) != sorted(expected):
+        raise TaskDefinitionError(
+            "production route groups do not cover production route points")
+    return normalized
+
+
 class TaskDefinitionError(ValueError):
     """Raised when the numbered-grid task configuration is incomplete."""
 
@@ -46,6 +84,11 @@ def is_finite(value):
 
 def normalize_angle(angle):
     return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def shortest_yaw_delta(current_yaw, target_yaw):
+    """Return the signed shortest turn from current yaw to target yaw."""
+    return normalize_angle(float(target_yaw) - float(current_yaw))
 
 
 def bearing(source, target):
@@ -246,9 +289,10 @@ def load_middle_target_guard_points(path, target_numbers):
     """Return the four numbered middle-grid vertices around each target.
 
     A production target is a 0.5 m middle-zone square centre.  Its guard is
-    the four line endpoints one half cell away in X and Y.  Deriving this
-    from the immutable grid file keeps the task route and guard labels in one
-    coordinate contract instead of maintaining a second hand-written map.
+    the four line endpoints or side-wall vertices one half cell away in X and
+    Y.  Deriving this from the immutable grid file keeps the task route and
+    guard labels in one coordinate contract instead of maintaining a second
+    hand-written map.
     """
     try:
         with open(path, "r") as handle:
@@ -262,6 +306,10 @@ def load_middle_target_guard_points(path, target_numbers):
             "middle_line_endpoints"]
         first_endpoint = int(endpoint_range[0])
         last_endpoint = int(endpoint_range[1])
+        side_vertex_range = document["numbering_scheme"][
+            "middle_side_wall_vertices"]
+        first_side_vertex = int(side_vertex_range[0])
+        last_side_vertex = int(side_vertex_range[1])
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         raise TaskDefinitionError(
             "grid file has invalid middle guard metadata: %s" % exc)
@@ -269,10 +317,15 @@ def load_middle_target_guard_points(path, target_numbers):
         raise TaskDefinitionError("square_side_m must be finite and positive")
     if last_endpoint < first_endpoint:
         raise TaskDefinitionError("middle line endpoint range is reversed")
+    if last_side_vertex < first_side_vertex:
+        raise TaskDefinitionError(
+            "middle side-wall vertex range is reversed")
 
     points = load_numbered_points(path)
-    endpoints = require_points(
-        points, range(first_endpoint, last_endpoint + 1))
+    guard_numbers = (
+        list(range(first_endpoint, last_endpoint + 1)) +
+        list(range(first_side_vertex, last_side_vertex + 1)))
+    guard_references = require_points(points, guard_numbers)
     half_side = side_length / 2.0
     tolerance = 1e-8
     result = {}
@@ -290,7 +343,7 @@ def load_middle_target_guard_points(path, target_numbers):
         guard_points = {}
         for expected_point in expected:
             matches = [
-                number for number, coordinate in endpoints.items()
+                number for number, coordinate in guard_references.items()
                 if position_error(coordinate, expected_point) <= tolerance]
             if len(matches) != 1:
                 raise TaskDefinitionError(
@@ -299,7 +352,7 @@ def load_middle_target_guard_points(path, target_numbers):
                         target_number, expected_point[0], expected_point[1],
                         len(matches)))
             number = matches[0]
-            guard_points[number] = endpoints[number]
+            guard_points[number] = guard_references[number]
         if len(guard_points) != 4:
             raise TaskDefinitionError(
                 "target %d did not resolve four distinct guard points" %

@@ -100,9 +100,17 @@ class YoloProc(object):
         self.timeout = float(timeout)
         cmd = [exe, "--weights", weights, "--backend", backend,
                "--device", str(device)]
+        # ⚠ close_fds=True 不能少。py2 的 Popen 默认 close_fds=False, 子进程
+        #   会**继承父进程所有打开的 fd, 包括相机**。yolo 自己不碰相机, 但
+        #   只要它活着, 那个 fd 的内核引用计数就不归零, uvcvideo 的 release
+        #   不会跑, stream 所有权一直挂在这个"幽灵"fd 上 —— 父进程这边想
+        #   release+重开换分辨率, 新 open 的 S_FMT 全 EBUSY("Pixel format
+        #   unsupported" / "Unable to stop the stream: Device or resource
+        #   busy"), 直到 yolo 退出。实车 2026-08-18 两趟就栽在这。
         self.p = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=(stderr if stderr is not None else sys.stderr), bufsize=0)
+            stderr=(stderr if stderr is not None else sys.stderr), bufsize=0,
+            close_fds=True)
         self._id = 1
         # 启动即主动发 HELLO(含 backend / classes / 输入尺寸), 先读掉
         self.hello = self._expect(T_HELLO)

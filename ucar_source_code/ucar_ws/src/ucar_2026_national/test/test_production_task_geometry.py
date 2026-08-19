@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import unittest
+from collections import deque
 
 
 PACKAGE_ROOT = os.path.abspath(
@@ -24,6 +25,7 @@ from production_task_geometry import (  # noqa: E402
     DEFAULT_FALLBACK_PRODUCTION_ROUTE,
     DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG,
     DEFAULT_PRODUCTION_ROUTE,
+    DEFAULT_PRODUCTION_ROUTE_GROUPS,
     TaskDefinitionError,
     bearing,
     build_straight_segments,
@@ -33,9 +35,11 @@ from production_task_geometry import (  # noqa: E402
     load_wall_reference_points,
     needs_recenter,
     normalize_angle,
+    normalize_production_route_groups,
     position_error,
     positive_turn_increment,
     require_points,
+    shortest_yaw_delta,
     stop_point_for_wall_point,
 )
 from production_task_perception import target_guard_scan_matches  # noqa: E402
@@ -114,15 +118,24 @@ class ProductionTaskGeometryTest(unittest.TestCase):
     def test_production_route_and_observation_headings_are_exact(self):
         self.assertEqual(
             DEFAULT_PRODUCTION_ROUTE,
-            [12, 22, 13, 23, 14, 24, 15, 25, 16, 26, 17, 27,
-             18, 28, 19, 29])
+            [11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+             30, 29, 28, 27, 26, 25, 24, 23, 22, 21])
         self.assertEqual(
             DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG,
-            [-45, 45] * 8)
+            [-45, 45] * 10)
         # One heading per navigation leg (staging leg + route legs).
         self.assertEqual(
             len(DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG),
             len(DEFAULT_PRODUCTION_ROUTE))
+        self.assertEqual(
+            DEFAULT_PRODUCTION_ROUTE_GROUPS,
+            [[11, 12, 21, 22], [13, 14, 23, 24],
+             [15, 16, 25, 26], [17, 18, 27, 28],
+             [19, 20, 29, 30]])
+        self.assertEqual(
+            normalize_production_route_groups(
+                DEFAULT_PRODUCTION_ROUTE_GROUPS, DEFAULT_PRODUCTION_ROUTE),
+            DEFAULT_PRODUCTION_ROUTE_GROUPS)
         self.assertEqual(
             DEFAULT_FALLBACK_PRODUCTION_ROUTE,
             list(range(1, 11)) + [20, 30, 40] +
@@ -139,9 +152,7 @@ class ProductionTaskGeometryTest(unittest.TestCase):
             build_straight_segments(
                 DEFAULT_PRODUCTION_ROUTE, self.points,
                 math.radians(1.0)),
-            [(12, 22), (22, 13), (13, 23), (23, 14), (14, 24),
-             (24, 15), (15, 25), (25, 16), (16, 26), (26, 17),
-             (17, 27), (27, 18), (18, 28), (28, 19), (19, 29)])
+            [(11, 20), (20, 30), (30, 21)])
 
     def test_middle_target_guard_mapping_and_filtered_scan_match(self):
         guards = load_middle_target_guard_points(
@@ -150,6 +161,7 @@ class ProductionTaskGeometryTest(unittest.TestCase):
             dict((number, sorted(points))
                  for number, points in guards.items()),
             {
+                11: [419, 428, 446, 448],
                 12: [419, 420, 428, 429],
                 22: [428, 429, 437, 438],
                 13: [420, 421, 429, 430],
@@ -165,7 +177,10 @@ class ProductionTaskGeometryTest(unittest.TestCase):
                 18: [425, 426, 434, 435],
                 28: [434, 435, 443, 444],
                 19: [426, 427, 435, 436],
+                20: [427, 436, 447, 449],
+                21: [428, 437, 448, 450],
                 29: [435, 436, 444, 445],
+                30: [436, 445, 449, 451],
             })
 
         class Scan(object):
@@ -222,6 +237,12 @@ class ProductionTaskGeometryTest(unittest.TestCase):
             math.radians(-179.0), math.radians(-170.0), 1.0)
         self.assertAlmostEqual(
             first + second, math.radians(11.0), places=6)
+
+    def test_shortest_yaw_delta_prefers_clockwise_negative_transition(self):
+        self.assertAlmostEqual(
+            shortest_yaw_delta(
+                math.radians(-90.0), math.radians(-135.0)),
+            math.radians(-45.0), places=6)
 
     def test_reverse_jitter_does_not_increase_turn_progress(self):
         self.assertEqual(
@@ -287,6 +308,8 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         task_module.rospy.logwarn = self.capture_warning
         task_module.rospy.loginfo = lambda *_args: None
         self.task.qr_classifications = []
+        self.task.api_events = deque()
+        self.task.first_qr_item_by_code = {}
         self.task.observations = []
         self.task.expected_item_text = u""
         self.task.expected_production_category = None
@@ -311,6 +334,87 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
     def capture_warning(self, message, *args):
         self.warnings.append(message % args)
 
+    def test_same_position_navigation_uses_shortest_measured_rotation(self):
+        calls = []
+        self.task.current_map_pose = (
+            lambda _context: (-1.75, 2.25, math.radians(-90.0)))
+        self.task.require_safe = lambda: None
+        self.task.rotate_in_place_to_yaw = (
+            lambda yaw, context: calls.append((yaw, context)))
+
+        result = self.task.navigate_coordinates(
+            -1.75, 2.25, math.radians(-135.0),
+            "QR face point 61", require_plan=False)
+
+        self.assertTrue(result)
+        self.assertEqual(calls[0][0], math.radians(-135.0))
+        self.assertIn("shortest same-position rotation", calls[0][1])
+
+    def test_same_position_navigation_uses_arrival_tolerance_for_rotation(self):
+        calls = []
+        self.task.current_map_pose = (
+            lambda _context: (-1.75 + 0.068, 2.25, math.radians(90.0)))
+        self.task.require_safe = lambda: None
+        self.task.rotate_in_place_to_yaw = (
+            lambda yaw, context: calls.append((yaw, context)))
+
+        result = self.task.navigate_coordinates(
+            -1.75, 2.25, math.radians(-90.0),
+            "QR face point 295", require_plan=False)
+
+        self.assertTrue(result)
+        self.assertEqual(calls[0][0], math.radians(-90.0))
+        self.assertIn("shortest same-position rotation", calls[0][1])
+
+    def test_target_guard_fallback_tries_next_candidate_after_navigation_failure(self):
+        calls = []
+        self.task.target_guard_points = {
+            11: {428: (-2.0, 0.5), 446: (-2.5, 1.0)}}
+        self.task.production_route_numbers = [11, 12]
+        self.task.grouped_route_attempt_index = 0
+
+        def navigate(*_args, **kwargs):
+            candidate = kwargs["navigation_point_number"]
+            calls.append((candidate, kwargs["fallback_navigation"]))
+            if len(calls) == 1:
+                return "target_navigation_failed"
+            self.task.last_target_guard_fallback_candidates = []
+            return "target_guard_skipped"
+
+        self.task.navigate_target_and_scan = navigate
+        outcome = self.task.try_grouped_target_guard_fallback(
+            "forward", 0, 11, 3, math.radians(-45.0), u"日用品", None,
+            12, [428, 446])
+
+        self.assertEqual(outcome, "target_guard_skipped")
+        self.assertEqual(calls, [(428, True), (446, True)])
+
+    def test_target_guard_fallback_uses_short_timeout_and_returns_failure(self):
+        navigation = []
+        self.task.points = {428: (-2.0, 0.5)}
+        self.task.target_guard_fallback_timeout = 25.0
+        self.task.publish_state = lambda _state: None
+        self.task.new_target_guard_monitor = (
+            lambda *_args: {"guard_points": {}, "hit_counts": {}})
+        self.task.wait_for_target_guard_precheck = lambda _monitor: None
+        self.task.poll_target_guard = lambda _monitor: None
+        self.task.target_guard_scan_expired = lambda _monitor: False
+
+        def navigate(*_args, **kwargs):
+            navigation.append(kwargs)
+            return False
+
+        self.task.navigate_coordinates = navigate
+        self.task.navigate_target_and_scan(
+            1, 3, 11, math.radians(-45.0),
+            route_leg_count=1,
+            navigation_point_number=428,
+            guard_points_override={}, fallback_navigation=True)
+
+        self.assertEqual(len(navigation), 1)
+        self.assertFalse(navigation[0]["abort_on_navigation_failure"])
+        self.assertEqual(navigation[0]["goal_timeout"], 25.0)
+
     def test_processing_parking_profile_keeps_point_mode_and_restores_inflation(self):
         messages = []
 
@@ -321,19 +425,24 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
             def publish(self, message):
                 messages.append(message.data)
 
-        inflation_state = [0.22]
+        inflation_state = {
+            "/move_base/local_costmap/inflation_layer": 0.224,
+            "/move_base/global_costmap/inflation_layer": 0.224,
+        }
 
         class InflationClient(object):
 
-            def __init__(self, _namespace, timeout=None):
+            def __init__(self, namespace, timeout=None):
+                self.namespace = namespace
                 self.timeout = timeout
 
             def get_configuration(self):
-                return {"inflation_radius": inflation_state[0]}
+                return {"inflation_radius": inflation_state[self.namespace]}
 
             def update_configuration(self, configuration):
-                inflation_state[0] = float(configuration["inflation_radius"])
-                return {"inflation_radius": inflation_state[0]}
+                inflation_state[self.namespace] = float(
+                    configuration["inflation_radius"])
+                return {"inflation_radius": inflation_state[self.namespace]}
 
         self.task.publish_state = lambda _state: None
         self.task.require_safe = lambda: None
@@ -342,9 +451,12 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         self.task.local_costmap_layer_control_enabled = True
         self.task.local_costmap_inflation_layer = (
             "/move_base/local_costmap/inflation_layer")
+        self.task.global_costmap_inflation_layer = (
+            "/move_base/global_costmap/inflation_layer")
         self.task.local_costmap_reconfigure_timeout = 0.5
-        self.task.processing_parking_inflation_radius_m = 0.05
+        self.task.processing_parking_inflation_radius_m = 0.07
         self.task._processing_parking_original_inflation_radius_m = None
+        self.task._processing_parking_original_global_inflation_radius_m = None
 
         original_client = task_module.DynamicReconfigureClient
         original_sleep = task_module.rospy.sleep
@@ -352,20 +464,115 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         task_module.rospy.sleep = lambda _duration: None
         try:
             self.task.enter_processing_parking_profile()
-            self.assertEqual(inflation_state[0], 0.05)
+            self.assertEqual(
+                inflation_state["/move_base/local_costmap/inflation_layer"],
+                0.07)
+            self.assertEqual(
+                inflation_state["/move_base/global_costmap/inflation_layer"],
+                0.07)
             self.assertEqual(messages, [
                 "point", "point", "point"])
 
             self.task.exit_processing_parking_profile()
-            self.assertEqual(inflation_state[0], 0.224)
+            self.assertEqual(
+                inflation_state["/move_base/local_costmap/inflation_layer"],
+                0.224)
+            self.assertEqual(
+                inflation_state["/move_base/global_costmap/inflation_layer"],
+                0.224)
             self.assertEqual(messages, [
                 "point", "point", "point",
                 "point", "point", "point"])
             self.assertIsNone(
                 self.task._processing_parking_original_inflation_radius_m)
+            self.assertIsNone(
+                self.task._processing_parking_original_global_inflation_radius_m)
         finally:
             task_module.DynamicReconfigureClient = original_client
             task_module.rospy.sleep = original_sleep
+
+    def test_processing_parking_approaches_recorded_point_before_low_inflation(self):
+        events = []
+        observation = {
+            "route_point_number": 16,
+            "ocr_aligned_pose_map": [0.31, 0.74, -1.20],
+            "wall_point_number": 300,
+            "wall_point_coordinate": [0.75, 1.50],
+            "forward_ray_wall_intersection_map": [0.75, 1.50],
+        }
+        self.task.points = {
+            16: (0.25, 0.75),
+        }
+        self.task.processing_parking_profile_enabled = True
+        self.task.last_recorded_observation = lambda _category: observation
+        self.task.log_safe_text = lambda value: value
+        self.task.stop_motion = lambda: None
+        self.task.wait_for_chassis_stop = lambda _context: None
+        self.task.publish_state = lambda _state: None
+        self.task.navigate_coordinates = (
+            lambda x, y, yaw, label, require_plan=True: events.append(
+                ("navigate", x, y, yaw, label, require_plan)))
+        self.task.enter_processing_parking_profile = (
+            lambda: events.append(("enter_profile",)))
+        self.task.exit_processing_parking_profile = (
+            lambda: events.append(("exit_profile",)))
+
+        self.task.park_at_recorded_production_category(
+            u"毛巾", u"日用品", announce=False)
+
+        self.assertEqual(
+            events,
+            [
+                ("navigate", 0.31, 0.74, -1.20,
+                 "processing observation point 16", True),
+                ("enter_profile",),
+                ("navigate", 0.75, 1.25, math.pi / 2.0,
+                 "processing stop point 300", True),
+                ("exit_profile",),
+            ])
+
+    def test_observe_wall_records_ocr_aligned_pose(self):
+        self.task.camera_width = 100
+        self.task.ocr_alignment_attempts = 1
+        self.task.ocr_alignment_tolerance_px = 30.0
+        self.task.require_safe = lambda: None
+        self.task.stop_motion = lambda: None
+        self.task.wait_for_chassis_stop = lambda _context: None
+        self.task.capture_ocr = lambda _label, _attempt: {
+            "image_path": "frame.png",
+            "width": 100,
+            "detection": {
+                "text": u"毛巾",
+                "confidence": 0.99,
+                "bbox": [40, 10, 20, 20],
+            },
+        }
+        self.task.current_map_pose = (
+            lambda _context: (1.10, 2.20, 0.70))
+        self.task.wait_for_fresh_front_distance = (
+            lambda: (object(), 0.50))
+        self.task.laser_map_pose = (
+            lambda _scan: (1.10, 2.20, 0.70))
+        self.task.wall_reference_points = {300: (0.75, 1.50)}
+        self.task.lidar_forward_offset = 0.0
+        self.task.ray_range_agreement = 1.0
+
+        original_intersection = (
+            task_module.forward_ray_wall_intersection)
+        original_nearest = task_module.nearest_numbered_point
+        task_module.forward_ray_wall_intersection = (
+            lambda *_args: (1.0, (0.75, 1.50)))
+        task_module.nearest_numbered_point = (
+            lambda *_args: (300, (0.75, 1.50), 0.0))
+        try:
+            observation = self.task.observe_wall(16, "pose record")
+        finally:
+            task_module.forward_ray_wall_intersection = (
+                original_intersection)
+            task_module.nearest_numbered_point = original_nearest
+
+        self.assertEqual(
+            observation["ocr_aligned_pose_map"], [1.10, 2.20, 0.70])
 
     def test_point_three_global_inflation_is_applied_and_verified(self):
         inflation_state = [0.20]
@@ -397,7 +604,7 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         finally:
             task_module.DynamicReconfigureClient = original_client
 
-    def test_rosout_ahrs_crc_is_warning_but_head_len_stays_critical(self):
+    def test_rosout_imu_and_ahrs_crc_are_warnings_but_head_len_stays_critical(self):
         self.task.lock = threading.RLock()
         self.task.critical_error = ""
         warnings = []
@@ -405,6 +612,12 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         task_module.rospy.logwarn_throttle = (
             lambda _period, message, *args: warnings.append(message % args))
         try:
+            self.task.rosout_cb(type("LogMessage", (object,), {
+                "msg": "check crc16 faild(imu)."})())
+            self.assertEqual(self.task.critical_error, "")
+            self.assertTrue(any("PRODUCTION_IMU_CRC_IGNORED" in item
+                                for item in warnings))
+
             self.task.rosout_cb(type("LogMessage", (object,), {
                 "msg": "check crc16 faild(ahrs)."})())
             self.assertEqual(self.task.critical_error, "")
@@ -715,6 +928,26 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
 
         self.assertEqual(messages, ["point", "point", "point"])
 
+    def test_destination_mode_is_published_for_final_441_approach(self):
+        messages = []
+
+        class NavigationModePublisher(object):
+            def get_num_connections(self):
+                return 1
+
+            def publish(self, message):
+                messages.append(message.data)
+
+        self.task.navigation_mode_pub = NavigationModePublisher()
+        self.task.navigation_mode_connect_timeout = 0.5
+        self.task.require_safe = lambda: None
+        self.task.publish_state = lambda _state: None
+
+        self.task.switch_to_destination_mode()
+
+        self.assertEqual(messages, [
+            "destination", "destination", "destination"])
+
     def test_point_mode_is_selected_before_staging_navigation(self):
         events = []
 
@@ -962,6 +1195,44 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
         worker.join()
         self.assertEqual(self.task.camera_sequence, 6)
 
+    def test_ocr_capture_waits_for_next_camera_frame(self):
+        self.task.lock = threading.RLock()
+        self.task.camera_sequence = 7
+        old_frame = object()
+        new_frame = object()
+        self.task.latest_camera_image = old_frame
+        self.task.latest_camera_receipt = task_module.rospy.Time.now()
+        self.task.camera_frame_timeout = 0.5
+        self.task.require_safe = lambda: None
+
+        class Bridge(object):
+            def __init__(self):
+                self.messages = []
+
+            def imgmsg_to_cv2(self, message, desired_encoding=None):
+                self.messages.append(message)
+                return object()
+
+        bridge = Bridge()
+        self.task.cv_bridge = bridge
+        original_imwrite = task_module.cv2.imwrite
+        task_module.cv2.imwrite = lambda *_args: True
+
+        def publish_next_frame():
+            time.sleep(0.03)
+            self.task.camera_image_cb(new_frame)
+
+        worker = threading.Thread(target=publish_next_frame)
+        worker.start()
+        try:
+            self.task.save_latest_ros_camera_frame("unused.png")
+        finally:
+            worker.join()
+            task_module.cv2.imwrite = original_imwrite
+
+        self.assertEqual(bridge.messages, [new_frame])
+        self.assertEqual(self.task.camera_sequence, 8)
+
     def test_camera_start_without_fresh_frame_aborts(self):
         self.task.lock = threading.RLock()
         self.task.camera_sequence = 0
@@ -1001,6 +1272,42 @@ class ProductionTaskRecenteringPolicyTest(unittest.TestCase):
 
         self.assertEqual(detected, u"苹果")
         self.assertLess(elapsed, 0.20)
+
+    def test_qr_api_queue_preserves_multiple_results_and_first_item(self):
+        self.task.lock = threading.RLock()
+        self.task.api_sequence = 0
+        self.task.latest_api_text = ""
+        self.task.used_qr_codes = set()
+        self.task.require_distinct_qr_codes = True
+        self.task.api_event = threading.Event()
+        self.task.require_safe = lambda: None
+
+        class ApiMessage(object):
+            pass
+
+        messages = [
+            ("http://192.168.8.1:3663/a", u"苹果"),
+            ("http://192.168.8.1:3663/b", u"手机"),
+            ("http://192.168.8.1:3663/a", u"香蕉"),
+        ]
+        for qr_text, item in messages:
+            message = ApiMessage()
+            message.data = json.dumps({
+                "ok": True,
+                "qr_text": qr_text,
+                "response": {"code": 200, "result": item},
+            }, ensure_ascii=False)
+            self.task.qr_api_result_cb(message)
+
+        first = self.task.wait_for_fresh_qr(0, 0.1)
+        self.task.used_qr_codes.add(first)
+        second = self.task.wait_for_fresh_qr(0, 0.1)
+
+        self.assertEqual(first, u"苹果")
+        self.assertEqual(second, u"手机")
+        self.assertEqual(
+            self.task.first_qr_item_by_code["http://192.168.8.1:3663/a"],
+            u"苹果")
 
     def test_qr_seen_while_facing_is_accepted_without_search_wait(self):
         self.task.lock = threading.RLock()
@@ -1845,6 +2152,7 @@ class ProductionTaskDualItemTest(unittest.TestCase):
             lambda: (u"苹果", u"手机"))
         self.task.wait_for_safe_start = lambda: None
         self.task.switch_to_point_mode = lambda: None
+        self.task.switch_to_destination_mode = lambda: None
         self.task.resume_production_only = False
         self.task.staging_point_number = 52
         self.task.qr_observation_numbers = [262]
@@ -1885,6 +2193,7 @@ class ProductionTaskDualItemTest(unittest.TestCase):
             lambda: (events.append("item_input"), (u"苹果", u"手机"))[1])
         self.task.wait_for_safe_start = lambda: None
         self.task.switch_to_point_mode = lambda: None
+        self.task.switch_to_destination_mode = lambda: None
         self.task.resume_production_only = False
         self.task.staging_point_number = 52
         self.task.qr_observation_numbers = [262]
@@ -1976,7 +2285,7 @@ class ProductionTaskDualItemTest(unittest.TestCase):
                 events.append(("sim_start", item, category)), False)[1])
         self.task.simulation_wait_done = (
             lambda: (events.append("sim_wait_timeout"), False)[1])
-        self.task.simulation_done_timeout = 120.0
+        self.task.simulation_done_timeout = 75.0
         self.task.publish_result = (
             lambda success, reason: events.append(("result", success)))
         self.task.lane_handoff_enabled = False

@@ -13,6 +13,10 @@ cym_planner/CymPlanner:
   #   按 cos²(航向误差) 缩放，换路后大角度对准先转向、基本不前进；
   #   final_linear_x_gain 1.0→0.0 —— 终点阶段只对准朝向，不做前后位置
   #   修正，消除墙边定点来回调整。
+  # 2026-08-19：final_yaw_tolerance 0.05→0.10；普通点模式规划器内部位置包络 7cm，
+  #   任务层到点验收与重试上限为 12cm。
+  # 2026-08-19：国赛冲刺航向环 P 5.0→10.0；approach_decel_distance
+  #   1.0→0.5m，延后减速起点以保持更高冲刺速度。
   # 2026-08-16（国赛 sprint 调参）：final_yaw_tolerance 0.15→0.05 ——
   #   到达点（含起点→70 的 180° 朝向）后朝向容差严格到 ±2.9°，
   #   保证冲刺出发时车头正对 y=1.75 走廊。
@@ -24,11 +28,12 @@ cym_planner/CymPlanner:
     angular_kd: 0.4
     max_vel_theta: 0.80
     heading_slowdown_min_scale: 0.00
+    goal_position_tolerance: 0.07
     command_sweep_time: 0.00
     command_sweep_step: 0.025
     final_yaw_gain: 2.0
     final_yaw_max_vel: 1.00
-    final_yaw_tolerance: 0.05
+    final_yaw_tolerance: 0.10
     final_linear_x_gain: 0.0
     obstacle_lookahead_distance: 0.8
     # Any non-zero local cost means the path has entered an inflation band;
@@ -67,6 +72,8 @@ cym_planner/CymPlanner:
   # 无命令扫掠、保留前视判障）。需要更快/更慢只改本段 linear_x_gain 与
   # max_vel_x。任务节点在 70→288 段经 /ucar/navigation_mode 发布
   # "sprint" 切换，到达 288 后切回 "point"。
+  # 2026-08-19：final_yaw_tolerance 0.05→0.10；规划器内部位置包络 8cm，
+  #   任务层到点验收与重试上限为 12cm。
   # 2026-08-16：航向环 P 翻倍（angular_gain 2.5→5.0），直线段航向收敛
   #   更快，速度不因 cos² 缩放掉；final_yaw_tolerance 0.15→0.05，
   #   到达 288 时朝向同样严格（与 mode1_point 一致）。
@@ -106,16 +113,16 @@ cym_planner/CymPlanner:
     linear_x_gain: 13.5
     linear_x_kd: 0.5
     max_vel_x: 2.7
-    angular_gain: 5.0
+    angular_gain: 10.0
     angular_kd: 0.4
     max_vel_theta: 0.80
     heading_slowdown_min_scale: 0.00
     command_sweep_time: 0.00
     command_sweep_step: 0.025
-    # 接近目标自动减速：距终点 1.0m 起速度上限线性压到 0.12 m/s，
-    # 防止 1.0 m/s 冲刺惯性冲过坡顶/停车点；final_linear_x_gain 0.6
+    # 接近目标自动减速：距终点 0.5m 起速度上限线性压到 0.12 m/s，
+    # 延后减速以保持更高冲刺速度；final_linear_x_gain 0.6
     # 允许终点位置回拉修正（轻微冲过头时倒回）。
-    approach_decel_distance: 1.0
+    approach_decel_distance: 0.5
     approach_min_vel_x: 0.12
     # 横向平移（transverse 模式）：横向误差×lateral_gain 驱动 linear.y，
     # 航向锁定路径终点朝向（90°）；max_vel_y 横向速度上限。
@@ -123,12 +130,19 @@ cym_planner/CymPlanner:
     max_vel_y: 2.5
     final_yaw_gain: 2.0
     final_yaw_max_vel: 1.00
-    final_yaw_tolerance: 0.05
+    final_yaw_tolerance: 0.10
     final_linear_x_gain: 0.6
     obstacle_lookahead_distance: 0.8
     # Treat every non-zero local inflation cost as a replan trigger.
     obstacle_cost_threshold: 1
     carry_speed_scale: 1.0
+
+  # 模式 4：destination —— 仅用于生产任务到 441 的最后一段。
+  # 普通路线继续使用 mode1_point；这里单独保留位置微调，并将规划器
+  # 进入最终姿态阶段的距离收紧到 4cm，不改变任务层交接/结束语义。
+  mode4_destination:
+    final_linear_x_gain: 1.0
+    goal_position_tolerance: 0.04
 
   # 受限横移目前是次级兜底。Sol 安全复核发现状态保持、全接触格统计和本地动态
   # 障碍检查仍需补齐，因此硬关闭；即使误改 true，当前源码也会拒绝并记录错误。

@@ -17,14 +17,78 @@ base_local_planner: "cym_planner/CymPlanner"
 max_planning_retries: 3
 
 recovery_behavior_enabled: true
-clearing_rotation_allowed: true
+clearing_rotation_allowed: false
 recovery_behaviors:
   - name: 'conservative_reset'
     type: 'clear_costmap_recovery/ClearCostmapRecovery'
-  - name: 'clearing_rotation'
-    type: 'rotate_recovery/RotateRecovery'
   - name: 'aggressive_reset'
     type: 'clear_costmap_recovery/ClearCostmapRecovery'
+  # All standard recovery behaviors failed: lower local inflation by one
+  # local grid (2cm) and global inflation by half a global grid per stage,
+  # then return to PLANNING. The next stage is reached only when move_base
+  # still cannot find a path.
+  - name: 'relax_inflation_01'
+    type: 'cym_planner/InflationRecovery'
+  - name: 'relax_inflation_02'
+    type: 'cym_planner/InflationRecovery'
+  - name: 'relax_inflation_03'
+    type: 'cym_planner/InflationRecovery'
+  - name: 'relax_inflation_04'
+    type: 'cym_planner/InflationRecovery'
+  - name: 'relax_inflation_05'
+    type: 'cym_planner/InflationRecovery'
+  - name: 'relax_inflation_06'
+    type: 'cym_planner/InflationRecovery'
+  - name: 'relax_inflation_07'
+    type: 'cym_planner/InflationRecovery'
+  - name: 'relax_inflation_08'
+    type: 'cym_planner/InflationRecovery'
+  - name: 'relax_inflation_09'
+    type: 'cym_planner/InflationRecovery'
+  - name: 'relax_inflation_10'
+    type: 'cym_planner/InflationRecovery'
+  - name: 'relax_inflation_11'
+    type: 'cym_planner/InflationRecovery'
+  - name: 'relax_inflation_12'
+    type: 'cym_planner/InflationRecovery'
+  - name: 'relax_inflation_13'
+    type: 'cym_planner/InflationRecovery'
+  - name: 'relax_inflation_14'
+    type: 'cym_planner/InflationRecovery'
+  - name: 'relax_inflation_15'
+    type: 'cym_planner/InflationRecovery'
+  - name: 'relax_inflation_16'
+    type: 'cym_planner/InflationRecovery'
+  - name: 'relax_inflation_17'
+    type: 'cym_planner/InflationRecovery'
+  - name: 'relax_inflation_18'
+    type: 'cym_planner/InflationRecovery'
+
+inflation_recovery:
+  local_service: /move_base/local_costmap/inflation_layer/set_parameters
+  global_service: /move_base/global_costmap/inflation_layer/set_parameters
+  local_reduction_step: 0.02
+  global_reduction_step: 0.005925
+  minimum_radius: 0.05
+
+relax_inflation_01: {stage: 1}
+relax_inflation_02: {stage: 2}
+relax_inflation_03: {stage: 3}
+relax_inflation_04: {stage: 4}
+relax_inflation_05: {stage: 5}
+relax_inflation_06: {stage: 6}
+relax_inflation_07: {stage: 7}
+relax_inflation_08: {stage: 8}
+relax_inflation_09: {stage: 9}
+relax_inflation_10: {stage: 10}
+relax_inflation_11: {stage: 11}
+relax_inflation_12: {stage: 12}
+relax_inflation_13: {stage: 13}
+relax_inflation_14: {stage: 14}
+relax_inflation_15: {stage: 15}
+relax_inflation_16: {stage: 16}
+relax_inflation_17: {stage: 17}
+relax_inflation_18: {stage: 18}
 
 conservative_reset:
   reset_distance: 1.0

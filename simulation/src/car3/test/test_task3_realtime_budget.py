@@ -216,7 +216,7 @@ class Task3RealtimeBudgetTest(unittest.TestCase):
         self.assertIn("self.destination_nav_attempts", source)
         self.assertIn("attempt_timeout=self.destination_nav_timeout", source)
         self.assertIn("attempts=self.destination_nav_attempts", source)
-        self.assertIn("destination_position_tolerance: 0.05", config)
+        self.assertIn("destination_position_tolerance: 0.08", config)
         self.assertIn("destination_yaw_tolerance: 0.10", config)
         self.assertIn("destination_pose=True", source)
         self.assertNotIn('"visual", "destination region reached"', source)

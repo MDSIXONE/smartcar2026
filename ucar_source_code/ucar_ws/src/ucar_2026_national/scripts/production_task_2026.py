@@ -12,12 +12,14 @@ Flow:
      moving to point 3; then disable QR decoding and start the Python 3 OCR
      helper.  In the default configuration the helper consumes frames saved
      from the ROS usb_cam topic.
-  4. Lock CymPlanner in front-lookahead point mode for the whole mission.
-  5. Navigate each configured production target.  After arrival, turn at most
-     one full revolution while querying OCR.  A candidate stops the turn,
-     passes a fresh-odometry stop gate, then aligns the box and reads the front
-     lidar distance.  A full turn without a candidate proceeds immediately to
-     the next target.
+  4. Lock normal legs to CymPlanner's front-lookahead point mode; use the
+     tighter destination profile only for the final 441 approach.
+  5. Navigate the grouped production targets.  The forward pass tries one
+     reachable point per group; after the last group, it reverse-completes
+     points that were not tried.  After arrival, turn at most one full
+     revolution while querying OCR.  A candidate stops the turn, passes a
+     fresh-odometry stop gate, then aligns the box and reads the front lidar
+     distance.
   6. If the primary route misses a requested category, scan the configured
      fallback perimeter route once.  If a required category remains absent,
      release OCR and continue directly to the 441 handoff destination.
@@ -42,6 +44,7 @@ import threading
 import time
 import httplib
 import urllib2
+from collections import deque
 
 import actionlib
 import cv2
@@ -65,6 +68,7 @@ from production_task_geometry import (
     DEFAULT_FALLBACK_PRODUCTION_ROUTE,
     DEFAULT_PRODUCTION_OBSERVATION_HEADINGS_DEG,
     DEFAULT_PRODUCTION_ROUTE,
+    DEFAULT_PRODUCTION_ROUTE_GROUPS,
     TaskDefinitionError,
     bearing,
     is_finite,
@@ -74,9 +78,11 @@ from production_task_geometry import (
     load_wall_reference_points,
     needs_recenter,
     normalize_angle,
+    normalize_production_route_groups,
     position_error,
     positive_turn_increment,
     require_points,
+    shortest_yaw_delta,
     stop_point_for_wall_point,
 )
 from production_task_perception import (
@@ -87,6 +93,7 @@ from production_task_perception import (
     is_navigation_ocr_candidate,
     nearest_numbered_point,
     normalize_production_category,
+    ocr_detection_bbox_area,
     odom_velocity_is_stopped,
     select_three_processing_observations,
     target_guard_scan_matches,
@@ -125,6 +132,8 @@ class ProductionTask2026(object):
             rospy.get_param("~sprint_end_point_number", 288))
         self.sprint_end_x = rospy.get_param("~sprint_end_x", "")
         self.sprint_end_y = rospy.get_param("~sprint_end_y", "")
+        self.sprint_arrival_tolerance = float(
+            rospy.get_param("~sprint_arrival_tolerance", 0.30))
         self.sprint_end_xy = None
         if (str(self.sprint_end_x).strip() and
                 str(self.sprint_end_y).strip()):
@@ -149,6 +158,10 @@ class ProductionTask2026(object):
                 "~production_route_numbers",
                 DEFAULT_PRODUCTION_ROUTE)
         ]
+        self.production_route_groups = normalize_production_route_groups(
+            rospy.get_param(
+                "~production_route_groups", DEFAULT_PRODUCTION_ROUTE_GROUPS),
+            self.production_route_numbers)
         self.production_observation_headings = [
             math.radians(float(value)) for value in
             rospy.get_param(
@@ -190,7 +203,7 @@ class ProductionTask2026(object):
         self.simulation_start_retries = max(
             1, int(rospy.get_param("~simulation_start_retries", 3)))
         self.simulation_done_timeout = float(rospy.get_param(
-            "~simulation_done_timeout", 120.0))
+            "~simulation_done_timeout", 75.0))
         self.simulation_poll_period = float(rospy.get_param(
             "~simulation_poll_period", 2.0))
         self.speak_wait_timeout = float(rospy.get_param(
@@ -256,10 +269,13 @@ class ProductionTask2026(object):
             "/move_base/global_costmap/inflation_layer"))
         self.global_costmap_inflation_radius_m = float(rospy.get_param(
             "~global_costmap_inflation_radius_m", 0.224))
+        self.pre_point_3_global_costmap_inflation_radius_m = float(
+            rospy.get_param(
+                "~pre_point_3_global_costmap_inflation_radius_m", 0.21))
         self.processing_parking_profile_enabled = bool(rospy.get_param(
             "~processing_parking_profile_enabled", True))
         self.processing_parking_inflation_radius_m = float(
-            rospy.get_param("~processing_parking_inflation_radius_m", 0.05))
+            rospy.get_param("~processing_parking_inflation_radius_m", 0.07))
 
         self.start_delay = float(rospy.get_param("~start_delay", 2.0))
         self.resume_production_only = bool(
@@ -270,12 +286,18 @@ class ProductionTask2026(object):
             rospy.get_param("~safe_start_timeout", 45.0))
         self.plan_timeout = float(rospy.get_param("~plan_timeout", 15.0))
         self.goal_timeout = float(rospy.get_param("~goal_timeout", 90.0))
+        self.target_guard_fallback_timeout = float(rospy.get_param(
+            "~target_guard_fallback_timeout", 25.0))
         self.goal_cancel_timeout = float(
             rospy.get_param("~goal_cancel_timeout", 3.0))
         self.arrival_tolerance = float(
-            rospy.get_param("~arrival_tolerance", 0.10))
+            rospy.get_param("~arrival_tolerance", 0.12))
         self.post_turn_recenter_trigger = float(
             rospy.get_param("~post_turn_recenter_trigger", 0.06))
+        self.navigation_arrival_retry_attempts = max(
+            0, int(rospy.get_param("~navigation_arrival_retry_attempts", 3)))
+        self.continue_on_arrival_error = bool(rospy.get_param(
+            "~continue_on_arrival_error", True))
         self.post_turn_recenter_attempts = max(
             1, int(rospy.get_param("~post_turn_recenter_attempts", 2)))
         self.odom_timeout = float(rospy.get_param("~odom_timeout", 0.35))
@@ -287,7 +309,7 @@ class ProductionTask2026(object):
         # dwell time.  A QR event wakes the scanner immediately.
         self.qr_search_timeout = float(rospy.get_param(
             "~qr_search_timeout",
-            rospy.get_param("~qr_hold_seconds", 4.0)))
+            rospy.get_param("~qr_hold_seconds", 2.0)))
         self.qr_rotation_speed = abs(float(
             rospy.get_param("~qr_rotation_speed", 0.18)))
         self.rotation_control_rate = max(
@@ -359,7 +381,11 @@ class ProductionTask2026(object):
         self.ocr_min_confidence = float(
             rospy.get_param("~ocr_min_confidence", 0.30))
         self.ocr_alignment_tolerance_px = float(
-            rospy.get_param("~ocr_alignment_tolerance_px", 35.0))
+            rospy.get_param("~ocr_alignment_tolerance_px", 30.0))
+        self.ocr_candidate_min_bbox_area_px = float(
+            rospy.get_param(
+                "~ocr_candidate_min_bbox_area_px",
+                500.0))
         self.ocr_alignment_kp = float(
             rospy.get_param("~ocr_alignment_kp", 0.0025))
         self.ocr_alignment_kd = float(
@@ -367,7 +393,7 @@ class ProductionTask2026(object):
         self.ocr_alignment_max_speed = abs(float(
             rospy.get_param("~ocr_alignment_max_speed", 0.22)))
         self.ocr_alignment_attempts = max(
-            1, int(rospy.get_param("~ocr_alignment_attempts", 6)))
+            1, int(rospy.get_param("~ocr_alignment_attempts", 12)))
         self.ocr_alignment_step_seconds = float(
             rospy.get_param("~ocr_alignment_step_seconds", 0.30))
         self.ocr_alignment_yaw_tolerance = float(
@@ -441,6 +467,12 @@ class ProductionTask2026(object):
         self.spark_helper_ready_timeout = float(
             rospy.get_param("~spark_helper_ready_timeout", 10.0))
 
+        arrival_tolerance_values = (
+            self.arrival_tolerance, self.sprint_arrival_tolerance)
+        if (not all(is_finite(value) for value in arrival_tolerance_values) or
+                any(value <= 0.0 for value in arrival_tolerance_values)):
+            raise TaskDefinitionError(
+                "arrival tolerances must be finite and positive")
         if self.qr_rotation_speed <= 0.0:
             raise TaskDefinitionError("qr_rotation_speed must be positive")
         if (not is_finite(self.processing_dwell_seconds) or
@@ -503,6 +535,10 @@ class ProductionTask2026(object):
         if self.ocr_alignment_max_speed <= 0.0:
             raise TaskDefinitionError(
                 "ocr_alignment_max_speed must be positive")
+        if (not is_finite(self.ocr_candidate_min_bbox_area_px) or
+                self.ocr_candidate_min_bbox_area_px <= 0.0):
+            raise TaskDefinitionError(
+                "ocr_candidate_min_bbox_area_px must be positive")
         if (not is_finite(self.ocr_alignment_kp) or
                 self.ocr_alignment_kp <= 0.0):
             raise TaskDefinitionError("ocr_alignment_kp must be positive")
@@ -619,7 +655,14 @@ class ProductionTask2026(object):
             raise TaskDefinitionError(
                 "global_costmap_inflation_radius_m must be finite and "
                 "positive")
+        if (not is_finite(
+                self.pre_point_3_global_costmap_inflation_radius_m) or
+                self.pre_point_3_global_costmap_inflation_radius_m <= 0.0):
+            raise TaskDefinitionError(
+                "pre_point_3_global_costmap_inflation_radius_m must be "
+                "finite and positive")
         self._processing_parking_original_inflation_radius_m = None
+        self._processing_parking_original_global_inflation_radius_m = None
 
         self.move_base = actionlib.SimpleActionClient(
             "move_base", MoveBaseAction)
@@ -664,6 +707,8 @@ class ProductionTask2026(object):
         # scan matcher consumes this API-resolved stream.
         self.api_sequence = 0
         self.latest_api_text = ""
+        self.api_events = deque()
+        self.first_qr_item_by_code = {}
         self.api_event = threading.Event()
         self.mission_started = False
         self.mission_finished = False
@@ -858,9 +903,23 @@ class ProductionTask2026(object):
         item = self.normalize_qr_text(response.get("result", ""))
         if not item:
             return
+        qr_code = self.normalize_qr_text(payload.get("qr_text", ""))
         with self.lock:
+            if qr_code:
+                first_item = self.first_qr_item_by_code.get(qr_code)
+                if first_item is None:
+                    self.first_qr_item_by_code[qr_code] = item
+                elif first_item != item:
+                    rospy.logwarn(
+                        "PRODUCTION_QR_FIRST_ITEM_LOCKED code=%s first=%s "
+                        "later=%s use_first=true",
+                        self.log_safe_text(qr_code),
+                        self.log_safe_text(first_item),
+                        self.log_safe_text(item))
+                    item = first_item
             self.api_sequence += 1
             self.latest_api_text = item
+            self.api_events.append((self.api_sequence, qr_code, item))
         self.api_event.set()
         rospy.loginfo(
             "PRODUCTION_QR_API_EVENT sequence=%d item=%s",
@@ -868,6 +927,11 @@ class ProductionTask2026(object):
 
     def rosout_cb(self, message):
         text = message.msg.lower()
+        if "crc16" in text and "imu" in text:
+            rospy.logwarn_throttle(
+                5.0, "PRODUCTION_IMU_CRC_IGNORED %s",
+                self.log_safe_text(message.msg))
+            return
         if "crc16" in text and "ahrs" in text:
             rospy.logwarn_throttle(
                 5.0, "PRODUCTION_AHRS_CRC_IGNORED %s",
@@ -961,6 +1025,9 @@ class ProductionTask2026(object):
             self.set_local_costmap_dynamic_layers_enabled(
                 True, "resume_after_point_3")
         else:
+            self.set_global_costmap_inflation_radius(
+                self.pre_point_3_global_costmap_inflation_radius_m,
+                "before_point_3")
             self.set_local_costmap_dynamic_layers_enabled(
                 False, "before_point_3")
         # The Spark QR classifier writes into result_directory during the QR
@@ -1021,7 +1088,8 @@ class ProductionTask2026(object):
                 self.navigate_coordinates(
                     sprint_end[0], sprint_end[1], sprint_yaw,
                     sprint_end_label,
-                    require_plan=True)
+                    require_plan=True,
+                    arrival_tolerance_override=self.sprint_arrival_tolerance)
                 self.switch_navigation_mode("point")
                 self.navigate_to(
                     self.staging_point_number, staging_yaw, "STAGING_52")
@@ -1035,6 +1103,8 @@ class ProductionTask2026(object):
             self.wait_for_chassis_stop("camera start before QR sequence")
             self.wait_for_qr_scanner()
             self.start_ros_camera_and_wait("QR sequence")
+            with self.lock:
+                self.api_events.clear()
             self.qr_enable_pub.publish(Int8(data=1))
             if input_mode == "voice":
                 collected_by_category = self.collect_target_qr_codes_by_category(
@@ -1137,18 +1207,20 @@ class ProductionTask2026(object):
         # parks for, or starts, the simulation item.
         categories_to_record = set([real_category, sim_category])
         rospy.loginfo(
-            "PRODUCTION_TARGET_LEGS %s arrival_ocr_turn=360deg "
+            "PRODUCTION_TARGET_GROUPS %s arrival_ocr_turn=360deg "
             "real_category=%s record_categories=%s",
-            self.production_navigation_legs,
+            self.production_route_groups,
             self.log_safe_text(real_category),
             self.log_safe_text(sorted(categories_to_record)))
         self.publish_state("PRODUCTION_CRUISE_1")
-        found_leg_index = self.cruise_production_route(
-            self.production_navigation_legs, 1, real_category, real_item,
-            record_categories=categories_to_record)
+        self.reset_grouped_production_route()
+        grouped_found = self.cruise_grouped_production_route(
+            real_category, real_item, record_categories=categories_to_record)
+        found_leg_index = 0 if grouped_found is not None else None
         active_legs = self.production_navigation_legs
         active_headings = self.production_observation_headings
         active_route_name = "primary"
+        primary_grouped_route = grouped_found is not None
         if found_leg_index is None:
             rospy.loginfo(
                 "PRODUCTION_FALLBACK_TARGET_LEGS %s target_category=%s",
@@ -1178,19 +1250,28 @@ class ProductionTask2026(object):
         # it was not seen, continue from the next unvisited leg only after the
         # real-item announcement has completed.
         if not self.production_category_recorded(sim_category):
-            second_legs = active_legs[found_leg_index + 1:]
-            if second_legs:
+            if primary_grouped_route:
                 rospy.loginfo(
-                    "PRODUCTION_SIM_LEGS route=%s start_leg_index=%d "
-                    "legs=%s target_category=%s",
-                    active_route_name, found_leg_index + 1, second_legs,
+                    "PRODUCTION_SIM_GROUPED_RESUME target_category=%s",
                     self.log_safe_text(sim_category))
                 self.publish_state("PRODUCTION_CRUISE_2")
-                self.cruise_production_route(
-                    second_legs, found_leg_index + 2, sim_category, sim_item,
-                    observation_headings=active_headings,
-                    record_categories=set([sim_category]),
-                    route_name=active_route_name)
+                self.cruise_grouped_production_route(
+                    sim_category, sim_item,
+                    record_categories=set([sim_category]))
+            else:
+                second_legs = active_legs[found_leg_index + 1:]
+                if second_legs:
+                    rospy.loginfo(
+                        "PRODUCTION_SIM_LEGS route=%s start_leg_index=%d "
+                        "legs=%s target_category=%s",
+                        active_route_name, found_leg_index + 1, second_legs,
+                        self.log_safe_text(sim_category))
+                    self.publish_state("PRODUCTION_CRUISE_2")
+                    self.cruise_production_route(
+                        second_legs, found_leg_index + 2, sim_category, sim_item,
+                        observation_headings=active_headings,
+                        record_categories=set([sim_category]),
+                        route_name=active_route_name)
         if (not self.production_category_recorded(sim_category) and
                 active_route_name == "primary"):
             rospy.loginfo(
@@ -1216,7 +1297,7 @@ class ProductionTask2026(object):
         self.save_observation_summary()
 
         self.publish_state("SIMULATION_START")
-        # /start 失败时也进入 /status 兜底轮询，simulation_done_timeout（120s）到期后继续任务（与 08-14 的超时继续语义一致）
+        # /start 失败时也进入 /status 兜底轮询，simulation_done_timeout（75s）到期后继续任务（与 08-14 的超时继续语义一致）
         self.simulation_request_start(sim_item, sim_category)
         self.publish_state("SIMULATION_WAIT_DONE")
         simulation_completed = self.simulation_wait_done()
@@ -1279,6 +1360,7 @@ class ProductionTask2026(object):
                      for value in self.destination_midpoint_point_numbers)
             if self.destination_midpoint_point_numbers
             else "DESTINATION_%d" % self.destination_point_number)
+        self.switch_to_destination_mode()
         self.navigate_coordinates(
             destination[0], destination[1], destination_yaw,
             "destination %s" % destination_label,
@@ -1630,19 +1712,21 @@ class ProductionTask2026(object):
         return (None, rejected) if report_rejection else None
 
     def fresh_qr_after(self, baseline):
-        """First API-resolved item name published at or after the baseline.
+        """Return the next queued API-resolved item name.
 
-        ``baseline`` is the api_sequence captured before facing a QR point;
-        the returned value is the resolved item name (never the raw URL).
+        The scanner can publish multiple QR results for one camera frame.  A
+        FIFO queue preserves all of them; ``baseline`` remains in the method
+        signature for the turn/search callers but no longer selects only the
+        latest result.  Repeated item names are consumed and skipped.
         """
         with self.lock:
-            sequence = self.api_sequence
-            text = self.latest_api_text
-        if sequence <= baseline or not text:
-            return None
-        if self.require_distinct_qr_codes and text in self.used_qr_codes:
-            return None
-        return text
+            while self.api_events:
+                _sequence, _qr_code, text = self.api_events.popleft()
+                if (self.require_distinct_qr_codes and
+                        text in self.used_qr_codes):
+                    continue
+                return text
+        return None
 
     def prepare_result_directory(self):
         if self.run_directory is not None:
@@ -1928,6 +2012,8 @@ class ProductionTask2026(object):
         return response
 
     def save_latest_ros_camera_frame(self, image_path):
+        with self.lock:
+            baseline_sequence = self.camera_sequence
         deadline = (
             rospy.Time.now() +
             rospy.Duration(self.camera_frame_timeout))
@@ -1935,9 +2021,11 @@ class ProductionTask2026(object):
         while not rospy.is_shutdown() and rospy.Time.now() < deadline:
             self.require_safe()
             with self.lock:
+                sequence = self.camera_sequence
                 receipt = self.latest_camera_receipt
                 candidate = self.latest_camera_image
             if (
+                    sequence > baseline_sequence and
                     candidate is not None and receipt is not None and
                     (rospy.Time.now() - receipt).to_sec() <=
                     self.camera_frame_timeout):
@@ -2428,7 +2516,7 @@ class ProductionTask2026(object):
         failures retry up to
         simulation_start_retries before returning False, letting the caller
         fall back to /status polling in simulation_wait_done (whose
-        simulation_done_timeout of 120 s keeps the mission moving).
+        simulation_done_timeout of 75 s keeps the mission moving).
         """
         url = "http://%s:%d/start" % (
             self.simulation_host, self.simulation_port)
@@ -2980,6 +3068,69 @@ class ProductionTask2026(object):
             (context, self.stopped_odom_samples,
              self.stop_confirmation_timeout))
 
+    def rotate_in_place_to_yaw(self, target_yaw, context):
+        """Turn a same-position goal through the measured shortest yaw arc."""
+        self.move_base.cancel_all_goals()
+        self.stop_motion()
+        self.require_safe()
+        self.wait_for_chassis_stop(context + " start")
+        previous_yaw = self.current_odom_yaw(context + " start")
+        target_delta = shortest_yaw_delta(previous_yaw, target_yaw)
+        target_progress = abs(target_delta)
+        required_progress = max(
+            0.0, target_progress - self.rotation_completion_tolerance)
+        if required_progress <= 0.0:
+            return
+
+        direction = 1.0 if target_delta > 0.0 else -1.0
+        speed = self.qr_rotation_speed * direction
+        timeout = (
+            target_progress / abs(speed) * self.rotation_timeout_scale + 2.0)
+        deadline = rospy.Time.now() + rospy.Duration(timeout)
+        progress = 0.0
+        rate = rospy.Rate(self.rotation_control_rate)
+        command = Twist()
+        command.angular.z = speed
+        try:
+            while not rospy.is_shutdown() and rospy.Time.now() < deadline:
+                self.require_safe()
+                current_yaw = self.current_odom_yaw(context)
+                progress += positive_turn_increment(
+                    previous_yaw, current_yaw, direction)
+                previous_yaw = current_yaw
+                if progress >= required_progress:
+                    self.stop_motion()
+                    self.wait_for_chassis_stop(context + " complete")
+                    rospy.loginfo(
+                        "PRODUCTION_QR_FACE_TURN context=%s "
+                        "target_yaw=%.3f direction=%s requested=%.3f "
+                        "actual=%.3f",
+                        context, target_yaw,
+                        "ccw" if direction > 0.0 else "cw",
+                        target_progress, progress)
+                    return
+                self.cmd_vel_pub.publish(command)
+                rate.sleep()
+        finally:
+            self.stop_motion()
+
+        self.wait_for_chassis_stop(context + " timeout settle")
+        final_yaw = self.current_odom_yaw(context + " timeout settle")
+        progress += positive_turn_increment(
+            previous_yaw, final_yaw, direction)
+        if progress >= required_progress:
+            rospy.loginfo(
+                "PRODUCTION_QR_FACE_TURN context=%s target_yaw=%.3f "
+                "direction=%s requested=%.3f actual=%.3f settled=true",
+                context, target_yaw,
+                "ccw" if direction > 0.0 else "cw",
+                target_progress, progress)
+            return
+        raise MissionAbort(
+            "%s did not reach target yaw %.3f within %.1f s "
+            "(requested=%.3f actual=%.3f)" %
+            (context, target_yaw, timeout, target_progress, progress))
+
     def cancel_navigation_for_observation(self, context):
         """Cancel only this task's active goal and prove the chassis stopped."""
         status_before_cancel = self.move_base.get_state()
@@ -3049,23 +3200,39 @@ class ProductionTask2026(object):
             self, leg_index, start_number, end_number, target_yaw,
             target_category=None, record_categories=None,
             route_name="primary", route_leg_count=None,
-            next_target_number=None):
-        """Guard one target leg, then scan only if that target was reached."""
-        target = self.points[end_number]
+            next_target_number=None, navigation_point_number=None,
+            guard_points_override=None, fallback_navigation=False):
+        """Guard one logical target leg, then scan its selected pose.
+
+        ``navigation_point_number`` can select a clear corner pose while
+        ``end_number`` remains the logical production target.
+        """
+        navigation_number = int(
+            navigation_point_number
+            if navigation_point_number is not None else end_number)
+        target = self.points[navigation_number]
         label = "PRODUCTION_TARGET_%03d" % end_number
+        self.last_target_guard_fallback_candidates = []
         if route_leg_count is None:
             route_leg_count = len(self.production_navigation_legs)
         self.publish_state(label)
         rospy.loginfo(
             "PRODUCTION_TARGET_GOAL route=%s index=%d/%d start=%d end=%d "
-            "target=(%.3f, %.3f) yaw=%.3f",
+            "navigation_point=%d target=(%.3f, %.3f) yaw=%.3f",
             route_name, leg_index, route_leg_count,
-            start_number, end_number, target[0], target[1], target_yaw)
-        monitor = self.new_target_guard_monitor(end_number)
+            start_number, end_number, navigation_number,
+            target[0], target[1], target_yaw)
+        if guard_points_override is None:
+            monitor = self.new_target_guard_monitor(end_number)
+        else:
+            monitor = self.new_target_guard_monitor(
+                end_number, guard_points_override)
         guard_number = self.wait_for_target_guard_precheck(monitor)
         if guard_number is not None:
             self.stop_motion()
             self.wait_for_chassis_stop(label + " target guard before goal")
+            self.last_target_guard_fallback_candidates = (
+                self.target_guard_fallback_candidates(end_number, monitor))
             self.record_target_guard_skip(
                 leg_index, start_number, end_number, guard_number,
                 "before_goal", monitor, route_name, next_target_number)
@@ -3085,8 +3252,13 @@ class ProductionTask2026(object):
 
         reached = self.navigate_coordinates(
             target[0], target[1], target_yaw, label, require_plan=True,
+            abort_on_navigation_failure=not fallback_navigation,
+            goal_timeout=(self.target_guard_fallback_timeout
+                          if fallback_navigation else None),
             guard_callback=guard_callback)
         if navigation_guard["number"] is not None:
+            self.last_target_guard_fallback_candidates = (
+                self.target_guard_fallback_candidates(end_number, monitor))
             self.record_target_guard_skip(
                 leg_index, start_number, end_number,
                 navigation_guard["number"], "during_navigation", monitor,
@@ -3097,11 +3269,228 @@ class ProductionTask2026(object):
                 "%s target guard scan became unavailable during navigation" %
                 label)
         if not reached:
+            if fallback_navigation:
+                rospy.logwarn(
+                    "PRODUCTION_TARGET_FALLBACK_NAVIGATION_FAILED "
+                    "target=%d navigation_point=%d",
+                    end_number, navigation_number)
+                return "target_navigation_failed"
             raise MissionAbort("%s did not reach target" % label)
         self.scan_production_point(
             leg_index, start_number, end_number, label,
             target_category=target_category,
             record_categories=record_categories)
+
+    def target_guard_fallback_candidates(self, target_number, monitor):
+        """Return target vertices not hit by the latest guard scan."""
+        guard_points = monitor.get("guard_points")
+        if guard_points is None:
+            guard_points = getattr(self, "target_guard_points", {}).get(
+                int(target_number), {})
+        blocked = set(monitor.get("hit_counts", {}).keys())
+        return [
+            number for number in sorted(guard_points)
+            if number not in blocked]
+
+    def reset_grouped_production_route(self):
+        """Reset the forward-group and reverse-completion OCR scheduler."""
+        configured_groups = getattr(self, "production_route_groups", None)
+        if configured_groups is None:
+            configured_groups = [list(self.production_route_numbers)]
+        self.grouped_route_groups = [list(group) for group in configured_groups]
+        self.grouped_point_states = dict(
+            (int(number), "untried")
+            for group in self.grouped_route_groups
+            for number in group)
+        self.grouped_route_phase = "forward"
+        self.grouped_forward_group_index = 0
+        self.grouped_forward_candidate_index = 0
+        self.grouped_reverse_group_index = len(self.grouped_route_groups) - 1
+        self.grouped_reverse_candidate_index = 0
+        self.grouped_current_point_number = int(
+            getattr(self, "post_qr_waypoint_number", 0) or
+            getattr(self, "staging_point_number", 52))
+        self.grouped_route_attempt_index = 0
+
+    def grouped_observation_heading(self, point_number):
+        """Return the OCR heading configured for a target point."""
+        try:
+            route_index = self.production_route_numbers.index(int(point_number))
+        except ValueError:
+            raise MissionAbort(
+                "grouped OCR point %d is absent from production route" %
+                int(point_number))
+        return self.production_observation_headings[route_index]
+
+    def next_grouped_production_target(self):
+        """Return and advance the next target in the current group phase."""
+        while True:
+            if self.grouped_route_phase == "forward":
+                while (self.grouped_forward_group_index <
+                       len(self.grouped_route_groups)):
+                    group = self.grouped_route_groups[
+                        self.grouped_forward_group_index]
+                    while (self.grouped_forward_candidate_index <
+                           len(group)):
+                        point_number = group[self.grouped_forward_candidate_index]
+                        self.grouped_forward_candidate_index += 1
+                        if (self.grouped_point_states[point_number] ==
+                                "untried"):
+                            return ("forward",
+                                    self.grouped_forward_group_index,
+                                    point_number)
+                    self.grouped_forward_group_index += 1
+                    self.grouped_forward_candidate_index = 0
+                self.grouped_route_phase = "reverse"
+                continue
+
+            while self.grouped_reverse_group_index >= 0:
+                group = self.grouped_route_groups[
+                    self.grouped_reverse_group_index]
+                while (self.grouped_reverse_candidate_index < len(group)):
+                    point_number = group[self.grouped_reverse_candidate_index]
+                    self.grouped_reverse_candidate_index += 1
+                    if self.grouped_point_states[point_number] == "untried":
+                        return ("reverse",
+                                self.grouped_reverse_group_index,
+                                point_number)
+                self.grouped_reverse_group_index -= 1
+                self.grouped_reverse_candidate_index = 0
+            return None
+
+    def peek_grouped_production_target(self):
+        """Return the next untried point without advancing the scheduler."""
+        phase = self.grouped_route_phase
+        if phase == "forward":
+            for group_index in range(
+                    self.grouped_forward_group_index,
+                    len(self.grouped_route_groups)):
+                group = self.grouped_route_groups[group_index]
+                first = (self.grouped_forward_candidate_index
+                         if group_index == self.grouped_forward_group_index
+                         else 0)
+                for point_number in group[first:]:
+                    if self.grouped_point_states[point_number] == "untried":
+                        return point_number
+            phase = "reverse"
+        if phase == "reverse":
+            for group_index in range(
+                    self.grouped_reverse_group_index, -1, -1):
+                group = self.grouped_route_groups[group_index]
+                first = (self.grouped_reverse_candidate_index
+                         if group_index == self.grouped_reverse_group_index
+                         else 0)
+                for point_number in group[first:]:
+                    if self.grouped_point_states[point_number] == "untried":
+                        return point_number
+        return None
+
+    def try_grouped_target_guard_fallback(
+            self, phase, group_index, point_number, start_number,
+            target_yaw, target_category, record_categories, next_point,
+            candidates):
+        """Try clear corner poses around a guard-blocked grouped target."""
+        remaining = list(candidates)
+        target_guard_points = self.target_guard_points[point_number]
+        while remaining:
+            candidate = remaining.pop(0)
+            candidate_points = [candidate] + remaining
+            guard_points = dict(
+                (number, target_guard_points[number])
+                for number in candidate_points
+                if number in target_guard_points)
+            self.grouped_route_attempt_index += 1
+            rospy.loginfo(
+                "PRODUCTION_TARGET_GUARD_FALLBACK target=%d "
+                "navigation_point=%d clear_points=%s phase=%s group=%d",
+                point_number, candidate, sorted(guard_points), phase,
+                group_index + 1)
+            outcome = self.navigate_target_and_scan(
+                self.grouped_route_attempt_index, start_number, point_number,
+                target_yaw=target_yaw,
+                target_category=target_category,
+                record_categories=record_categories,
+                route_name="primary_grouped_%s_corner" % phase,
+                route_leg_count=len(self.production_route_numbers),
+                next_target_number=next_point,
+                navigation_point_number=candidate,
+                guard_points_override=guard_points,
+                fallback_navigation=True)
+            if outcome == "target_navigation_failed":
+                rospy.logwarn(
+                    "PRODUCTION_TARGET_GUARD_FALLBACK_NEXT target=%d "
+                    "failed_navigation_point=%d remaining=%s",
+                    point_number, candidate, remaining)
+                continue
+            if outcome != "target_guard_skipped":
+                return outcome
+            fresh_candidates = getattr(
+                self, "last_target_guard_fallback_candidates", [])
+            remaining = [
+                number for number in remaining
+                if number in fresh_candidates]
+        return "target_guard_skipped"
+
+    def cruise_grouped_production_route(
+            self, target_category, target_item, record_categories=None):
+        """Run grouped OCR forward, then reverse through every pending point."""
+        if not hasattr(self, "grouped_route_phase"):
+            self.reset_grouped_production_route()
+        base_observation_count = len(self.observations)
+        while True:
+            next_target = self.next_grouped_production_target()
+            if next_target is None:
+                rospy.loginfo(
+                    "PRODUCTION_GROUPED_ROUTE_EXHAUSTED target_category=%s "
+                    "states=%s",
+                    self.log_safe_text(target_category),
+                    self.grouped_point_states)
+                return None
+            phase, group_index, point_number = next_target
+            self.grouped_route_attempt_index += 1
+            start_number = self.grouped_current_point_number
+            next_point = self.peek_grouped_production_target()
+            rospy.loginfo(
+                "PRODUCTION_GROUPED_TARGET phase=%s group=%d point=%d "
+                "start=%d next=%s attempt=%d/%d",
+                phase, group_index + 1, point_number, start_number,
+                str(next_point), self.grouped_route_attempt_index,
+                len(self.production_route_numbers))
+            outcome = self.navigate_target_and_scan(
+                self.grouped_route_attempt_index, start_number, point_number,
+                target_yaw=self.grouped_observation_heading(point_number),
+                target_category=target_category,
+                record_categories=record_categories,
+                route_name="primary_grouped_%s" % phase,
+                route_leg_count=len(self.production_route_numbers),
+                next_target_number=next_point)
+            if outcome == "target_guard_skipped":
+                outcome = self.try_grouped_target_guard_fallback(
+                    phase, group_index, point_number, start_number,
+                    self.grouped_observation_heading(point_number),
+                    target_category, record_categories, next_point,
+                    getattr(self, "last_target_guard_fallback_candidates", []))
+            if outcome == "target_guard_skipped":
+                self.grouped_point_states[point_number] = "ignored"
+                rospy.loginfo(
+                    "PRODUCTION_GROUPED_POINT_IGNORED phase=%s group=%d "
+                    "point=%d",
+                    phase, group_index + 1, point_number)
+                continue
+
+            self.grouped_point_states[point_number] = "scanned"
+            self.grouped_current_point_number = point_number
+            if phase == "forward":
+                self.grouped_forward_group_index = group_index + 1
+                self.grouped_forward_candidate_index = 0
+            if (len(self.observations) > base_observation_count and
+                    self.production_category_recorded(target_category)):
+                rospy.loginfo(
+                    "PRODUCTION_GROUPED_CATEGORY_FOUND point=%d "
+                    "category=%s item=%s phase=%s group=%d",
+                    point_number, self.log_safe_text(target_category),
+                    self.log_safe_text(target_item), phase, group_index + 1)
+                return self.grouped_route_attempt_index - 1
 
     def cruise_production_route(self, legs, start_segment_index,
                                 target_category, target_item,
@@ -3157,18 +3546,35 @@ class ProductionTask2026(object):
         stop_x, stop_y = stop_point_for_wall_point(
             intersection, self.ocr_stop_offset_m,
             self.middle_zone_bounds)
+        # Park with the chassis front facing the measured wall intersection.
         parking_yaw = normalize_angle(
-            bearing((stop_x, stop_y), intersection) + math.pi)
+            bearing((stop_x, stop_y), intersection))
         self.publish_state("PROCESSING_STOP_%03d" % wall_number)
         rospy.loginfo(
             "PRODUCTION_PROCESSING_STOP wall_point=%d wall_coordinate=%s "
             "intersection=%s stop=%.3f,%.3f item=%s",
             wall_number, wall_coordinate, intersection, stop_x, stop_y,
             self.log_safe_text(item))
+        route_point_number = observation["route_point_number"]
+        ocr_aligned_pose = observation["ocr_aligned_pose_map"]
         parking_profile_enabled = getattr(
             self, "processing_parking_profile_enabled", False)
         try:
             if parking_profile_enabled:
+                self.publish_state(
+                    "PROCESSING_APPROACH_%03d" % route_point_number)
+                rospy.loginfo(
+                    "PRODUCTION_PROCESSING_APPROACH route_point=%d "
+                    "target=(%.3f,%.3f) yaw=%.3f item=%s "
+                    "inflation=normal",
+                    route_point_number, ocr_aligned_pose[0],
+                    ocr_aligned_pose[1], ocr_aligned_pose[2],
+                    self.log_safe_text(item))
+                self.navigate_coordinates(
+                    ocr_aligned_pose[0], ocr_aligned_pose[1],
+                    ocr_aligned_pose[2],
+                    "processing observation point %d" % route_point_number,
+                    require_plan=True)
                 self.enter_processing_parking_profile()
             self.navigate_coordinates(
                 stop_x, stop_y, parking_yaw,
@@ -3188,15 +3594,20 @@ class ProductionTask2026(object):
             self.speak_wait(u"已将%s放入%s" % (item, category))
         return observation
 
-    def new_target_guard_monitor(self, target_number):
+    def new_target_guard_monitor(self, target_number, guard_points=None):
         """Start a new guard epoch; old scans may not affect a new target."""
         target_number = int(target_number)
-        guard_enabled = target_number in self.target_guard_points
+        if guard_points is None:
+            guard_points = getattr(self, "target_guard_points", {}).get(
+                target_number, {})
+        else:
+            guard_points = dict(guard_points)
+        guard_enabled = bool(guard_points)
         if not guard_enabled:
-            # The four-point static guard is defined only for inner production
+            # The four-point static guard is defined for middle production
+            # targets, including the side-wall vertices used by boundary
             # cells.  Perimeter fallback cells keep the normal task safety
-            # gate and move_base obstacle layers, but cannot be projected onto
-            # non-existent middle-line endpoint labels.
+            # gate and move_base obstacle layers without a target-cell guard.
             rospy.logwarn(
                 "PRODUCTION_TARGET_GUARD_UNAVAILABLE target=%d "
                 "using navigation safety layers", target_number)
@@ -3204,6 +3615,7 @@ class ProductionTask2026(object):
             sequence = self.target_guard_scan_sequence
         return {
             "target_number": target_number,
+            "guard_points": guard_points,
             "guard_enabled": guard_enabled,
             "last_sequence": sequence,
             "usable_scan_seen": False,
@@ -3278,7 +3690,7 @@ class ProductionTask2026(object):
         monitor["last_usable_receipt"] = receipt
         matches = target_guard_scan_matches(
             scan, laser_pose,
-            self.target_guard_points[monitor["target_number"]],
+            monitor["guard_points"],
             self.target_guard_match_radius)
         hit_counts = monitor["hit_counts"]
         for number in list(hit_counts):
@@ -3343,11 +3755,12 @@ class ProductionTask2026(object):
             monitor, route_name="primary", next_target_number=None):
         """Audit a guard decision before the outer route advances one leg."""
         stamp = monitor.get("last_scan_stamp")
+        guard_points = monitor.get("guard_points", {})
         event = {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "target_point_number": int(end_number),
             "guard_point_number": int(guard_number),
-            "guard_point_numbers": sorted(self.target_guard_points[end_number]),
+            "guard_point_numbers": sorted(guard_points),
             "route_name": str(route_name),
             "segment_index": int(leg_index),
             "segment_start_point_number": int(start_number),
@@ -3375,6 +3788,27 @@ class ProductionTask2026(object):
             (str(next_target_number)
              if next_target_number is not None else "none"))
         self.save_observation_summary()
+
+    def log_small_ocr_candidate(
+            self, response, context, minimum_confidence):
+        """Explain why a visible but too-small OCR box was skipped."""
+        if not isinstance(response, dict):
+            return
+        detection = response.get("detection")
+        if not isinstance(detection, dict):
+            return
+        text = (detection.get("text") or "").strip()
+        confidence = float(detection.get("confidence", -1.0))
+        area = ocr_detection_bbox_area(detection)
+        if (not text or confidence < float(minimum_confidence) or
+                area >= self.ocr_candidate_min_bbox_area_px):
+            return
+        rospy.loginfo(
+            "PRODUCTION_OCR_CANDIDATE_IGNORED_SMALL context=%s text=%s "
+            "confidence=%.1f bbox=%s area_px=%.1f threshold_px=%.1f",
+            context, json.dumps(text, ensure_ascii=True), confidence,
+            self.log_safe_text(detection.get("bbox")), area,
+            self.ocr_candidate_min_bbox_area_px)
 
     def scan_production_point(
             self, leg_index, start_number, point_number, target_label,
@@ -3609,8 +4043,11 @@ class ProductionTask2026(object):
                     completed_task = capture_task
                     capture_task = None
                     response = self.finish_async_motion_ocr(completed_task)
+                    self.log_small_ocr_candidate(
+                        response, label, self.ocr_scan_candidate_confidence)
                     if is_navigation_ocr_candidate(
-                            response, self.ocr_scan_candidate_confidence):
+                            response, self.ocr_scan_candidate_confidence,
+                            self.ocr_candidate_min_bbox_area_px):
                         rospy.loginfo(
                             "PRODUCTION_OCR_TURN_CANDIDATE label=%s "
                             "progress=%.3f text=%s confidence=%.1f",
@@ -3649,9 +4086,13 @@ class ProductionTask2026(object):
                         capture_task = None
                         response = self.finish_async_motion_ocr(
                             completed_task, keep_stopped=True)
+                        self.log_small_ocr_candidate(
+                            response, label,
+                            self.ocr_scan_candidate_confidence)
                         if is_navigation_ocr_candidate(
                                 response,
-                                self.ocr_scan_candidate_confidence):
+                                self.ocr_scan_candidate_confidence,
+                                self.ocr_candidate_min_bbox_area_px):
                             rospy.loginfo(
                                 "PRODUCTION_OCR_TURN_FINAL_CANDIDATE "
                                 "label=%s progress=%.3f", label, progress)
@@ -3780,7 +4221,11 @@ class ProductionTask2026(object):
                             continue
                         if not is_navigation_ocr_candidate(
                                 response,
-                                self.navigation_ocr_candidate_confidence):
+                                self.navigation_ocr_candidate_confidence,
+                                self.ocr_candidate_min_bbox_area_px):
+                            self.log_small_ocr_candidate(
+                                response, label,
+                                self.navigation_ocr_candidate_confidence)
                             self.discard_unmatched_motion_frame(response)
                             continue
 
@@ -4024,6 +4469,14 @@ class ProductionTask2026(object):
 
         self.wait_for_chassis_stop(
             observation_label + " before lidar")
+        ocr_aligned_pose = self.current_map_pose(
+            observation_label + " OCR aligned pose")
+        observation["ocr_aligned_pose_map"] = list(ocr_aligned_pose)
+        rospy.loginfo(
+            "PRODUCTION_OCR_ALIGNED_POSE point=%d "
+            "pose=(%.3f,%.3f,%.3f)",
+            route_point_number, ocr_aligned_pose[0], ocr_aligned_pose[1],
+            ocr_aligned_pose[2])
         scan, distance = self.wait_for_fresh_front_distance()
         laser_pose = self.laser_map_pose(scan)
         if candidate_wall_points is None:
@@ -4115,6 +4568,9 @@ class ProductionTask2026(object):
             return
         payload = {
             "route": self.production_route_numbers,
+            "route_groups": getattr(self, "production_route_groups", []),
+            "grouped_point_states": dict(
+                getattr(self, "grouped_point_states", {})),
             "target_legs": self.production_navigation_legs,
             "fallback_route": getattr(
                 self, "fallback_production_route_numbers", []),
@@ -4149,6 +4605,10 @@ class ProductionTask2026(object):
         """Lock all task navigation legs to CymPlanner's front point mode."""
         self.switch_navigation_mode("point")
 
+    def switch_to_destination_mode(self):
+        """Use the tighter CymPlanner profile only for the 441 approach."""
+        self.switch_navigation_mode("destination")
+
     def switch_navigation_mode(self, mode):
         """Switch the CymPlanner parameter set at runtime.
 
@@ -4156,7 +4616,7 @@ class ProductionTask2026(object):
         leg).  The latched command is repeated so delivery is observable and
         robust to a connection that completed at the edge of the wait loop.
         """
-        if mode not in ("point", "sprint", "transverse"):
+        if mode not in ("point", "destination", "sprint", "transverse"):
             raise TaskDefinitionError(
                 "unsupported navigation mode %r" % mode)
         self.publish_state("SET_%s_NAVIGATION_MODE" % mode.upper())
@@ -4205,7 +4665,7 @@ class ProductionTask2026(object):
         return applied
 
     def set_global_costmap_inflation_radius(self, radius, stage):
-        """Apply and verify the persistent post-point-3 global inflation."""
+        """Apply and verify the phase-specific global inflation radius."""
         if not getattr(self, "local_costmap_layer_control_enabled", False):
             raise MissionAbort(
                 "global costmap inflation control is required for %s" % stage)
@@ -4232,51 +4692,75 @@ class ProductionTask2026(object):
         return applied
 
     def enter_processing_parking_profile(self):
-        """Reduce local inflation for wall parking while keeping point mode."""
-        if self._processing_parking_original_inflation_radius_m is not None:
+        """Reduce local/global inflation for wall parking while keeping point mode."""
+        if (self._processing_parking_original_inflation_radius_m is not None or
+                self._processing_parking_original_global_inflation_radius_m is not None):
             raise MissionAbort("processing parking profile is already active")
         if not getattr(self, "local_costmap_layer_control_enabled", False):
             raise MissionAbort(
                 "processing parking profile requires local costmap control")
         try:
-            client = DynamicReconfigureClient(
+            local_client = DynamicReconfigureClient(
                 self.local_costmap_inflation_layer,
                 timeout=self.local_costmap_reconfigure_timeout)
-            current = client.get_configuration()
-            original_radius = float(current["inflation_radius"])
+            global_client = DynamicReconfigureClient(
+                self.global_costmap_inflation_layer,
+                timeout=self.local_costmap_reconfigure_timeout)
+            local_configuration = local_client.get_configuration()
+            global_configuration = global_client.get_configuration()
+            original_radius = float(local_configuration["inflation_radius"])
+            original_global_radius = float(
+                global_configuration["inflation_radius"])
         except Exception as exc:
             raise MissionAbort(
-                "cannot read local inflation radius before processing "
+                "cannot read local/global inflation radii before processing "
                 "parking: %s" % exc)
         self._processing_parking_original_inflation_radius_m = original_radius
+        self._processing_parking_original_global_inflation_radius_m = (
+            original_global_radius)
         try:
             self.set_local_costmap_inflation_radius(
                 self.processing_parking_inflation_radius_m,
                 "processing_parking_enter")
+            self.set_global_costmap_inflation_radius(
+                self.processing_parking_inflation_radius_m,
+                "processing_parking_enter")
             self.switch_to_point_mode()
             rospy.loginfo(
-                "PRODUCTION_PROCESSING_PROFILE entered inflation=%.3f "
+                "PRODUCTION_PROCESSING_PROFILE entered "
+                "local_inflation=%.3f global_inflation=%.3f "
                 "navigation_mode=point",
+                self.processing_parking_inflation_radius_m,
                 self.processing_parking_inflation_radius_m)
         except Exception:
             self.exit_processing_parking_profile()
             raise
 
     def exit_processing_parking_profile(self):
-        """Restore normal inflation and point-mode navigation."""
+        """Restore local/global inflation and point-mode navigation."""
         original_radius = (
             self._processing_parking_original_inflation_radius_m)
-        if original_radius is None:
+        original_global_radius = (
+            self._processing_parking_original_global_inflation_radius_m)
+        if original_radius is None and original_global_radius is None:
             return
+        if original_radius is None or original_global_radius is None:
+            raise MissionAbort(
+                "processing parking profile restore state is incomplete")
         try:
             self.set_local_costmap_inflation_radius(
                 original_radius, "processing_parking_exit")
+            self.set_global_costmap_inflation_radius(
+                original_global_radius, "processing_parking_exit")
             self.switch_to_point_mode()
             rospy.loginfo(
-                "PRODUCTION_PROCESSING_PROFILE exited inflation=%.3f "
-                "navigation_mode=point", original_radius)
+                "PRODUCTION_PROCESSING_PROFILE exited "
+                "local_inflation=%.3f global_inflation=%.3f "
+                "navigation_mode=point", original_radius,
+                original_global_radius)
         finally:
             self._processing_parking_original_inflation_radius_m = None
+            self._processing_parking_original_global_inflation_radius_m = None
 
     def set_local_costmap_dynamic_layers_enabled(self, enabled, stage):
         """Toggle local lidar obstacles and their inflation as one stage."""
@@ -4471,8 +4955,21 @@ class ProductionTask2026(object):
     def navigate_coordinates(
             self, x_value, y_value, yaw, label, require_plan,
             abort_on_navigation_failure=True,
-            require_action_success=False, guard_callback=None):
+            require_action_success=False, guard_callback=None,
+            arrival_tolerance_override=None, goal_timeout=None):
         self.require_safe()
+        arrival_tolerance = self.arrival_tolerance
+        if arrival_tolerance_override is not None:
+            arrival_tolerance = float(arrival_tolerance_override)
+            if not is_finite(arrival_tolerance) or arrival_tolerance <= 0.0:
+                raise TaskDefinitionError(
+                    "arrival_tolerance_override must be finite and positive")
+        if not require_plan:
+            current = self.current_map_pose(label + " same-position check")
+            if position_error(current, (x_value, y_value)) <= self.arrival_tolerance:
+                self.rotate_in_place_to_yaw(
+                    yaw, label + " shortest same-position rotation")
+                return True
         if require_plan:
             plan_available = self.wait_for_plan(
                 x_value, y_value, yaw, label,
@@ -4480,76 +4977,105 @@ class ProductionTask2026(object):
             if not plan_available:
                 return False
 
-        goal = MoveBaseGoal()
-        goal.target_pose = self.map_pose(x_value, y_value, yaw)
-        rospy.loginfo(
-            "PRODUCTION_TASK_GOAL label=%s target=(%.3f, %.3f) yaw=%.3f",
-            label, x_value, y_value, yaw)
-        self.move_base.send_goal(goal)
-        deadline = rospy.Time.now() + rospy.Duration(self.goal_timeout)
-        while not rospy.is_shutdown() and rospy.Time.now() < deadline:
-            self.require_safe()
-            if guard_callback is not None and guard_callback():
-                # Do not act from a subscriber callback: cancel, zero speed,
-                # action acknowledgement and stopped-odom confirmation must
-                # remain serialised in the navigation supervisor.
-                self.cancel_navigation_for_observation(
-                    label + " target guard")
-                return False
-            if self.move_base.wait_for_result(rospy.Duration(0.1)):
-                break
-        else:
-            self.move_base.cancel_goal()
+        navigation_timeout = (
+            self.goal_timeout if goal_timeout is None else float(goal_timeout))
+        retry_limit = self.navigation_arrival_retry_attempts
+        for attempt in range(retry_limit + 1):
+            goal = MoveBaseGoal()
+            goal.target_pose = self.map_pose(x_value, y_value, yaw)
+            rospy.loginfo(
+                "PRODUCTION_TASK_GOAL label=%s target=(%.3f, %.3f) "
+                "yaw=%.3f attempt=%d/%d",
+                label, x_value, y_value, yaw, attempt + 1, retry_limit + 1)
+            self.move_base.send_goal(goal)
+            deadline = rospy.Time.now() + rospy.Duration(navigation_timeout)
+            while not rospy.is_shutdown() and rospy.Time.now() < deadline:
+                self.require_safe()
+                if guard_callback is not None and guard_callback():
+                    # Do not act from a subscriber callback: cancel, zero
+                    # speed, action acknowledgement and stopped-odom
+                    # confirmation remain serialised in the supervisor.
+                    self.cancel_navigation_for_observation(
+                        label + " target guard")
+                    return False
+                if self.move_base.wait_for_result(rospy.Duration(0.1)):
+                    break
+            else:
+                self.move_base.cancel_goal()
+                self.stop_motion()
+                if not abort_on_navigation_failure:
+                    rospy.logwarn(
+                        "PRODUCTION_TASK_NAVIGATION_WARNING label=%s "
+                        "timed out after %.1f s; continuing mission",
+                        label, navigation_timeout)
+                    return False
+                raise MissionAbort(
+                    "%s timed out after %.1f s" %
+                    (label, navigation_timeout))
+
+            status = self.move_base.get_state()
+            if status != GoalStatus.SUCCEEDED:
+                self.stop_motion()
+                if require_action_success:
+                    raise MissionAbort(
+                        "%s requires move_base success but ended with "
+                        "status %d" % (label, status))
+                pose = self.current_map_pose(label + " aborted arrival")
+                arrival_error = position_error(pose, (x_value, y_value))
+                if arrival_error <= arrival_tolerance:
+                    rospy.logwarn(
+                        "PRODUCTION_TASK_GOAL_ACCEPTED label=%s "
+                        "move_base_status=%d arrival_error=%.3f m "
+                        "limit=%.3f m",
+                        label, status, arrival_error,
+                        arrival_tolerance)
+                    return True
+                if not abort_on_navigation_failure:
+                    rospy.logwarn(
+                        "PRODUCTION_TASK_NAVIGATION_WARNING label=%s "
+                        "move_base status=%d; continuing mission",
+                        label, status)
+                    return False
+                raise MissionAbort(
+                    "%s failed with move_base status %d" % (label, status))
+
+            pose = self.current_map_pose(label + " arrival")
+            arrival_error = position_error(pose, (x_value, y_value))
+            if arrival_error <= arrival_tolerance:
+                # move_base has completed the action; do not add a task-layer
+                # zero-speed burst between navigation goals.
+                rospy.loginfo(
+                    "PRODUCTION_TASK_GOAL_REACHED label=%s error=%.3f m "
+                    "without explicit task stop",
+                    label, arrival_error)
+                return True
+            if attempt < retry_limit:
+                rospy.logwarn(
+                    "PRODUCTION_TASK_ARRIVAL_RETRY label=%s attempt=%d/%d "
+                    "error=%.3f m limit=%.3f m; resending goal without "
+                    "task abort",
+                    label, attempt + 1, retry_limit + 1, arrival_error,
+                    arrival_tolerance)
+                continue
+            if self.continue_on_arrival_error:
+                rospy.logwarn(
+                    "PRODUCTION_TASK_ARRIVAL_CONTINUE label=%s "
+                    "error=%.3f m limit=%.3f m after %d attempts; "
+                    "continuing without explicit task stop",
+                    label, arrival_error, arrival_tolerance,
+                    retry_limit + 1)
+                return True
             self.stop_motion()
             if not abort_on_navigation_failure:
                 rospy.logwarn(
                     "PRODUCTION_TASK_NAVIGATION_WARNING label=%s "
-                    "timed out after %.1f s; continuing mission",
-                    label, self.goal_timeout)
-                return False
-            raise MissionAbort(
-                "%s timed out after %.1f s" % (label, self.goal_timeout))
-
-        status = self.move_base.get_state()
-        self.stop_motion()
-        if status != GoalStatus.SUCCEEDED:
-            if require_action_success:
-                raise MissionAbort(
-                    "%s requires move_base success but ended with status %d" %
-                    (label, status))
-            pose = self.current_map_pose(label + " aborted arrival")
-            arrival_error = position_error(pose, (x_value, y_value))
-            if arrival_error <= self.arrival_tolerance:
-                rospy.logwarn(
-                    "PRODUCTION_TASK_GOAL_ACCEPTED label=%s "
-                    "move_base_status=%d arrival_error=%.3f m "
-                    "limit=%.3f m",
-                    label, status, arrival_error, self.arrival_tolerance)
-                return True
-            if not abort_on_navigation_failure:
-                rospy.logwarn(
-                    "PRODUCTION_TASK_NAVIGATION_WARNING label=%s "
-                    "move_base status=%d; continuing mission",
-                    label, status)
-                return False
-            raise MissionAbort(
-                "%s failed with move_base status %d" % (label, status))
-        pose = self.current_map_pose(label + " arrival")
-        arrival_error = position_error(pose, (x_value, y_value))
-        if arrival_error > self.arrival_tolerance:
-            if not abort_on_navigation_failure:
-                rospy.logwarn(
-                    "PRODUCTION_TASK_NAVIGATION_WARNING label=%s "
                     "arrival_error=%.3f m limit=%.3f m; continuing mission",
-                    label, arrival_error, self.arrival_tolerance)
+                    label, arrival_error, arrival_tolerance)
                 return False
             raise MissionAbort(
                 "%s stopped %.3f m from target (limit %.3f m)" %
-                (label, arrival_error, self.arrival_tolerance))
-        rospy.loginfo(
-            "PRODUCTION_TASK_GOAL_REACHED label=%s error=%.3f m",
-            label, arrival_error)
-        return True
+                (label, arrival_error, arrival_tolerance))
+        raise MissionAbort("%s navigation retry loop ended unexpectedly" % label)
 
     def wait_for_plan(
             self, x_value, y_value, yaw, label, abort_on_failure=True):

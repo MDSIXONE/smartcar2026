@@ -134,6 +134,9 @@ def goal_block(mask, y_lo=0.78, half=60, r=10, n_side=32, max_deg=35,
     # 一律算"看不见", 从**分母里去掉**, 而不是算成"没有线":
     # 不这么做的话, 那几十列永远补不上, 覆盖率封顶 0.4, 阈值 0.80 永远
     # 到不了 —— 车就会直接开过 Y 岔口的横线(实车就是这么冲过去的)。
+    # 类 3 现在是"遮挡物" = 红绿灯箱体 + 拦路板(训练时就合成一类了)。
+    # 板子横在扫描带里时同样要从分母里去掉, 否则它盖住的那些列会被当成
+    # "这里没有线", 覆盖率被硬生生拉低, 真终点线反而触发不了。
     blk = (mask == 3).astype(np.uint8)
     cx = IN_W // 2
     xL, xR = max(0, cx - half), min(IN_W - 1, cx + half)
@@ -418,116 +421,250 @@ def scan_xy(ranges, angle_min, angle_inc, range_min, range_max,
     return xs, ys
 
 
-def _corner_wall_candidate(xs, ys, nx, ny, max_dist=0.80,
-                           sector_half_width=0.45, min_pts=8,
-                           min_span=0.12, max_residual=0.025,
-                           cluster_gap=0.05):
-    """在指定法向的一侧找一条近墙，并返回其局部拟合量。
+def corner_extract_lines(xs, ys, max_dist=2.0, min_pts=8, min_span=0.12,
+                         max_residual=0.025, cluster_gap=0.05, iters=120,
+                         max_lines=4, seed=1234):
+    """从车周 max_dist 内的点里**依次**抠出最多 max_lines 条直线段(墙/板)。
 
-    ``nx, ny`` 是从车体指向墙的期望法向。停车阶段只看车附近的墙，
-    不使用整场地矩形拟合：地图是否准确不会影响这个控制环。按法向
-    投影分簇后，墙的投影应近似常数；沿墙方向的长条杂物会因残差过大
-    被拒绝。
+    不分扇区、不预设法向 —— 车怎么斜着进都无所谓。每条线用 RANSAC 两点定
+    线, 但**打分用的是"沿线连成一片的最长一段"的点数**, 而不是内点总数:
+    实车 2026-08-18 顶着角尖 45° 进场, 旧的按内点总数打分, 一条 45° 的斜线
+    在左右两面墙上各切一小段(两段中间空着), 内点 32 个, 反而压过了真正的右
+    墙(19 个) —— 连续性一刀下去, 那条斜线的单段只有十几个点、跨度不到
+    min_span, 自然出局。拟到一条就把它的点拿掉, 再拟下一条, 所以左右墙、
+    身后的板子各成一条, 谁也拼不到谁身上。
+
+    返回列表, 每项: distance(车心到线的垂直距离), normal(车体系, 从车指向
+    线), residual, span, points, ang_deg(法向角)。按距离从近到远排。
     """
     X = np.asarray(xs, dtype=np.float64)
     Y = np.asarray(ys, dtype=np.float64)
     if len(X) == 0:
-        return None
-    d = X * nx + Y * ny
-    t = -ny * X + nx * Y
-    keep = (d > 0.05) & (d <= max_dist) & \
-        (np.abs(t) <= sector_half_width)
-    if int(keep.sum()) < min_pts:
-        return None
-    X, Y, d, t = X[keep], Y[keep], d[keep], t[keep]
-    # 不按投影排序后用固定 gap 分簇：墙角另一面墙的投影通常是连续
-    # 变化的，会把排序数组接成一整簇。改用一维 RANSAC 式滑窗，寻找
-    # 投影近似常数且点数最多的一段。
-    best = None
-    for center in d:
-        group = np.nonzero(np.abs(d - center) <= max_residual)[0]
-        if len(group) < min_pts:
-            continue
-        gd, gt = d[group], t[group]
-        distance = float(np.median(gd))
-        group = np.nonzero(np.abs(d - distance) <= max_residual)[0]
-        if len(group) < min_pts:
-            continue
-        gd, gt = d[group], t[group]
-        residual = float(np.sqrt(np.mean((gd - distance) ** 2)))
-        span = float(gt.max() - gt.min())
-        if span < min_span or residual > max_residual:
-            continue
+        return []
+    r = np.hypot(X, Y)
+    keep = (r > 0.05) & (r <= max_dist)
+    P = np.column_stack([X[keep], Y[keep]])
+    n = len(P)
+    if n < min_pts:
+        return []
+    rng = np.random.RandomState(seed)        # 可复现; 每帧结果只由点决定
+    remain = np.ones(n, dtype=bool)
+    lines = []
 
-        px, py = X[group], Y[group]
-        center = np.array([px.mean(), py.mean()])
-        A = np.column_stack([px - center[0], py - center[1]])
-        cov = np.dot(A.T, A)
-        values, vectors = np.linalg.eigh(cov)
-        tangent = vectors[:, int(np.argmax(values))]
-        normal = np.array([-tangent[1], tangent[0]])
-        expected = np.array([nx, ny])
-        if float(np.dot(normal, expected)) < 0.0:
-            normal = -normal
-        angle_error = abs(math.atan2(
-            normal[0] * expected[1] - normal[1] * expected[0],
-            float(np.dot(normal, expected))))
-        candidate = {
+    def _pca(pts):
+        c = pts.mean(axis=0)
+        A = pts - c
+        vals, vecs = np.linalg.eigh(np.dot(A.T, A))
+        tg = vecs[:, int(np.argmax(vals))]
+        nm = np.array([-tg[1], tg[0]])
+        if float(np.dot(c, nm)) < 0.0:      # 法向: 从车心指向这条线
+            nm, tg = -nm, -tg
+        return c, tg, nm
+
+    def _longest_run(idx, c, tg):
+        """idx: 内点下标; 按沿线坐标排序, 以 cluster_gap 分段, 返回最长段"""
+        along = np.dot(P[idx] - c, tg)
+        order = np.argsort(along)
+        a_sorted = along[order]
+        breaks = np.nonzero(np.diff(a_sorted) > cluster_gap)[0]
+        starts = np.r_[0, breaks + 1]
+        ends = np.r_[breaks + 1, len(a_sorted)]
+        k = int(np.argmax(ends - starts))
+        return idx[order[starts[k]:ends[k]]]
+
+    for _ in range(int(max_lines)):
+        idx_all = np.nonzero(remain)[0]
+        m = len(idx_all)
+        if m < min_pts:
+            break
+        best_run, best_cnt = None, 0
+        for _ in range(int(iters)):
+            i, j = idx_all[rng.randint(0, m, 2)]
+            if i == j:
+                continue
+            v = P[j] - P[i]
+            L = math.hypot(v[0], v[1])
+            if L < 0.05:                     # 两点太近, 方向不可信
+                continue
+            tg = v / L
+            nm = np.array([-tg[1], tg[0]])
+            perp = np.dot(P[idx_all] - P[i], nm)
+            inl = idx_all[np.abs(perp) <= max_residual]
+            if len(inl) < min_pts or len(inl) <= best_cnt:
+                continue
+            run = _longest_run(inl, P[i], tg)
+            if len(run) > best_cnt:
+                best_cnt, best_run = len(run), run
+        if best_run is None or best_cnt < min_pts:
+            break
+        # 用这一段全部点重新 PCA 定线, 再从剩余点里收一次内点并取连续段
+        c, tg, nm = _pca(P[best_run])
+        perp = np.dot(P[idx_all] - c, nm)
+        inl = idx_all[np.abs(perp) <= max_residual]
+        if len(inl) < min_pts:
+            remain[best_run] = False
+            continue
+        run = _longest_run(inl, c, tg)
+        remain[run] = False                  # 不管合不合格, 这些点都用掉了
+        if len(run) < min_pts:
+            continue
+        pts = P[run]
+        c, tg, nm = _pca(pts)
+        perp = np.dot(pts - c, nm)
+        residual = float(np.sqrt(np.mean(perp ** 2)))
+        along = np.dot(pts - c, tg)
+        span = float(along.max() - along.min())
+        distance = float(np.dot(c, nm))
+        if span < min_span or residual > max_residual or distance <= 0.05:
+            continue
+        lines.append({
             "distance": distance,
-            "normal": (float(normal[0]), float(normal[1])),
+            "normal": (float(nm[0]), float(nm[1])),
             "residual": residual,
             "span": span,
-            "points": int(len(group)),
-            "angle_error": angle_error,
-        }
-        # 点数最多优先，距离只用于同点数时打破平局；否则角落的另一
-        # 面墙在投影上可能恰好比真正墙更近。
-        score = (-len(group), distance, residual)
-        if best is None or score < best[0]:
-            best = (score, candidate)
-    return None if best is None else best[1]
+            "points": int(len(pts)),
+            "ang_deg": math.degrees(math.atan2(nm[1], nm[0])),
+        })
+    lines.sort(key=lambda w: w["distance"])
+    return lines
+
+
+def _corner_wall_candidate(xs, ys, nx, ny, max_dist=0.80, sector_half_width=0.45,
+                           min_pts=8, min_span=0.12, max_residual=0.025,
+                           cluster_gap=0.05, normal_tol_deg=45.0, iters=80):
+    """兼容旧接口: 在期望法向 (nx,ny) 的 normal_tol_deg 锥内取最近的一条线。"""
+    lines = corner_extract_lines(xs, ys, max_dist=max_dist, min_pts=min_pts,
+                                 min_span=min_span, max_residual=max_residual,
+                                 cluster_gap=cluster_gap, iters=iters)
+    cos_tol = math.cos(math.radians(normal_tol_deg))
+    for w in lines:
+        dot = w["normal"][0] * nx + w["normal"][1] * ny
+        if dot >= cos_tol:
+            w = dict(w)
+            w["angle_error"] = math.acos(min(1.0, dot))
+            return w
+    return None
+
+
+def _wrap90(deg):
+    """把角度折到 (-45, 45]: 墙法向离最近车体轴还差多少"""
+    d = (deg + 45.0) % 90.0 - 45.0
+    return 45.0 if d == -45.0 else d
 
 
 def corner_wall_fit(xs, ys, max_dist=0.80, sector_half_width=0.45,
                     min_pts=8, min_span=0.12, max_residual=0.025,
-                    angle_tol_deg=10.0, cluster_gap=0.05):
-    """拟合终点角落的两面近墙。
+                    angle_tol_deg=10.0, cluster_gap=0.05,
+                    back_excl_deg=40.0, front_half_deg=60.0):
+    """拟合终点角落的两面近墙(不预设车的朝向)。
 
-    返回 ``ok``、``x_wall``、``y_wall`` 和 ``why``。x/y 墙分别从
-    ``+x/-x`` 与 ``+y/-y`` 四个方向中选最近的一面，因此不需要知道
-    当前地图到底是左下、右下、左上还是右上角。两面墙的符号同时给出
-    车体应该前后/左右移动的方向；墙法向还用于小角度航向锁定。
+    先 ``corner_extract_lines`` 抠出车周所有直线段, 再在**不朝身后**的线里
+    (法向离正后方 back_excl_deg 以内的丢掉 —— 车是向前开进角落的, 身后只
+    可能是刚绕过的拦路板; 40° 是因为车斜 36° 进场时侧墙法向已经到 126°,
+    再宽就把侧墙也丢了)挑一对**互相垂直**、距离之和最小的当两面墙。
+    只找到一条、且它在前方 ±front_half_deg 以内, 也算可用(partial: 只按这
+    面墙闭环前进)。
+
+    车顶着角尖 45° 进场(实车 2026-08-18)两面墙的法向是 +58°/-32°, 按 ±x/±y
+    分扇区怎么分都是错的; 这里完全按墙自己的方向来, x/y 只是**事后贴的标签**
+    (法向更靠 x 轴的叫 x 墙), 给日志和 nominal_yaw 用; 闭环走的是每面墙自己
+    的法向(见 lane_follow.step_corner_adjust)。``sector_half_width`` 已不用,
+    留着只为兼容旧调用。
+
+    返回 ``ok``、``x_wall``、``y_wall``、``x_sign``、``y_sign``、``partial``、
+    ``yaw_err_deg``(转到和墙对齐还差多少, 折到 ±45°)、``walls``(全部候选)、
+    ``why``。
     """
-    candidates = {}
-    for name, normal in (("x+", (1.0, 0.0)), ("x-", (-1.0, 0.0)),
-                         ("y+", (0.0, 1.0)), ("y-", (0.0, -1.0))):
-        candidates[name] = _corner_wall_candidate(
-            xs, ys, normal[0], normal[1], max_dist=max_dist,
-            sector_half_width=sector_half_width, min_pts=min_pts,
-            min_span=min_span, max_residual=max_residual,
-            cluster_gap=cluster_gap)
-    x_options = [(name, value) for name, value in candidates.items()
-                 if name.startswith("x") and value is not None]
-    y_options = [(name, value) for name, value in candidates.items()
-                 if name.startswith("y") and value is not None]
-    if not x_options or not y_options:
-        return {"ok": False, "x_wall": None, "y_wall": None,
-                "why": "两面墙不完整(x=%d,y=%d)" %
-                (len(x_options), len(y_options))}
-    x_name, x_wall = min(x_options, key=lambda item: item[1]["distance"])
-    y_name, y_wall = min(y_options, key=lambda item: item[1]["distance"])
-    nx = np.asarray(x_wall["normal"], dtype=np.float64)
-    ny = np.asarray(y_wall["normal"], dtype=np.float64)
-    orth_error = abs(math.pi / 2.0 - math.acos(
-        min(1.0, max(-1.0, abs(float(np.dot(nx, ny)))))))
-    if orth_error > math.radians(angle_tol_deg):
-        return {"ok": False, "x_wall": x_wall, "y_wall": y_wall,
-                "why": "两墙夹角异常 %.1f度" %
-                math.degrees(orth_error)}
-    x_sign = 1 if x_name == "x+" else -1
-    y_sign = 1 if y_name == "y+" else -1
-    # 与赛场四个角的约定一致：下方两角朝 -90°，上左朝 0°，
-    # 上右朝 180°。这里只用于日志/核对，闭环实际以墙法向为准。
+    lines = corner_extract_lines(xs, ys, max_dist=max_dist, min_pts=min_pts,
+                                 min_span=min_span, max_residual=max_residual,
+                                 cluster_gap=cluster_gap)
+    cos_back = math.cos(math.radians(back_excl_deg))
+    fwd = [w for w in lines if -w["normal"][0] < cos_back]
+    back = [w for w in lines if -w["normal"][0] >= cos_back]
+
+    def _desc(w, tag=""):
+        return "%.2fm 法向%+.0f° 点%d%s" % (w["distance"], w["ang_deg"],
+                                          w["points"], tag)
+
+    cands = "; ".join([_desc(w) for w in fwd] +
+                      [_desc(w, "(身后)") for w in back])
+    fail = {"ok": False, "x_wall": None, "y_wall": None, "partial": False,
+            "walls": lines}
+    if not fwd:
+        fail["why"] = "前方没拟合到墙(候选: %s)" % (cands or "无")
+        return fail
+
+    def _orth(a, b):
+        na = np.asarray(a["normal"], dtype=np.float64)
+        nb = np.asarray(b["normal"], dtype=np.float64)
+        return abs(math.pi / 2.0 - math.acos(
+            min(1.0, max(-1.0, abs(float(np.dot(na, nb)))))))
+
+    def _label(w):
+        nx, ny = w["normal"]
+        if abs(nx) >= abs(ny):
+            return ("x+" if nx > 0 else "x-"), 1 if nx > 0 else -1
+        return ("y+" if ny > 0 else "y-"), 1 if ny > 0 else -1
+
+    tol = math.radians(angle_tol_deg)
+    pairs = [(a, b) for i, a in enumerate(fwd) for b in fwd[i + 1:]
+             if _orth(a, b) <= tol]
+    pairs.sort(key=lambda p: p[0]["distance"] + p[1]["distance"])
+    if not pairs:
+        # 只有一面(或几面互不垂直的): 取前方 ±front_half_deg 内最近的一面当
+        # 前墙, 按它闭环前进; 一面都没有就拒
+        cos_front = math.cos(math.radians(front_half_deg))
+        fronts = [w for w in fwd if w["normal"][0] >= cos_front]
+        if not fronts:
+            fail["why"] = ("前方 ±%.0f° 内没有前墙, 也凑不出垂直的一对 [候选: %s]"
+                           % (front_half_deg, cands))
+            return fail
+        w = fronts[0]
+        # 比它近、又既不平行也不垂直的线 —— 说明前面这条八成不是墙(或者场景
+        # 不对), 别按它闭环
+        for o in fwd:
+            if o is w or o["distance"] >= w["distance"]:
+                continue
+            na = np.asarray(o["normal"]); nb = np.asarray(w["normal"])
+            if abs(float(np.dot(na, nb))) < math.cos(tol):   # 不平行
+                fail["why"] = ("前墙 %.2fm 之前还有条不垂直的线, 拒 [候选: %s]"
+                               % (w["distance"], cands))
+                return fail
+        name, sign = _label(w)
+        yaw = _wrap90(w["ang_deg"])
+        return {"ok": True, "partial": True, "x_wall": w, "y_wall": None,
+                "x_sign": sign if name.startswith("x") else 1, "y_sign": 0,
+                "yaw_err_deg": yaw, "walls": lines,
+                "nominal_yaw_deg": float("nan"),
+                "why": "只有前墙 %.2fm 法向%+.0f°(侧墙未见, 候选 %d 条)"
+                       % (w["distance"], w["ang_deg"], len(lines))}
+    a, b = pairs[0]
+    # 贴标签: 法向更靠 x 轴的当前墙(x); 两面一样斜(正好 45° 附近, 都判成同
+    # 一轴)就把**远的**当前墙 —— 车道贴着侧墙走, 近的那面是侧墙(目标 0.21),
+    # 前墙是车道尽头那面(目标 0.25), 进角落时它还远
+    la, lb = _label(a), _label(b)
+    if la[0][0] == lb[0][0]:                  # 都判成 x 或都判成 y: 45° 附近
+        x_wall, y_wall = b, a                 # a 近 b 远(pairs 里按距离排过)
+        x_name, x_sign = lb
+        if x_name.startswith("y"):
+            nx = x_wall["normal"][0]
+            x_name, x_sign = ("x+" if nx >= 0 else "x-"), (1 if nx >= 0 else -1)
+        ny = y_wall["normal"][1]
+        y_name, y_sign = ("y+" if ny >= 0 else "y-"), (1 if ny >= 0 else -1)
+    elif la[0].startswith("x"):
+        x_wall, y_wall, (x_name, x_sign), (y_name, y_sign) = a, b, la, lb
+    else:
+        x_wall, y_wall, (x_name, x_sign), (y_name, y_sign) = b, a, lb, la
+    orth_error = _orth(x_wall, y_wall)
+    # 航向误差: 两面墙各自离最近车体轴的残差(折到 ±45°), 取平均; 两面墙互相
+    # 垂直, 残差本该相同, 折角边界(±45°)附近两者可能一个 +44 一个 -44,
+    # 平均前先把第二个折到离第一个最近的那个等价值上
+    r1 = _wrap90(x_wall["ang_deg"])
+    r2 = _wrap90(y_wall["ang_deg"])
+    r2 = min((r2 - 90.0, r2, r2 + 90.0), key=lambda v: abs(v - r1))
+    yaw_err = 0.5 * (r1 + r2)
+    # 与赛场四个角的约定一致：下方两角朝 -90°，上左朝 0°，上右朝 180°。
+    # 这里只用于日志/核对，闭环实际以墙法向为准。
     if x_sign > 0:
         nominal_yaw_deg = -90.0
     elif y_sign > 0:
@@ -535,15 +672,17 @@ def corner_wall_fit(xs, ys, max_dist=0.80, sector_half_width=0.45,
     else:
         nominal_yaw_deg = 180.0
     return {
-        "ok": True,
-        "x_wall": x_wall,
-        "y_wall": y_wall,
-        "x_sign": x_sign,
-        "y_sign": y_sign,
+        "ok": True, "partial": False,
+        "x_wall": x_wall, "y_wall": y_wall,
+        "x_sign": x_sign, "y_sign": y_sign,
         "orth_error": orth_error,
+        "yaw_err_deg": yaw_err,
+        "walls": lines,
         "nominal_yaw_deg": nominal_yaw_deg,
-        "why": "x=%s %.3fm y=%s %.3fm" % (
-            x_name, x_wall["distance"], y_name, y_wall["distance"]),
+        "why": "x=%s %.3fm(%+.0f°) y=%s %.3fm(%+.0f°)%s" % (
+            x_name, x_wall["distance"], x_wall["ang_deg"],
+            y_name, y_wall["distance"], y_wall["ang_deg"],
+            " 另%d条" % (len(lines) - 2) if len(lines) > 2 else ""),
     }
 
 

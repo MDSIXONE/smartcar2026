@@ -39,7 +39,7 @@ observation_yaw_tolerance: 0.12
 # Complete delivery only at the requested factory position and yaw.  These
 # match CymPlanner's final-pose tolerances, so entering the blue rectangle no
 # longer cancels the final approach or final turn.
-destination_position_tolerance: 0.05
+destination_position_tolerance: 0.08
 destination_yaw_tolerance: 0.10
 
 vision_class_names: [food, daily, electronics]

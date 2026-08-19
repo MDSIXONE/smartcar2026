@@ -83,7 +83,7 @@ import math
 import numpy as np
 import cv2
 import rospy
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, Pose, PoseStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu, LaserScan
 from std_msgs.msg import Bool, String
@@ -94,7 +94,7 @@ from trackseg import TrackSeg, IN_W, IN_H, _s  # noqa: E402
 from lane_common import (load_template, Decider, map_az,  # noqa: E402
                          curve_text, goal_block, yellow_line, yellow_mask,
                          board_detect, scan_xy, find_seg_near,
-                         wall_fit, corner_wall_fit)
+                         corner_wall_fit)
 
 
 class FrameGrabber(threading.Thread):
@@ -117,7 +117,17 @@ class FrameGrabber(threading.Thread):
 
     def run(self):
         while not self.stopped:
-            ok, f = self.cap.read()
+            try:
+                ok, f = self.cap.read()
+            except Exception:
+                # cap 被别的线程 release 掉时 read 会直接抛(实车 2026-08-18:
+                # "Unknown array type in cvarrToMat"), 别让整个线程带着
+                # traceback 死掉 —— 该退就安静退, 不该退就当一次失败
+                if self.stopped:
+                    break
+                self.fail += 1
+                time.sleep(0.02)
+                continue
             if ok and f is not None:
                 with self.lock:
                     self.frame, self.seq, self.fail = f, self.seq + 1, 0
@@ -139,8 +149,19 @@ class FrameGrabber(threading.Thread):
                 return None, self.seq
             return self.frame.copy(), self.seq
 
-    def stop(self):
+    def stop(self, join=0.0):
+        """停线程。join>0 时等它真的退出, 返回是否退干净了。
+
+        ⚠ 要 release cap 之前**必须**等它退出: 线程还卡在 cap.read() 里就
+          release, OpenCV 的 V4L2 后端会一边 STREAMOFF 失败(EBUSY)一边把
+          缓冲区抽掉, 线程炸、流停不下来、设备被占死, 之后什么分辨率都
+          开不回来, 最后 GC 那个半死的 cap 时 SIGSEGV(实车 2026-08-18)。
+        """
         self.stopped = True
+        if join > 0 and self.is_alive() and \
+                threading.current_thread() is not self:
+            self.join(join)
+        return not self.is_alive()
 
 
 try:
@@ -228,6 +249,15 @@ def _parse_windows(spec):
         if hi > lo:
             out.append((lo, hi))
     return out
+
+
+# 这些相位不看图: 里程/雷达/IMU 驱动。断帧时可以继续发上一条指令,
+# 不然底盘 cmd_timeout(0.2s) 一到就把车刹住了。
+# ⚠ FOLLOW / APPROACH **不在**里面 —— 那两个是靠视觉闭环的, 断帧还硬走
+#   等于闭着眼睛开。
+BLIND_PHASES = ("START_MOVE", "FORK_MOVE", "FORK_TURN", "AVOID_REV",
+                "AVOID_OUT", "AVOID_FWD", "AVOID_BACK", "AVOID_ALIGN",
+                "AVOID_TURN0", "AVOID_POSE", "CORNER_ADJUST")
 
 
 def _tri(val, auto):
@@ -606,7 +636,18 @@ class LaneFollow(object):
         # ---- 终点框 ----
         # use_lidar=true : 视觉命中后直接进入雷达角落闭环，不前进、不调用导航
         # use_lidar=false: 继续跑巡线, 按里程计再走 goal_stop_distance 米才停
-        self.use_lidar = bool(gp("~use_lidar", False))
+        # 白线命中之后怎么进终点:
+        #   self / true / lidar  巡线自己用雷达拟合两面墙, 闭环开进终点框
+        #                        (CORNER_ADJUST, 默认)
+        #   false                老路: PAUSE 1s 打点 -> 盲推 goal_stop_distance
+        # ⚠ 三态字符串, 得自己解析: roslaunch 会把裸的 true/false 转成 bool,
+        #   传 "self" 就是字符串, bool("false") 又是 True。
+        _ul = gp("~use_lidar", "self")
+        if isinstance(_ul, bool):
+            self.use_lidar = _ul
+        else:
+            self.use_lidar = str(_ul).strip().lower() in (
+                "self", "true", "lidar", "corner", "1", "yes", "on")
         self.goal_enable = bool(gp("~goal_enable", True))
         # 只看画面最底下 (1-goal_y_lo) 的行 = 只认"很近的"横线。
         # 0.78 -> 底部 22%(实测在你要的停车位姿刚好触发); 调小=更早触发=停得更远
@@ -686,6 +727,21 @@ class LaneFollow(object):
         # 喂进去的图), 箭头朝向和标签对不上就说明要换。换了非镜像数据重训后
         # 记得改回 False。
         self.yolo_swap_lr = bool(gp("~yolo_swap_lr", True))
+        # 黄灯放不放行。默认**不放行**(当红灯处理, 继续等绿灯) —— 规则
+        # 里黄灯是"减速停车", 抢黄灯被判罚的风险不值当。要放行传
+        # yellow_go:=true, 那时 "yellow left" 就等同 "left"。
+        # 黄灯放不放行: false / true / adaptive(默认)
+        #   false    黄灯当红灯等
+        #   true     黄灯等同方向灯, 直接走
+        #   adaptive 前 yellow_go_after 秒当红灯等(赌它马上变绿, 抢一个
+        #            干净的绿灯发车); 等过了还是黄, 就认了它走 —— 总比
+        #            一路空等到 yolo_wait_max(60s) 再按 fallback 瞎走强。
+        self.yellow_mode = str(gp("~yellow_go", "adaptive")).strip().lower()
+        if self.yellow_mode in ("1", "yes", "on"):
+            self.yellow_mode = "true"
+        elif self.yellow_mode in ("0", "no", "off", ""):
+            self.yellow_mode = "false"
+        self.yellow_go_after = float(gp("~yellow_go_after", 10.0))
         # 认灯喂哪张图: false(默认)=去畸变后的; true=只翻正不去畸变的原始帧。
         # 去畸变会把画面往中间挤、边上留黑边, 灯要是被挤小了/糊了就试试 true
         # (yolo 的训练集本来也不是去畸变图)
@@ -695,6 +751,32 @@ class LaneFollow(object):
         # 先把画面中间抠出来放大再送(纯数字变焦, 等效提高灯的分辨率)。
         # 2.0 = 抠中间 1/2 宽高。只用类别不用框, 所以不必把坐标映射回去。
         self.yolo_zoom = float(gp("~yolo_zoom", 1.0))
+        # ---- 认灯用"高分辨率原生裁剪" ----
+        # 相机开到更高分辨率, 从整帧里**按原始像素**抠一块 net 大小的窗口
+        # 直接喂 yolo。和 yolo_zoom 的区别: zoom 是先抠再 resize 放大回去,
+        # 插值出来的细节是假的; 这里是 1:1 原生像素, 灯有多少像素就是多少。
+        # 640x352 的窗口在 1920x1080 上只占 1/3 宽, 等于 3 倍光学变焦。
+        # 窗口中心按**归一化**给, 所以换什么分辨率都不用重算。默认值是从
+        # 用户 2026-08-18 那张实拍量的: 灯箱 x=288~316 y=106~130 (640x360),
+        # 中心 (301,118) -> (0.470, 0.327)。不在物理中心, 偏左偏上。
+        self.yolo_crop = bool(gp("~yolo_crop", False))
+        self.yolo_crop_cx = float(gp("~yolo_crop_cx", 0.470))
+        self.yolo_crop_cy = float(gp("~yolo_crop_cy", 0.327))
+        self.yolo_crop_w = int(gp("~yolo_crop_w", 640))
+        self.yolo_crop_h = int(gp("~yolo_crop_h", 352))
+        # 裁窗口认不出来的兜底: 认了这么久还没定案就改喂整帧(缩到 net 大小,
+        # 也就是原来的行为)。灯要是没落在窗口里, 裁剪反而把它裁没了。
+        self.yolo_crop_timeout = float(gp("~yolo_crop_timeout", 20.0))
+        self._crop_gave_up = False
+        self._crop_log = None            # 只在第一帧打一次窗口信息
+        self._cam_switched = False       # 认灯期间是否临时切过分辨率
+        self._cam_lock = threading.Lock()  # 换 cap 只能一个线程干
+        self._preswitch_result = None    # 挪 140mm 时预切的结果(None=没预切)
+        # 认灯期间临时切到的分辨率。相机支持 1920x1080/1280x720/800x600/
+        # 640x480/640x360/320x240(实测 v4l2), 取最大那个。
+        self.yolo_cam_w = int(gp("~yolo_cam_w", 1920))
+        self.yolo_cam_h = int(gp("~yolo_cam_h", 1080))
+        self._full = None                # 未经 to_4x3 的整帧(认灯用)
         self.yolo_zoom_cy = float(gp("~yolo_zoom_cy", 0.45))  # 抠图中心行(灯偏上)
         self.fork_speed = float(gp("~fork_turn_speed", 0.45))    # rad/s
         self.fork_tol_deg = float(gp("~fork_tol_deg", 2.0))
@@ -731,6 +813,19 @@ class LaneFollow(object):
         self.align_offset = float(gp("~align_offset", 0.10))    # 100mm
         self.start_offset = float(gp("~start_offset", 0.30))    # 300mm
         self.start_move_speed = float(gp("~start_move_speed", 0.12))
+        # 认到灯之后冲到三岔口那一段的速度倍率。那段是**盲走固定里程**
+        # (start_move 打 odom 点, step_move 用 moved_since_mark 计距),
+        # 路上没有判断也没有障碍, 慢慢挪纯属浪费 —— 0.30m @0.12m/s 要
+        # 2.5s, 加倍就是 1.25s。
+        # ⚠ 只在**真认到灯**时加倍; 等超时走 fallback 那次不加 —— 那时候
+        #   压根不知道前面是什么, 该稳着来。
+        # ⚠ step_move 快到位会按剩余距离减速(下限 move_min_speed), 所以
+        #   加倍主要吃在巡航段; 真过冲就把这个调回 1.0。
+        self.start_dash_gain = float(gp("~start_dash_gain", 2.0))
+        self._verdict_from_light = False   # 这次判定是真认到灯还是超时兜底
+        self._yolo_cleanup_pending = False  # 发完车再杀 yolo/切回分辨率
+        self._last_tw = None                # 最后发出去的那条指令(断帧兜底)
+        self.cam_gap_hold = float(gp("~cam_gap_hold", 1.0))
         # 挪动收尾的最低线速度: 快到位时按剩余距离减速, 但不低于这个值
         # (底盘太低速可能推不动)。车挪到最后停住不动就把它调大。
         self.move_min = float(gp("~move_min_speed", 0.06))
@@ -761,6 +856,19 @@ class LaneFollow(object):
         self.m1, self.m2 = z["m1"], z["m2"]
         self.W, self.H = int(z["W"]), int(z["H"])
         self.dec = Decider(*load_template(tpl_path))
+        self.tpl_path = tpl_path
+        # Y 支路专用触发区模板。Y 那一段和两臂的车道形状不一样(Y 是直的、
+        # 更窄), 用同一张模板要么太松要么太紧, 所以允许单独换一张。
+        # 空 = 不换, 全程用上面那张。
+        # **开机就加载**, 不等转到 Y 才读 —— 路径写错的话现在就炸, 而不是
+        # 车跑到岔口中间才炸(那时候车还在动)。
+        self.tpl_y_path = gp("~template_y", "")
+        self.dec_y = None
+        if self.tpl_y_path:
+            if os.path.abspath(self.tpl_y_path) == os.path.abspath(tpl_path):
+                self.tpl_y_path = ""      # 一样就别多此一举
+            else:
+                self.dec_y = Decider(*load_template(self.tpl_y_path))
         # 分割网**懒加载**: 这里只记路径, 不碰 CUDA。
         # 为什么: 常驻主流程(2026.launch)会让本节点先以 STANDBY 起着不干活,
         # 这段时间显存要留给别的节点; 真正要巡线之前再 ensure_seg() 加载。
@@ -805,6 +913,7 @@ class LaneFollow(object):
 
         if self.use_ros_camera:
             self.cap = None
+            self.cam_now = (self.W, self.H)
             self.grab = RosFrameGrabber(self.image_topic)
             rospy.loginfo("相机: 用共享话题 %s (不独占 %s)",
                           self.image_topic, self.device)
@@ -859,14 +968,27 @@ class LaneFollow(object):
         # 的原因, 而且和 CUDA 快慢一点关系都没有。
         # 想退回"不设"就传 fourcc:=none。
         fcc = str(gp("~fourcc", "MJPG")).upper()
+        self._fourcc = fcc                # 重开相机时要用同一套
+        self._cam_fps_req = float(gp("~cam_fps", 0.0))
         if fcc and fcc != "NONE" and len(fcc) == 4:
             try:
                 self.cap.set(cv2.CAP_PROP_FOURCC,
                              cv2.VideoWriter_fourcc(*fcc))
             except Exception as e:
                 rospy.logwarn("设 fourcc=%s 失败: %s", _s(fcc), _s(e))
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.W)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.H)
+        # 请求的采集分辨率。默认就是标定尺寸(self.W x self.H), 给了
+        # cam_w/cam_h 就按那个开 —— 认灯要更高分辨率时用(见 yolo_crop)。
+        # ⚠ 开高之后巡线那条路不变(to_4x3 会裁缩回 640x480), 但**去畸变
+        #   映射是按 640x480 标的**: 相机的 640x480 模式如果不是高分模式
+        #   的等比缩放(很多 USB 相机是换了读出窗口/binning, 视场不一样),
+        #   缩回来的帧喂进 maps_640 就是错的。开之前务必用 dump/latest.jpg
+        #   和原来对一眼, 车道线位置/角度必须一致。
+        req_w = int(gp("~cam_w", 0)) or self.W
+        req_h = int(gp("~cam_h", 0)) or self.H
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, req_w)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, req_h)
+        self.cam_req = (req_w, req_h)
+        self.cam_now = (req_w, req_h)     # 当前实际在用的采集尺寸
         want_fps = float(gp("~cam_fps", 0.0))     # 0 = 不请求, 用驱动默认
         if want_fps > 0:
             self.cap.set(cv2.CAP_PROP_FPS, want_fps)
@@ -879,6 +1001,7 @@ class LaneFollow(object):
             fcc_got = "".join(chr((got >> (8 * k)) & 0xFF) for k in range(4))
             gw = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             gh = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            self.cam_now = (gw, gh)
             rospy.loginfo("相机协商结果: %dx%d @%.0f fps, 编码 %s "
                           "(请求 %s; 这里帧率低就别怪 CUDA)",
                           gw, gh, self.cap.get(cv2.CAP_PROP_FPS), fcc_got,
@@ -886,10 +1009,18 @@ class LaneFollow(object):
             # 协商结果和标定尺寸对不上 = 去畸变映射失配, 必须**吵**。
             # 之前就是被 to_4x3() 默默兜过去的: 画面看着正常, 实际视场是
             # 裁出来的, 线的角度和模板触发区全偏, 查了很久才找到。
-            if (gw, gh) != (self.W, self.H):
-                msg = ("相机给的是 %dx%d, 而鱼眼标定/映射表是 %dx%d —— "
+            if (gw, gh) == self.cam_req and self.cam_req != (self.W, self.H):
+                # 是**我们自己**要的高分辨率, 不是驱动乱给的 —— 提醒但放行
+                rospy.logwarn("相机按请求开在 %dx%d(标定是 %dx%d)。巡线会由 "
+                              "to_4x3 裁缩回标定尺寸; 认灯用整帧原生裁剪。"
+                              "⚠ 务必对一眼 dump/latest.jpg, 车道线位置和"
+                              "原来一致才说明这个模式的视场和标定一致。",
+                              gw, gh, self.W, self.H)
+            elif (gw, gh) != self.cam_req:
+                msg = ("相机给的是 %dx%d, 而请求的是 %dx%d(标定 %dx%d) —— "
                        "去畸变会失配(to_4x3 只是兜底裁缩, 视场对不上)。"
-                       % (gw, gh, self.W, self.H))
+                       % (gw, gh, self.cam_req[0], self.cam_req[1],
+                          self.W, self.H))
                 if self.allow_size_mismatch:
                     rospy.logerr("%s 已用 allow_size_mismatch 放行, 结果不可信",
                                  msg)
@@ -1001,6 +1132,19 @@ class LaneFollow(object):
         self.ga_dir_cfg = str(gp("~go_around_dir", "auto")).strip().lower()
         self.ga_max = int(gp("~go_around_max", 1))
         self.ga_cool = float(gp("~go_around_cooldown", 3.0))
+        # 绕完之后**终点横线**要压制多久。和 go_around_cooldown 拆开是因为
+        # 那一个参数原来同时管两件事, 而两件事的道理完全不同:
+        #   不认板子(ga_cool=3.0)  —— 合理: 刚绕完别立刻又把同一块板认出来
+        #   不认横线(这一个, 默认0)—— 没道理: 绕完板子在**车屁股后面**,
+        #     相机朝前根本看不见, 不存在"把板面当终点线"; 而防这个的本来
+        #     就是里程闸(两臂 2.40m), 那时早就放行了。
+        # 实车 2026-08-18 就栽在这: 终点线以 cov=1.00/line=1.00/16条 满分
+        # 检出, 却整段落在 3s 冷却里被丢弃, 线滑出扫描带比闸门打开只早了
+        # **0.045 秒**; 车又往前跑了 0.46m 才认到下一条横线, 在那儿打点再
+        # 推 0.5m, 撞墙。
+        # ⚠ 只关"绕障后"这一次。**岔口转弯后那次冷却照旧 3.0s** —— 那是防
+        #   分叉口自己那条横线被当成终点, 那个风险是真的。
+        self.ga_cool_goal = float(gp("~go_around_cooldown_goal", 0.0))
         # 闭环: 用雷达跟踪板子(+odom/IMU 卡尔曼)判断每一段走没走完;
         # fixed = 退回按固定距离开环走。
         self.ga_mode = str(gp("~go_around_mode", "track")).strip().lower()
@@ -1016,7 +1160,27 @@ class LaneFollow(object):
         self.ga_keep = float(gp("~go_around_keepout", 0.20))
         self.ga_clear = float(gp("~go_around_clear", self.ga_keep))
         self.ga_tail = float(gp("~go_around_tail", self.ga_keep))
-        self.ga_back_tol = float(gp("~go_around_back_tol", 0.04))
+        self.ga_back_tol = float(gp("~go_around_back_tol", 0.02))
+        # 横回段的"离中垂线多远"用哪个量:
+        #   odom(默认) 起绕那一刻(正面看, 整块板都在视野里, 估计最准)冻结板面
+        #        方向 u0 和当时的横向偏差 lat0, 之后 lat = lat0 + (odom 位移)·u0。
+        #        odom 十几秒内漂不了几毫米, 而卡尔曼从侧面/背面看板子只看得见
+        #        一小段弦(背面时车身挡掉大半, 实车 2026-08-19 只见 0.19m/0.42m),
+        #        拿弦中点当板心, 估计一路往看得见的那一侧偏 —— 回中"到位"了
+        #        实际还差 10cm。
+        #   kf   老逻辑, 用卡尔曼估的板心。
+        self.ga_back_src = str(gp("~go_around_back_src", "odom")).strip().lower()
+        # AVOID_POSE 到位(法向距 / 航向 / 离中垂线三项都进容差)后再稳这么久
+        # (秒)才横移: 边转边挪时估计还在动, 让它有时间真正对上板子中垂线;
+        # 稳定期里哪项又出了容差就接着调, 计时重来。0 = 到位立刻横移。
+        self.ga_pose_settle = float(gp("~go_around_pose_settle", 1.0))
+        self._ga_pose_ok_t = None
+        self._ga_u0 = None            # 起绕时冻结的板面方向(odom 系)
+        self._ga_p0 = None            # 起绕时车心(odom)
+        self._ga_lat0 = 0.0           # 起绕时离中垂线多远(正面看的估计)
+        self._ga_lon0 = 0.0           # 起绕时车心到板面的法向距
+        self._ga_rear_n = 0           # 横回段背面重捕获成功次数
+        self._ga_rear_last = None     # 最近一次量到的法向距
         # 闭环只允许在开环几何目标的 [min_frac, 1.25] 倍之间修正
         self.ga_min_frac = float(gp("~go_around_min_frac", 0.85))
         # 板子张角小于这么多个角度分辨率就认为"几何上看不见", 纯预测滑过去
@@ -1054,24 +1218,72 @@ class LaneFollow(object):
         self._early_hits = 0
         self._veto_warn = False
         self._veto_log_t = 0.0
-        # 终点判据: vision=只看白线(旧逻辑) / wall=只用围挡定位 / both=都行
-        self.goal_mode = str(gp("~goal_mode", "vision")).strip().lower()
-        self.goal_wall_dist = float(gp("~goal_wall_dist", 0.25))
-        self.field_w = float(gp("~field_w", 5.0))
-        self.field_h = float(gp("~field_h", 2.5))
-        self.field_tol = float(gp("~field_tol", 0.25))
-        self._wall_log_t = 0.0
+        # 终点判据: visual = 只看白线(默认) / both = 白线 **或** 地图定位
+        # (离 goal_map_xy 不到 goal_map_dist 米)都触发。白线那一路始终是视觉,
+        # 地图那一路靠完整版驱动里 robot_pose_publisher 发的 map->base_link
+        # 位姿(/robot_pose, geometry_msgs/Pose 或 PoseStamped 都收); 精简版
+        # 没这个 topic, both 就等于 visual, 不报错不告警。
+        # 旧值 vision/wall 兼容: vision->visual, wall->both(整场矩形拟合那套
+        # 已经删了, 别再用)。
+        gm = str(gp("~goal_mode", "visual")).strip().lower()
+        self.goal_mode = {"vision": "visual", "wall": "both"}.get(gm, gm)
+        if self.goal_mode not in ("visual", "both"):
+            rospy.logwarn("goal_mode=%r 不认识, 按 visual", gm)
+            self.goal_mode = "visual"
+        self.pose_topic = str(gp("~pose_topic", "/robot_pose"))
+        self.goal_map_dist = float(gp("~goal_map_dist", 0.50))
+        self.pose_fresh = float(gp("~pose_fresh", 1.0))
+        self.goal_map_xy = None
+        gxy = str(gp("~goal_map_xy", "")).strip()
+        if gxy:
+            try:
+                parts = [float(v) for v in gxy.replace(";", ",").split(",")]
+                if len(parts) != 2:
+                    raise ValueError("要 2 个数")
+                self.goal_map_xy = (parts[0], parts[1])
+            except Exception as e:
+                rospy.logwarn("goal_map_xy=%r 解析失败(%s), 地图终点不用", gxy, e)
+        if self.goal_mode == "both" and self.goal_map_xy is None:
+            rospy.logwarn("goal_mode=both 但没给 goal_map_xy(地图系终点坐标), "
+                          "地图那一路不会触发 -> 等于 visual")
+        self._map_pose = None            # (x, y, yaw) map 系
+        self._map_pose_t = 0.0
+        self._map_pose_type = ""
+        self._map_log_t = 0.0
+        self._map_why = ""
+        if self.goal_mode == "both" and self.goal_map_xy is not None:
+            # AnyMsg: Pose / PoseStamped 都收, 按连接头里的类型再反序列化;
+            # 订错类型 rospy 会拒连并刷 ERROR, 用 AnyMsg 就没这个问题
+            rospy.Subscriber(self.pose_topic, rospy.AnyMsg, self.pose_cb,
+                             queue_size=1)
+            rospy.loginfo("终点: 白线(视觉) 或 地图定位 %s 离 (%.2f, %.2f) "
+                          "< %.2fm; 没这个 topic 就只剩白线",
+                          self.pose_topic, self.goal_map_xy[0],
+                          self.goal_map_xy[1], self.goal_map_dist)
         # ---- 终点角落雷达闭环 --------------------------------------
         # 目标距离是雷达坐标已换算到 base_link 车心后的距离，不是雷达
         # 光心到墙的原始 range。默认 0.25m，对应用户要求的 0.24~0.26m。
         self.corner_target_dist = float(gp("~corner_target_dist", 0.25))
+        # 侧墙(车道那一侧的围挡)目标距离: 车道 42cm, 车在道中间就是 0.21
+        self.corner_target_side_dist = float(
+            gp("~corner_target_side_dist", 0.21))
         self.corner_target_tol = float(gp("~corner_target_tol", 0.01))
         # 必须能看到 1m 以上的墙，才能决定是否退回原来的前进停车。
         self.corner_max_fit_dist = float(gp("~corner_max_fit_dist", 2.00))
         self.corner_fallback_dist = float(
             gp("~corner_fallback_dist", 1.00))
-        self.corner_sector_half_width = float(
-            gp("~corner_sector_half_width", 0.45))
+        # 身后 back_excl 度锥内的线不当墙(那是刚绕过的拦路板); 只拟到一条
+        # 时它得在前方 ±front_half 度内才按"只有前墙"闭环
+        self.corner_back_excl_deg = float(gp("~corner_back_excl_deg", 40.0))
+        self.corner_front_half_deg = float(gp("~corner_front_half_deg", 60.0))
+        # 航向对齐: 离最近车体轴 <= 这个角才去转(转到和墙平行); 更斜(比如
+        # 顶着角尖 45° 进场)就不转了, 直接沿墙法向斜着滑进去 —— 终点只看
+        # 位置不看朝向, 转 45° 白花好几秒
+        self.corner_yaw_align_max_deg = float(
+            gp("~corner_yaw_align_max_deg", 35.0))
+        # true = 老逻辑: 先把航向转到位再平移; false(默认) = 边转边平移
+        # (平移沿**当帧量到的墙法向**走, 转不转都不耦合)
+        self.corner_turn_first = bool(gp("~corner_turn_first", False))
         self.corner_min_pts = int(gp("~corner_min_pts", 8))
         self.corner_min_span = float(gp("~corner_min_span", 0.12))
         self.corner_max_residual = float(
@@ -1089,6 +1301,21 @@ class LaneFollow(object):
         self.corner_stable_frames = int(
             gp("~corner_stable_frames", 5))
         self.corner_timeout = float(gp("~corner_timeout", 30.0))
+        # 进 CORNER_ADJUST 后这么久还没拟合到前墙就退回盲推(秒)。以前是原地
+        # 干等到 corner_timeout(30s) 才 STOPPED —— 车停在半路不动。
+        self.corner_no_wall_grace = float(gp("~corner_no_wall_grace", 1.5))
+        # 停滞判定: 这么多秒没进展就升级(放宽容差 -> 直接下一步)
+        self.corner_stall_s = float(gp("~corner_stall_s", 3.0))
+        self._corner_level = 0
+        self._corner_yaw_forced = False
+        self._corner_best_prog = float("inf")
+        self._corner_prog_t = 0.0
+        # 终点雷达闭环逐帧落盘(dump/corner_trace_NN.jsonl), 默认开
+        self.corner_trace_on = bool(gp("~corner_trace", True))
+        self._corner_fh = None
+        self._corner_n = 0
+        self._corner_trace_warned = False
+        self._corner_first_ok_t = None
         self.corner_t0 = None
         self.corner_stable = 0
         self._corner_log_t = 0.0
@@ -1144,6 +1371,8 @@ class LaneFollow(object):
         self.goal_gate_arm = float(gp("~goal_gate_arm", 2.40))
         self.goal_gate_y = float(gp("~goal_gate_y", 2.00))
         self._goal_gate_t = 0.0
+        self._goal_why = None        # 这一帧 HIT 却没停的原因(给 dump 图用)
+        self._goal_why_last = ""     # 上一条打过的原因(原因一变就重新打)
         self.board_self_margin = float(gp("~board_self_margin", 0.03))
         self.board_lidar_x = float(gp("~board_lidar_x", -0.11))
         self.board_yaw_off = math.radians(float(gp("~board_lidar_yaw_deg", 0.0)))
@@ -1197,6 +1426,33 @@ class LaneFollow(object):
         # 绕障收尾时用板子法向把航向也归位(度)。板子横跨赛道, 法向 = 车道
         # 方向。0 = 不对齐(保持"航向角全程不变"的老行为)。
         self.ga_align_deg = float(gp("~go_around_align_deg", 3.0))
+        # 两臂的车道中心线半径(米), 0 = 关掉曲率修正。
+        #
+        # 为什么需要它: 绕板三段全在**板子系**里走直线, 而板法线只是
+        # **板子那一点**的车道切线。第二段前进那 d 米走的是直线, 车道却是
+        # 弧 —— 等车走到板后 d 米, 真正的车道中心线已经转过 φ=asin(d/R)、
+        # 并往弯道内侧偏了 R(1-cosφ)。于是收尾"回中垂线 + 对齐板法向"把车
+        # 摆在了一个过期的基准上, 航向和横向双双差一截, 后半程越走越偏。
+        # 用户实测(2026-08-18): 偏航 15°、横向 5cm。这两个数是自洽的 ——
+        #   由 15° 反解 R = 0.371/sin15°    = 1.433m
+        #   由 5cm 反解 R = 0.05/(1-cos15°) = 1.467m
+        # 差 2%, 是同一个圆, 所以默认取 1.43。
+        # ⚠ 修正量跟着**实际**前进距离走(用板子系的 lon), 不是写死 15°:
+        #   前进 0.371m -> 15.0°/4.9cm;  0.45m -> 18.3°/7.2cm;
+        #   0.58m -> 23.9°/12.3cm(加了 sigma 余量时会走这么远)
+        # ⚠ 只在**两臂**上修: Y 支路是直线, 没有曲率。
+        self.arc_r = float(gp("~board_arc_r", 1.43))
+        self.arc_max_deg = float(gp("~board_arc_max_deg", 30.0))
+        # 横向修正的倍率。航向和横向本来是同一个 R 算出来的(phi=asin(d/R),
+        # off=R(1-cos phi)), 绑死在一起 —— 调 R 会同时动两个。这个倍率把
+        # **横向**单独拎出来, 航向不受影响:
+        #   1.0 = 按几何算(默认)   0 = 只修航向不修横向
+        #   0.5 = 只修一半
+        # 为什么留这个口子: 航向 15° 是"车头朝向对不对", 错了后半程会一路
+        # 越走越偏, 修它稳赚; 横向 5cm 是"站位偏不偏", 而收尾之后马上就回到
+        # 视觉巡线, 巡线本身就在纠横向偏差 —— 万一 R 估得不准, 横向修过头
+        # 反而是给巡线添乱。所以这两件事该能分开调。
+        self.arc_lat_scale = float(gp("~board_arc_lat_scale", 1.0))
         self._ga_az = 0.0
         self._ga_lat_min = 9.9      # AVOID_BACK 过冲保护: 见过的最小 |lat|
         self._ga_preturn = False    # 这一次绕障要不要先转正
@@ -1527,41 +1783,52 @@ class LaneFollow(object):
             return None
         return self.odom_xy[0], self.odom_xy[1], yaw
 
-    def wall_goal(self):
-        """用围挡定位判终点: 场地是封闭矩形, 终点框(实测 50x50cm)就塞在
-        角落里。拟合四面墙 -> 取正前方那面 -> 车心离它 goal_wall_dist 就
-        到位。
+    def pose_cb(self, msg):
+        """/robot_pose(map->base_link)。AnyMsg 进来, 看类型再反序列化。"""
+        try:
+            typ = msg._connection_header.get("type", "")
+            if typ == "geometry_msgs/PoseStamped":
+                m = PoseStamped()
+                m.deserialize(msg._buff)
+                p = m.pose
+            elif typ == "geometry_msgs/Pose":
+                m = Pose()
+                m.deserialize(msg._buff)
+                p = m
+            else:
+                if self._map_pose_type != typ:
+                    self._map_pose_type = typ
+                    rospy.logwarn("%s 是 %s, 不是 Pose/PoseStamped, 地图终点不用",
+                                  self.pose_topic, typ)
+                return
+            q = p.orientation
+            yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                             1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+            self._map_pose = (float(p.position.x), float(p.position.y), yaw)
+            self._map_pose_t = time.time()
+            if self._map_pose_type != typ:
+                self._map_pose_type = typ
+                rospy.loginfo("收到 %s (%s), 地图终点判据启用", self.pose_topic, typ)
+        except Exception as e:
+            if self._map_pose_type != "err":
+                self._map_pose_type = "err"
+                rospy.logwarn("%s 解析失败(%r), 地图终点不用", self.pose_topic, e)
 
-        比看白线强在哪:
-          - 白线是分割网判的, 板子的白面会被判成白线(实车就是冲着这个来的);
-            围挡是实物, 拿雷达量, 板子影响不了
-          - 量的是**垂直**距离, 和车头有没有对正墙无关; 单束激光读数在
-            偏 20° 时会被 1/cos 放大 6%
-          - 直接给出"还差多少米", 不用"检出横线->再盲走 N 米"那套
-        实测(仿真, 含杂物/板子/3cm 噪声/两个角落/两种进入朝向): 误差 <=0.3cm;
-        噪声 6cm 或一面墙被挡掉大半时, 长宽对不上, 自动拒绝(不误判)。
-        返回 (到位了没, 前墙距离, 说明)。"""
-        if self.goal_mode not in ("wall", "both"):
+    def map_goal(self):
+        """地图定位判终点: 返回 (到了没, 离终点多远(m, 没定位=-1), 说明)。
+        goal_mode=both 且拿到了新鲜的 /robot_pose 才可能 True; 没 topic /
+        位姿过期(> pose_fresh 秒) / 没配 goal_map_xy 都静默返回 False。"""
+        if self.goal_mode != "both" or self.goal_map_xy is None:
             return False, -1.0, ""
-        if not self.scan_fresh():
-            return False, -1.0, "无雷达"
-        m = self.scan
-        xs, ys = scan_xy(m.ranges, m.angle_min, m.angle_increment,
-                         max(0.05, m.range_min), min(16.0, m.range_max),
-                         lidar_x=self.board_lidar_x, yaw_off=self.board_yaw_off,
-                         self_margin=self.board_self_margin)
-        w = wall_fit(xs, ys, W=self.field_w, H=self.field_h,
-                     tol=self.field_tol)
-        if w is None:
-            return False, -1.0, "点太少"
-        if w["bad"]:
-            return False, -1.0, w["bad"]
-        if w["ahead"] is None:
-            return False, -1.0, "看不到前墙"
-        a, d, n = w["ahead"]
-        return (d <= self.goal_wall_dist), d, \
-            "前墙 %.2fm 方位 %+.0f° 点%d 量出 %.2fx%.2f" % (
-                d, math.degrees(a), n, w["dims"][0], w["dims"][1])
+        if self._map_pose is None:
+            return False, -1.0, "无 %s" % self.pose_topic
+        age = time.time() - self._map_pose_t
+        if age > self.pose_fresh:
+            return False, -1.0, "位姿过期 %.1fs" % age
+        dx = self.goal_map_xy[0] - self._map_pose[0]
+        dy = self.goal_map_xy[1] - self._map_pose[1]
+        d = math.hypot(dx, dy)
+        return d <= self.goal_map_dist, d, "离终点 %.2fm" % d
 
     def goal_board_veto(self):
         """视觉说"前方有终点横线", 但那其实是拦路板吗?
@@ -1696,9 +1963,55 @@ class LaneFollow(object):
         if abs(yaw_err) > math.pi / 2.0:      # 取反向那一支
             n1 = math.atan2(-uxo, uyo)
             yaw_err = math.atan2(math.sin(n1 - yaw), math.cos(n1 - yaw))
-        return dict(bx=bx, by=by, by_end=by_end, need_lat=need_lat,
-                    need_back=need_back, yaw=yaw, sx=sx, sy=sy,
-                    lat=lat, lon=lon, yaw_tgt=n1, yaw_err=yaw_err)
+        # ---- 曲率修正(只在两臂) ----
+        # 板法线是**板子那一点**的切线; 车已经沿着它直走了 |lon| 米, 而真正
+        # 的车道在这段里转过 phi=asin(|lon|/R)、并往弯道内侧偏了 R(1-cos phi)。
+        # 所以把"目标中垂线"和"目标航向"都往圆心那侧搬这么多。
+        # ⚠ 只在**板后收尾**那两段修, 不是整个绕障过程都修:
+        #     AVOID_BACK  横回 -> 目标中垂线要搬
+        #     AVOID_ALIGN 对航向 -> 目标航向要搬
+        #   板**前**的 AVOID_TURN0(预转正)绝对不能修 —— 那一段的目标本来
+        #   就该是板法向, 车得摆正了才能干净地横移过去。在那儿按 |lon| 算
+        #   出来的 phi(板前 0.3m 就是 12°)会把车一开局就拧歪, 横移直接
+        #   蹭板面。AVOID_OUT/FWD/REV 用的是 by_end/bx, 不碰 lat/yaw_err,
+        #   本来就不受影响, 列在这里只是为了说清楚范围。
+        arc_phi = arc_lat = 0.0
+        if (self.arc_r > 0.0 and abs(self.start_turn_deg) > 1.0
+                and self.phase in ("AVOID_BACK", "AVOID_ALIGN")):
+            # ⚠ 方向取 ga_turn_side() 的几何规则(小半径侧 = 圆心那侧),
+            #   **不能**用 ga_sign: 那一侧被挡住时 ga_choose_dir 会翻到另一
+            #   边去让, 而赛道往哪弯跟车从哪边绕过去毫无关系。
+            arc_sgn = self.ga_turn_side()[0]          # +1 左 / -1 右
+            phi = math.asin(min(0.95, abs(lon) / self.arc_r))
+            phi = min(phi, math.radians(self.arc_max_deg))
+            arc_phi = arc_sgn * phi
+            # 横向单独乘一个倍率, 航向不受影响(见 arc_lat_scale 的说明)
+            off = (self.arc_r * (1.0 - math.cos(phi))) * self.arc_lat_scale
+            # lat 是沿 +u 量的; +u 在车体系里的 y 分量是 uy, 车体 +y = 左。
+            # 所以 +u 指向圆心那侧 <=> uy * arc_sgn > 0。
+            u_side = 1.0 if (uy * arc_sgn) > 0 else -1.0
+            arc_lat = u_side * off
+            lat -= arc_lat                            # 改成"离修正后中线多远"
+            n1 = n1 + arc_phi
+            yaw_err = math.atan2(math.sin(n1 - yaw), math.cos(n1 - yaw))
+        # odom 推算的横向偏差(见 go_around_back_src): 起绕时冻结的 u0 / lat0
+        out = dict(bx=bx, by=by, by_end=by_end, need_lat=need_lat,
+                   need_back=need_back, yaw=yaw, sx=sx, sy=sy,
+                   lat=lat, lon=lon, yaw_tgt=n1, yaw_err=yaw_err,
+                   arc_phi=arc_phi, arc_lat=arc_lat,
+                   ux=float(ux), uy=float(uy))      # 板面方向(车体系)
+        if self._ga_u0 is not None and self._ga_p0 is not None:
+            ddx, ddy = cx - self._ga_p0[0], cy - self._ga_p0[1]
+            out["lat_odom"] = (self._ga_lat0 + ddx * self._ga_u0[0] +
+                               ddy * self._ga_u0[1] - arc_lat)
+            # 法向距同样按 odom 推(和上面 lon 同一个符号约定):
+            # 车越过板子后雷达看不见背面, 卡尔曼一丢前进段就只剩开环 "moved",
+            # 而 moved 是路程(含横移里蹭出来的纵向漂移), 起算点又是名义站位
+            # 而不是实测 —— 实车 2026-08-19: 站位实测 0.319, 开环按 0.271 算,
+            # 前进少走 5cm, 车尾离板面只剩 2cm(要 10cm)。
+            out["lon_odom"] = (self._ga_lon0 - ddx * self._ga_u0[1] +
+                               ddy * self._ga_u0[0])
+        return out
 
     def dump_avoid_scan(self, sgn, why):
         """触发绕障的那一帧, 把整圈雷达点画成散点图存进 dump/。
@@ -1813,6 +2126,8 @@ class LaneFollow(object):
                 "ga_sign": self.ga_sign,
                 "ga_rev": round(self.ga_rev, 4),
                 "ga_side": round(self.ga_side_eff(), 4),
+                "rear_lon": self._ga_rear_last,
+                "rear_n": self._ga_rear_n,
                 "ga_fwd": round(self.ga_fwd_now, 4),
                 "keepout": self.ga_keep,
                 "half_l": self.car_half_l, "half_w": self.car_half_w,
@@ -1919,6 +2234,7 @@ class LaneFollow(object):
         self.ga_lost = 0
         self.ga_blind = 0
         self.ga_out_dist = 0.0
+        self.ga_side_now = 0.0        # 本次横让开环距离(按板端实际位置补偿)
         self.kf = BoardKF()
         pose = self.car_pose()
         if self.ga_mode == "track" and pose is not None and self.scan is not None:
@@ -1946,6 +2262,9 @@ class LaneFollow(object):
             rospy.logwarn("绕障: 没能锁定板子(没有雷达/odom?), 退回按固定"
                           "距离开环走")
         self.ga_sign, why = self.ga_choose_dir()
+        # 冻结正面看到的板面方向和当前横向偏差, 横回段按 odom 位移回中
+        # (站位段结束时会再冻结一次, 那时车已经对到中垂线上, lat0≈0)
+        self._ga_freeze_ref("起绕")
         self.dump_avoid_scan(self.ga_sign, why)
         if self.ga_trace_on and self.dump_dir:
             try:
@@ -1975,13 +2294,25 @@ class LaneFollow(object):
         # 实车 Y 支路进场歪 24.9°, 横移 0.414m 里有 0.174m 是不请自来的
         # 纵向位移 —— 三段互相污染, 净空全不作数。所以先转正再绕。
         gg = self.ga_geom()
-        self._ga_preturn = (self.ga_align_deg > 0 and gg is not None and
-                            abs(gg["yaw_err"]) > math.radians(
-                                self.ga_align_deg))
-        # 原地转的时候车身扫过一个半径 hypot(半长,半宽)=0.214m 的圆, 比
-        # 车半长还大 —— 要预转就得按这个半径留净空, 否则转的时候角会蹭上。
-        need = (math.hypot(self.car_half_l, self.car_half_w)
-                if self._ga_preturn else self.car_half_l) + self.ga_keep
+        preturn = (self.ga_align_deg > 0 and gg is not None and
+                   abs(gg["yaw_err"]) > math.radians(self.ga_align_deg))
+        self._ga_preturn = False           # 老的 REV->TURN0->REV 三段不再走
+        if preturn:
+            # 站位+转正合成**一段**(AVOID_POSE): 边转边沿板法向挪到"车头离板
+            # 一个禁区"。以前是 倒车(留原地转的扫掠半径) -> 原地转正 -> 再前
+            # 进到站位, 三段串行白花好几秒。合并的依据: 车身沿板法向的伸出量
+            # 是 半长|cos ψ|+半宽|sin ψ|, ψ<36.8°(atan 半宽/半长)时它随 ψ 单调
+            # 减小 —— 一边转正一边前进, 净空只会越来越富余; 每帧按**当前 ψ**
+            # 算目标站位 keep+伸出量(ψ), 转到 0 时它就是 半长+keep, 和老站位
+            # 一样。ψ 更大(罕见)时先倒到 hypot 半径外再转, 见 step_go_around。
+            self.ga_rev = -(self.board_d - (self.car_half_l + self.ga_keep))
+            self._ga_pose_ok_t = None
+            self.set_phase("AVOID_POSE", "绕障: 边转正(还差 %.1f°)边%s到板前 "
+                           "%.2fm 站位" % (math.degrees(gg["yaw_err"]),
+                                          "前进" if self.ga_rev < 0 else "后退",
+                                          self.ga_keep))
+            return
+        need = self.car_half_l + self.ga_keep
         gap = self.board_d - need          # 正=还差这么多才到位, 负=太近了
         if self.board_d > 0.05 and abs(gap) > 0.02:
             self.ga_rev = -gap             # gap>0 -> 负 -> 前进
@@ -2000,6 +2331,84 @@ class LaneFollow(object):
                           self.ga_side_eff(), self.ga_fwd_now,
                           self.board_d, why))
 
+    def ga_rear_plane(self, g):
+        """横回段: 从这一帧雷达里找车**后方**板子的背面(哪怕只露一小截弦),
+        拟直线, 返回车心到板面的法向距(负数 = 板在车后), 找不到 None。
+
+        为什么单独来一遍而不用卡尔曼: 卡尔曼更新的是**板心**, 背面只露一
+        小截时弦中点当板心会偏(横向); 但**板面在哪**(法向距)一小截弦也量得
+        准 —— 直线的垂距不看弦长。横回段真正危险的是车尾贴着板面蹭过板端,
+        要的就是这个法向距。实车 2026-08-19 雷达后方 -118°~-94° 整块无回波,
+        前进段末尾根本看不见板子, 只能等横回时板子转进可见扇区再量。
+        """
+        m = self.scan
+        if m is None or g is None or "lon_odom" not in g:
+            return None
+        xs, ys = scan_xy(m.ranges, m.angle_min, m.angle_increment,
+                         max(0.05, m.range_min), min(16.0, m.range_max),
+                         lidar_x=self.board_lidar_x, yaw_off=self.board_yaw_off,
+                         self_margin=self.board_self_margin)
+        if len(xs) == 0:
+            return None
+        lon = g["lon_odom"]                        # odom 推的板面法向距(<0)
+        ux, uy = g["ux"], g["uy"]                  # 板面方向(车体系)
+        nx, ny = -uy, ux                           # 板面法向(车体系)
+        if nx > 0:                                 # 取指向车后的那一支
+            nx, ny = -nx, -ny
+        # 沿法向离 odom 预测的板面 12cm 以内、沿板面方向落在板子范围(+余量)
+        # 内的点。lat_odom 是车心离中垂线的距离, 板心在车体系里沿 u 就是 -lat
+        d_n = xs * nx + ys * ny                    # 沿法向(车后为正)
+        d_u = xs * ux + ys * uy                    # 沿板面
+        lat = g.get("lat_odom", g["lat"])
+        keep = (np.abs(d_n - (-lon)) <= 0.12) & \
+            (np.abs(d_u + lat) <= self.kf.half + 0.15)
+        if int(keep.sum()) < 5:
+            return None
+        P = np.column_stack([xs[keep], ys[keep]])
+        c = P.mean(axis=0)
+        A = P - c
+        vals, vecs = np.linalg.eigh(np.dot(A.T, A))
+        tg = vecs[:, int(np.argmax(vals))]
+        # 方向得和板面方向差不多(<20°), 否则是别的东西(围挡/车尾杂点)
+        if abs(float(tg[0] * ux + tg[1] * uy)) < math.cos(math.radians(20.0)):
+            return None
+        span = float(np.dot(A, tg).max() - np.dot(A, tg).min())
+        if span < 0.06:
+            return None
+        nm = np.array([-tg[1], tg[0]])
+        perp = np.dot(A, nm)
+        if float(np.sqrt(np.mean(perp ** 2))) > 0.03:
+            return None
+        dist = float(np.dot(c, nm))                # 车心到板面的有向距离
+        if nm[0] * nx + nm[1] * ny < 0:            # 法向统一成指向车后
+            dist = -dist
+        return -dist                               # 板在车后 -> 负
+
+    def _ga_freeze_ref(self, tag):
+        """冻结板面方向 u0(odom 系)、车心 p0 和当前离中垂线 lat0, 给横回段按
+        odom 回中用。要在**正面看得见整块板**的时候冻(起绕 / 站位结束)。"""
+        pose = self.car_pose()
+        if not (self.kf.ready() and pose is not None):
+            return
+        g0 = self.ga_geom()
+        if g0 is None:
+            return
+        self._ga_u0 = (float(self.kf.u[0]), float(self.kf.u[1]))
+        self._ga_p0 = (pose[0], pose[1])
+        # 不带曲率修正的原始 lat(ga_geom 在板前不修, 但保险起见加回来)
+        self._ga_lat0 = float(g0["lat"] + g0.get("arc_lat", 0.0))
+        self._ga_lon0 = float(g0["lon"])
+        rospy.loginfo("绕障(%s): 冻结板面方向 u0=(%.2f,%.2f) 横向偏差 %.3fm "
+                      "法向距 %.3fm, 前进/横回按 %s 判", tag, self._ga_u0[0],
+                      self._ga_u0[1], self._ga_lat0, self._ga_lon0,
+                      self.ga_back_src)
+
+    def _ga_pose_target(self, psi):
+        """站位目标(车心到板面的法向距离): 禁区 + 车身沿板法向的伸出量。
+        车头歪 ψ 时伸出量 = 半长|cos ψ| + 半宽|sin ψ|; ψ=0 就是 半长+keep。"""
+        return (self.ga_keep + self.car_half_l * abs(math.cos(psi)) +
+                self.car_half_w * abs(math.sin(psi)))
+
     def step_go_around(self):
         """返回 (vx, vy); 相位推进在内部完成。
 
@@ -2008,11 +2417,14 @@ class LaneFollow(object):
         问题都不会让车一直挪下去。"""
         d = self.moved_since_mark()
         lim = {"AVOID_REV": abs(self.ga_rev),
-               "AVOID_OUT": self.ga_side_eff(),
+               "AVOID_POSE": abs(self.ga_rev) + 0.10,
+               "AVOID_OUT": self.ga_side_now or self.ga_side_eff(),
                "AVOID_FWD": self.ga_fwd_now,
-               "AVOID_BACK": self.ga_out_dist or self.ga_side_eff(),
+               "AVOID_BACK": self.ga_out_dist or self.ga_side_now or
+               self.ga_side_eff(),
                "AVOID_ALIGN": 9.9, "AVOID_TURN0": 9.9}[self.phase]
-        name = {"AVOID_REV": "站位", "AVOID_OUT": "横移", "AVOID_FWD": "前进",
+        name = {"AVOID_REV": "站位", "AVOID_POSE": "站位+转正",
+                "AVOID_OUT": "横移", "AVOID_FWD": "前进",
                 "AVOID_BACK": "横回", "AVOID_ALIGN": "对航向",
                 "AVOID_TURN0": "转正"}[self.phase]
         lim_hard = lim * 1.25 + 0.10        # 闭环可以比开环多走一点点
@@ -2032,12 +2444,43 @@ class LaneFollow(object):
                               "(连续跟丢 %d 帧), 本段改用开环距离",
                               self.kf.sigma(), self.ga_max_sigma,
                               self.kf.miss)
+            # 横回段按 odom 回中不需要信卡尔曼(u0/lat0 是起绕时冻结的):
+            # 卡尔曼跟丢也照常闭环。实车 2026-08-19: 车刚过板子雷达看不到
+            # 背面, sigma 涨过阈值, 横回前 60 帧全是开环。
+            if g is None and self.phase in ("AVOID_FWD", "AVOID_BACK") and \
+                    self.ga_back_src == "odom" and self._ga_u0 is not None:
+                g = self.ga_geom()
         if g is None:
             self.ga_lost += 1
             done = d >= lim
             src = "开环 %.2f/%.2f" % (d, lim)
         else:
-            if self.phase == "AVOID_REV":
+            if self.phase == "AVOID_POSE":
+                psi = g["yaw_err"]
+                tgt = self._ga_pose_target(psi)
+                e = abs(g["lon"]) - tgt
+                # 三项: 法向距(站位) / 航向(转正) / 离中垂线(对中)。对中用的
+                # 是正面看的卡尔曼 lat(整块板在视野里, 这时最准)。
+                # 两项: 法向距(站位) / 航向(转正)。**不对中垂线**: 离中垂线的
+                # 偏差 lat 在站位到位时冻结成 lat0, 横让距离按板端实际位置算、
+                # 横回按 odom 回到 lat=0, 偏差就这么补掉了, 不用在板前多挪。
+                in_tol = (abs(e) <= 0.02 and
+                          abs(psi) <= math.radians(self.ga_align_deg))
+                if in_tol:
+                    if self._ga_pose_ok_t is None:
+                        self._ga_pose_ok_t = time.time()
+                    held = time.time() - self._ga_pose_ok_t
+                    done = held >= self.ga_pose_settle
+                else:
+                    self._ga_pose_ok_t = None
+                    held = 0.0
+                    done = False
+                src = ("板法向距 %.3f/%.3f 航向偏 %.1f°/%.1f° (离中垂线 %.3f, 不在"
+                       "这儿对)%s" % (abs(g["lon"]), tgt, math.degrees(psi),
+                                    self.ga_align_deg, g["lat"],
+                                    (" 已到位, 稳定 %.1f/%.1fs" %
+                                     (held, self.ga_pose_settle)) if in_tol else ""))
+            elif self.phase == "AVOID_REV":
                 # 双向: 往后倒是要把板心推远到 need 以上, 往前挪是要把它
                 # 拉近到 need 以下, 判据跟着方向反过来。
                 _n = self.car_half_l + self.ga_keep
@@ -2047,14 +2490,33 @@ class LaneFollow(object):
                 done = abs(g["by_end"]) >= g["need_lat"]
                 src = "板端横向 %.3f/%.3f" % (abs(g["by_end"]), g["need_lat"])
             elif self.phase == "AVOID_FWD":
-                done = g["bx"] <= g["need_back"]
-                src = "板心纵向 %+.3f/%.3f" % (g["bx"], g["need_back"])
+                use_odom = self.ga_back_src == "odom" and "lon_odom" in g
+                if use_odom:
+                    # 车尾过板面 tail: 板心法向距 <= -(半长 + tail), 不加 σ
+                    # (odom 量没有"估计越不准"这回事)。卡尔曼还信得过(σ 没超)
+                    # 的话它也得点头 —— 两个量谁说"还没过"就听谁, 宁多走几厘米。
+                    # (odom 推的 lon 会被冻结方向 u0 的角误差串扰: 横让 0.5m、
+                    #  u0 偏 3° 就是 2.6cm; 实车 2026-08-19 odom 说 -0.266,
+                    #  背面实测 -0.23)
+                    tgt = -(self.car_half_l + self.ga_tail)
+                    kf_ok = self.kf.sigma() <= self.ga_max_sigma
+                    kf_clear = (g["bx"] <= -(self.car_half_l + self.ga_tail)) \
+                        if kf_ok else True
+                    done = g["lon_odom"] <= tgt and kf_clear
+                    src = "板面法向距 %+.3f/%.3f [odom; kf bx=%+.3f%s]" % (
+                        g["lon_odom"], tgt, g["bx"],
+                        "" if kf_ok else " 不可信")
+                else:
+                    done = g["bx"] <= g["need_back"]
+                    src = "板心纵向 %+.3f/%.3f" % (g["bx"], g["need_back"])
             elif self.phase == "AVOID_BACK":
                 # ⚠ 在**板子系**里回中: lat 是车心离板子中垂线的距离。
                 # 以前用车体系的 by(板心在车体 y 上的投影), 那等于"板心在
                 # 车正前方", 只有车头恰好垂直板面时才等价于中垂线 —— 车
                 # 进来时歪多少, 回完中就原样歪多少, 后面越走越偏。
-                lat = abs(g["lat"])
+                lat_kf = abs(g["lat"])
+                use_odom = self.ga_back_src == "odom" and "lat_odom" in g
+                lat = abs(g["lat_odom"]) if use_odom else lat_kf
                 # 过冲保护: |lat| 一旦从最小值明显回升, 说明已越过中垂线
                 # 正在越走越远, 立刻收 —— 这条判据是**单峰**的, 错过最低点
                 # 就再也不满足了。实车 2026-08-16: 0.512 一路降到 0.014
@@ -2075,12 +2537,18 @@ class LaneFollow(object):
                 elif not armed:
                     extra = " [横移 %.3f<%.2f, 过冲保护未上膛]" % (
                         d, self.ga_back_arm)
-                src = "离中垂线 %.3f/%.3f (最近 %.3f, 车体系 by=%.3f)%s" % (
-                    lat, self.ga_back_tol, self._ga_lat_min, g["by"], extra)
+                src = "离中垂线 %.3f/%.3f [%s; kf=%.3f] (最近 %.3f, 车体系 by=%.3f)%s%s" % (
+                    lat, self.ga_back_tol, "odom" if use_odom else "kf",
+                    lat_kf, self._ga_lat_min, g["by"], extra,
+                    ("  [曲率修正 %+.1f° %+.0fmm]"
+                     % (math.degrees(g["arc_phi"]), 1000 * g["arc_lat"]))
+                    if g.get("arc_phi") else "")
             else:                       # AVOID_ALIGN / AVOID_TURN0
                 done = abs(g["yaw_err"]) <= math.radians(self.ga_align_deg)
-                src = "航向偏 %.1f°/%.1f°" % (math.degrees(g["yaw_err"]),
-                                              self.ga_align_deg)
+                src = "航向偏 %.1f°/%.1f°%s" % (
+                    math.degrees(g["yaw_err"]), self.ga_align_deg,
+                    ("  [曲率修正 %+.1f°]" % math.degrees(g["arc_phi"]))
+                    if g.get("arc_phi") else "")
             src += " sig纵%.3f横%.3f 跟丢%d 更新%d" % (
                 g["sx"], g["sy"], self.kf.miss, self.kf.n_upd)
             if self.ga_blind:
@@ -2097,7 +2565,7 @@ class LaneFollow(object):
             #               还在原地转了半分钟, 就是这么卡住的。
             # 两段都豁免。
             if done and self.phase not in ("AVOID_BACK", "AVOID_ALIGN",
-                                           "AVOID_TURN0") \
+                                           "AVOID_TURN0", "AVOID_POSE") \
                     and d < self.ga_min_frac * lim:
                 done = False
                 src += " [未到%.0f%%下限, 不采信]" % (self.ga_min_frac * 100)
@@ -2116,6 +2584,9 @@ class LaneFollow(object):
         # (它位移恒为 0, 用距离算出来是几百秒, 等于没有超时保护)。
         if self.phase in ("AVOID_ALIGN", "AVOID_TURN0"):
             budget = 8.0
+        elif self.phase == "AVOID_POSE":
+            budget = (lim_hard / max(0.05, self.ga_speed) * 2.0 + 8.0 +
+                      self.ga_pose_settle)
         else:
             budget = lim_hard / max(0.05, self.ga_speed) * 2.0 + 4.0
         if time.time() - self.mark_t > budget:
@@ -2148,25 +2619,47 @@ class LaneFollow(object):
                 self.set_phase("AVOID_REV", "绕障: 已转正, %s %.2fm 到横移站位"
                                % ("前进" if self.ga_rev < 0 else "后退",
                                   abs(self.ga_rev)))
-            elif self.phase == "AVOID_REV":
+            elif self.phase in ("AVOID_REV", "AVOID_POSE"):
                 # 站位段走完后板子离车心就是 need 了, 前进段要按这个新
                 # 距离重算 —— 否则开环兜底会比实际多走一个站位段的长度。
                 self.board_d = self.car_half_l + self.ga_keep
+                self._ga_pose_ok_t = None
+                self._ga_freeze_ref("站位到位")   # 车已在中垂线上, lat0≈0
+                # 开环兜底的前进距离也按**实测**站位算(有卡尔曼的话)
+                if self._ga_u0 is not None and self._ga_lon0 > 0.05:
+                    self.board_d = self._ga_lon0
                 self.ga_fwd_now = self.ga_fwd_eff()
+                # 横让开环距离按板端**实际**横向位置补偿离中垂线的偏差:
+                # 要走 = 让向那端此刻的横向坐标(ga_sign 方向为正) + 需要的净空
+                gg = self.ga_geom()
+                self.ga_side_now = 0.0
+                if gg is not None and self.ga_side <= 0.0:
+                    self.ga_side_now = max(0.05, self.ga_sign * gg["by_end"] +
+                                           gg["need_lat"])
                 self.set_phase("AVOID_OUT", "绕障: 站位到板前 %.2fm, 开始往"
                                "%s横移 %.2fm(之后前进 %.2fm)"
                                % (self.ga_keep,
                                   "左" if self.ga_sign > 0 else "右",
-                                  self.ga_side_eff(), self.ga_fwd_now))
+                                  self.ga_side_now or self.ga_side_eff(),
+                                  self.ga_fwd_now))
             elif self.phase == "AVOID_OUT":
                 self.ga_out_dist = d          # 记下实际横让了多少
-                self.set_phase("AVOID_FWD", "绕障: 已横让 %.3fm, 前进到板子"
-                               "落在车尾之后" % d)
+                # 横移里车会蹭出几厘米纵向漂移(实车 0.29 -> 0.32), 开环兜底的
+                # 前进距离按此刻 odom 推算的法向距重算
+                gg = self.ga_geom()
+                if gg is not None and "lon_odom" in gg and gg["lon_odom"] > 0.05:
+                    self.ga_fwd_now = (gg["lon_odom"] + self.car_half_l +
+                                       self.ga_keep) if self.ga_fwd <= 0.0 \
+                        else self.ga_fwd_now
+                self.set_phase("AVOID_FWD", "绕障: 已横让 %.3fm, 前进 %.3fm 到"
+                               "板子落在车尾之后" % (d, self.ga_fwd_now))
             elif self.phase == "AVOID_FWD":
                 # 车已经整个越过板子, 现在看的是背面 —— 用这一帧把板子
                 # 重新定位一次, 后面回中和对航向都以它为准。
                 self.ga_refit_board()
                 self._ga_lat_min = 9.9        # 过冲保护每段重置
+                self._ga_rear_n = 0
+                self._ga_rear_last = None
                 self.set_phase("AVOID_BACK", "绕障: 往%s横移回板子中垂线"
                                % ("右" if self.ga_sign > 0 else "左"))
             elif self.phase == "AVOID_BACK" and self.ga_align_deg > 0 \
@@ -2179,14 +2672,18 @@ class LaneFollow(object):
             else:
                 self.board_hits = 0
                 self.board_cool_until = time.time() + self.ga_cool
-                self.cool_until = max(self.cool_until,
-                                      time.time() + self.ga_cool)
+                if self.ga_cool_goal > 0.0:
+                    self.cool_until = max(self.cool_until,
+                                          time.time() + self.ga_cool_goal)
                 self.kf = BoardKF()
                 self.board_state = "已避"
                 rospy.loginfo("板子已处理 -> 切回初赛逻辑(不再查板子, "
                               "终点白线检测放开)")
                 self.set_phase("FOLLOW", "绕障完成, 回到巡线 "
-                               "(%.1fs 内不认横线/不认板子)" % self.ga_cool)
+                               "(%.1fs 内不认板子; 横线%s)"
+                               % (self.ga_cool,
+                                  ("%.1fs 内不认" % self.ga_cool_goal)
+                                  if self.ga_cool_goal > 0.0 else "立刻放开"))
                 self.ga_trace("done")
                 if self._ga_fh is not None:
                     try:
@@ -2204,6 +2701,34 @@ class LaneFollow(object):
             if abs(self._ga_az) < 0.12:      # 底盘旋转死区
                 self._ga_az = math.copysign(0.12, self._ga_az)
             return 0.0, 0.0
+        if self.phase == "AVOID_POSE":
+            g = self.ga_geom()
+            if g is None:                     # 跟丢: 只按开环距离挪, 不转
+                self._ga_az = 0.0
+                return (-self.ga_speed if self.ga_rev > 0
+                        else self.ga_speed), 0.0
+            psi = g["yaw_err"]
+            lon = abs(g["lon"])
+            az = max(-0.4, min(0.4, 2.0 * psi))
+            if abs(psi) <= math.radians(self.ga_align_deg):
+                az = 0.0                      # 转正了就别抖
+            elif abs(az) < 0.12:
+                az = math.copysign(0.12, az)  # 底盘旋转死区
+            # ψ 超过 atan(半宽/半长)=36.8° 时转正过程中伸出量先涨后跌, 最大到
+            # hypot; 这时净空不够就先只倒不转
+            if abs(psi) > math.atan2(self.car_half_w, self.car_half_l) and \
+                    lon < math.hypot(self.car_half_l, self.car_half_w) + \
+                    self.ga_keep:
+                az = 0.0
+            self._ga_az = az
+            e = lon - self._ga_pose_target(psi)
+            vx = vy = 0.0
+            # 沿板法向挪(车体系里法向 = (cos ψ, sin ψ)); e>0 靠近, e<0 退开
+            if abs(e) > 0.02:
+                sgn = 1.0 if e > 0 else -1.0
+                vx += sgn * self.ga_speed * math.cos(psi)
+                vy += sgn * self.ga_speed * math.sin(psi)
+            return vx, vy
         self._ga_az = 0.0
         if self.phase == "AVOID_REV":
             # ga_rev>0 倒车, <0 前进
@@ -2211,6 +2736,31 @@ class LaneFollow(object):
         if self.phase == "AVOID_FWD":
             return self.ga_speed, 0.0
         sgn = self.ga_sign if self.phase == "AVOID_OUT" else -self.ga_sign
+        if self.phase == "AVOID_BACK" and self.ga_back_src == "odom":
+            # 横回段和板面的距离也闭环: 背面一露出来就量法向距, 修正 odom
+            # 推算; 车尾离板面不够 tail 就先前进补够, 再接着横回 —— 别贴着
+            # 板面把屁股蹭过板端。
+            gb = self.ga_geom()
+            if gb is not None and "lon_odom" in gb:
+                meas = self.ga_rear_plane(gb)
+                if meas is not None:
+                    corr = meas - gb["lon_odom"]
+                    self._ga_lon0 += 0.5 * corr        # 一半, 免得单帧跳
+                    self._ga_rear_n += 1
+                    self._ga_rear_last = meas
+                    if self._ga_rear_n in (1, 10, 40) or abs(corr) > 0.03:
+                        rospy.loginfo("绕障横回: 背面重捕获板面 法向距 %.3f "
+                                      "(odom 推算 %.3f, 修 %+.3f, 第 %d 次)",
+                                      meas, gb["lon_odom"], corr,
+                                      self._ga_rear_n)
+                    gb = self.ga_geom()
+                need = -(self.car_half_l + self.ga_tail)
+                if gb["lon_odom"] > need + 0.005:
+                    if time.time() - self._board_log_t > 0.5:
+                        rospy.loginfo("绕障横回: 车尾离板面只 %.3f(要 %.3f), "
+                                      "先前进补够再横回", -gb["lon_odom"] -
+                                      self.car_half_l, self.ga_tail)
+                    return self.ga_speed, 0.0
         return 0.0, sgn * self.ga_speed
 
     def scan_cb(self, msg):
@@ -2347,7 +2897,7 @@ class LaneFollow(object):
         if self.phase == "ALIGN":
             return abs(self.align_speed)
         if self.phase in ("AVOID_REV", "AVOID_OUT", "AVOID_FWD", "AVOID_BACK",
-                           "AVOID_ALIGN", "AVOID_TURN0"):
+                           "AVOID_ALIGN", "AVOID_TURN0", "AVOID_POSE"):
             return abs(self.ga_speed)
         # 这些相位本来就是停着的(等灯/刹停/原地转/停车)。以前一律返回
         # self.v, 等于"我在动但 odom 不变" —— 而底盘停着时 odom 本来就
@@ -2489,6 +3039,11 @@ class LaneFollow(object):
         然后在那儿等绿灯。这一段必须盲走 —— 黄线到这时已经在视野外了。"""
         self._move_next = "yolo"
         if abs(self.align_offset) > 0.005:
+            # 这段是盲走(odom 计距, 不看图), 正好把切分辨率(几百 ms 到 1s)
+            # 藏进去 —— 到位的时候相机已经是 1920x1080 了, 直接认灯。
+            if self.yolo_crop and self.yolo_cam_w > 0 and self.cap is not None:
+                self._preswitch_result = None
+                threading.Thread(target=self._preswitch_cam).start()
             self.start_move(self.align_offset, self.start_move_speed,
                             "START_MOVE", "起跑: %s %.0fmm 进到黄线前的规定"
                             "位置, 然后等绿灯"
@@ -2498,6 +3053,43 @@ class LaneFollow(object):
             self.start_yolo()
 
     # ---------------- 红绿灯分支 ----------------
+    def yellow_ok(self):
+        """这一刻黄灯算不算"可以走"。adaptive 下是**随时间变的**。"""
+        if self.yellow_mode == "true":
+            return True
+        if self.yellow_mode != "adaptive":
+            return False
+        if self.yellow_go_after <= 0:
+            return True
+        return (time.time() - (self.yolo_t0 or time.time())
+                >= self.yellow_go_after)
+
+    def yolo_norm(self, name):
+        """7 类模型的类名 -> (方向类 or None, 是不是黄灯)。
+
+        left/right/straight/stop 原样; yellow X 按 yellow_go 决定:
+          开  -> 归一成 X, 当普通方向灯用
+          关  -> 归一成 "stop", 走"继续等"那条路
+        认不出来的类名一律返回 None(和"什么都没检出"同等对待)。
+
+        ⚠ 关掉时必须归一成 "stop" 而**不是** None: None 会被当成"这一帧
+          什么都没认出来", 于是一路空等到 yolo_wait_max(60s) 超时再按
+          fallback 瞎走; "stop" 走的是"红灯继续等"那条正路, 绿灯一亮
+          立刻发车。
+        """
+        go = self.yellow_ok()
+        if not name:
+            return None, False
+        n = str(name).strip().lower()
+        if n.startswith("yellow"):
+            core = n[len("yellow"):].strip().replace("_", " ").strip()
+            if core in ("left", "right", "straight"):
+                return (core if go else "stop"), True
+            return ("stop" if not go else None), True
+        if n in ("left", "right", "straight", "stop"):
+            return n, False
+        return None, False
+
     def branch_deg(self, cls):
         """红绿灯类 -> 该转多少度。左=正(逆时针), 右=负; 直行=0 不转。"""
         if self.yolo_swap_lr:
@@ -2512,7 +3104,24 @@ class LaneFollow(object):
         """到岔路口了: 按需拉起认灯子进程(认完立刻杀)"""
         self.yolo_votes, self.yolo_n, self.yolo_err = {}, 0, 0
         self.yolo_last = ""
+        self._yellow_warned = False
         self.yolo_t0 = time.time()
+        self._crop_gave_up = False
+        self._crop_log = None
+        # 只在认灯这一小段切到高分辨率, 认完立刻切回去(见 set_cam_res)
+        self._cam_switched = False
+        if self.yolo_crop and self.yolo_cam_w > 0:
+            with self._cam_lock:            # 预切线程还在干活的话等它做完
+                pre = self._preswitch_result
+            self._preswitch_result = None
+            if pre is False:
+                # 预切已经试过一次失败了(退回 640 了), 别在这儿再花一秒重试
+                rospy.logwarn("认灯: 挪动时预切高分辨率失败, 不再重试, "
+                              "用整帧缩放")
+            else:
+                # pre 为 True 时 set_cam_res 发现已是目标尺寸, 立刻返回
+                self._cam_switched = self.set_cam_res(
+                    self.yolo_cam_w, self.yolo_cam_h, "认灯")
         self.set_phase("YOLO", "起点: 先认红绿灯再决定走哪条路线")
         try:
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -2566,9 +3175,26 @@ class LaneFollow(object):
         # 就是让你停着等, 认不出来也没资格瞎猜。
         if best:
             name, conf, box = best
-            self.yolo_last = "%s %.2f" % (name, conf)
-            if name in ("left", "right", "straight"):
-                self.yolo_votes[name] = self.yolo_votes.get(name, 0) + 1
+            norm, is_yellow = self.yolo_norm(name)
+            self.yolo_last = "%s %.2f%s" % (
+                name, conf,
+                "" if not is_yellow else
+                ("->%s" % norm if self.yellow_ok() else "(黄灯, 按红灯等)"))
+            if is_yellow and not self._yellow_warned:
+                self._yellow_warned = True
+                if self.yellow_ok():
+                    rospy.logwarn("认到黄灯(%s), 放行(mode=%s) -> 按 %s 走",
+                                  _s(name), _s(self.yellow_mode), _s(norm))
+                elif self.yellow_mode == "adaptive":
+                    rospy.loginfo("认到黄灯(%s), adaptive: 已等 %.1fs, 满 "
+                                  "%.0fs 还是黄就走", _s(name),
+                                  time.time() - (self.yolo_t0 or time.time()),
+                                  self.yellow_go_after)
+                else:
+                    rospy.loginfo("认到黄灯(%s), yellow_go=false -> 继续等绿灯",
+                                  _s(name))
+            if norm in ("left", "right", "straight"):
+                self.yolo_votes[norm] = self.yolo_votes.get(norm, 0) + 1
             if self.dump_dir:
                 self._dump_yolo(name, conf, box)
         else:
@@ -2583,6 +3209,7 @@ class LaneFollow(object):
                           "单帧 %.0fms)", self.yolo_n, self.yolo_last, el,
                           (self.yolo_n / el) if el > 1e-3 else 0.0,
                           1000.0 * el / max(1, self.yolo_n))
+            self._verdict_from_light = True     # 真认到灯了, 可以冲线
             return arrows[0][0]
         # 还没方向: 每秒打一行, 别把日志刷爆
         if self.yolo_n <= 3 or self.yolo_n % 10 == 0:
@@ -2604,8 +3231,36 @@ class LaneFollow(object):
             return self.yolo_fallback
         return None
 
+    def _yolo_cleanup(self):
+        """认灯收尾: 杀子进程 + 相机切回 640x480。**在后台线程里跑**。
+
+        线程安全: 这时候主线程已经不碰 self.yolo 了(定案之后不再认灯);
+        self.cap 只有取帧线程在读, 而 set_cam_res 会先 pause 它。所以这
+        两个资源在这一小段时间里都是单写者。
+        """
+        t0 = time.time()
+        try:
+            self.kill_yolo()
+        except Exception as e:
+            rospy.logwarn("认灯收尾出错: %s", _s(e))
+        dt = time.time() - t0
+        if dt > 0.05:
+            rospy.loginfo("认灯收尾(杀进程+切回相机)耗时 %.0fms —— 在后台做的, "
+                          "没占发车时间", 1000 * dt)
+
     def kill_yolo(self):
-        """认完/退出就杀 —— Nano 4GB 显存留不得"""
+        """认完/退出就杀 —— Nano 4GB 显存留不得。
+
+        顺手把相机切回标定分辨率: 放在这里而不是 finish_yolo, 是因为退出
+        认灯的路不止一条(定案 / 等超时走 fallback / 连错三次 / 远程急停 /
+        节点关闭), 漏掉任何一条都会让巡线一直吃高分辨率的帧, 而去畸变映射
+        是按 640x480 标的。
+
+        ⚠ 顺序: **先杀子进程, 再切相机**。子进程要是继承了相机 fd(见
+          yolo_client 里 close_fds 的说明), 它不退出设备就一直被占着, 切
+          分辨率必失败。现在 close_fds=True 了按理不会继承, 但顺序仍按
+          "先放资源再拿资源"来, 双保险。
+        """
         if self.yolo is not None:
             try:
                 self.yolo.close()
@@ -2613,13 +3268,21 @@ class LaneFollow(object):
             except Exception as e:
                 rospy.logwarn("关 yolo 出错: %s", _s(e))
             self.yolo = None
+        self.restore_cam_res()
 
     def finish_yolo(self, cls):
         """起点定案: 杀进程 -> **记住**箭头方向 -> 先按 start_offset 挪到
         真正的起跑点 -> 再按记住的方向做动作。
         车是特意往后摆 start_offset 的(让灯落在视野里/别压起跑线), 所以
         认完必须补这一段; 认灯期间车一直没动, 挪的时候灯已经不看了。"""
-        self.kill_yolo()
+        # ⚠ **先发车再清理**。kill_yolo 里两件事都可能阻塞主线程:
+        #   yolo.close() 最坏等 grace=2.0s; cap.set 切分辨率也是同步调用。
+        # 放在 start_move 之前的话, 这段阻塞全落在"绿灯已经认出来了、车还
+        # 没动"这个最不该等的窗口里。改成挂个标志, 等主循环把第一条 cmd_vel
+        # 发出去、车已经在冲了, 下一拍再去清理。
+        # (restore_cam_res / kill_yolo 都是幂等的, 晚调、重复调都没问题;
+        #  急停和节点关闭那两条路仍然当场调, 那时候阻塞无所谓。)
+        self._yolo_cleanup_pending = True
         self.branch_cls = cls                 # 记忆: 后面挪完了才用
         self.turn_deg = self.branch_deg(cls)
         # ⚠ 单独存一份: turn_deg 在 start_fork_turn 里会被改写成
@@ -2636,10 +3299,15 @@ class LaneFollow(object):
                       max(0.01, abs(self.start_move_speed)))
         self._move_next = "branch"
         if abs(self.start_offset) > 0.005:
-            self.start_move(self.start_offset, self.start_move_speed,
-                            "START_MOVE", "%s %.0fmm 开到三岔口"
+            gain = max(1.0, self.start_dash_gain
+                       if self._verdict_from_light else 1.0)
+            self.start_move(self.start_offset, self.start_move_speed * gain,
+                            "START_MOVE", "%s %.0fmm 开到三岔口%s"
                             % ("前进" if self.start_offset > 0 else "后退",
-                               abs(self.start_offset) * 1000.0))
+                               abs(self.start_offset) * 1000.0,
+                               (" (冲线 %.1fx = %.2fm/s)"
+                                % (gain, self.start_move_speed * gain))
+                               if gain > 1.001 else " (超时兜底, 不加速)"))
         else:
             self.apply_branch()
 
@@ -2772,6 +3440,51 @@ class LaneFollow(object):
         mag = min(self.fork_speed, max(self.az_min, 1.2 * remain))
         return sgn * mag
 
+    def goal_gate(self, hit):
+        """终点横线的闸门体检: 这一帧 HIT 了, 为什么**没**停车?
+
+        叠加图上的 HIT 只是 goal_block 的**纯几何**三者与门(覆盖率/最佳线/
+        条数), 它和"会不会停车"之间还隔着四道闸。以前只有里程闸和雷达否决
+        会打日志, 投票和冷却被拦时**一声不吭** —— 于是就出现"图上橙线画得
+        好好的、抬头写着 HIT, 车却一路开过去"这种查不下去的情况(实车
+        2026-08-18)。现在四道全部有据可查。
+
+        返回 (goal_ok, why):
+          goal_ok = 里程闸过没过(给 goal_hits 计数用, 语义和原来完全一样)
+          why     = None 表示这一帧四道全过、可以停; 否则是拦住它的那道闸
+
+        ⚠ 只做判断, **不改任何状态**, 所以一帧里调几次都安全 ——
+          sense 那边要拿它写进 dump 图, 相位机这边要拿它做判决。
+        ⚠ 雷达否决(第四道)不在这里: 它要真去打一次雷达, 有副作用而且贵,
+          由相位机调用后把结果塞进 self._goal_why 留给下一帧的 dump。
+        """
+        gmin = self.goal_min_travel
+        if gmin < 0.0:
+            gmin = ((self.goal_gate_arm
+                     if abs(self.start_turn_deg) > 1.0
+                     else self.goal_gate_y) if self.board_on else 0.0)
+        if self.is_fork and not self.fork_done:
+            gmin = 0.0                      # 岔口那条线不设闸
+        gtrav = self.board_travel(self.t_follow0) if gmin > 0.0 else 0.0
+        goal_ok = (gmin <= 0.0) or (gtrav >= gmin)
+        if not hit:
+            return goal_ok, None
+        if not goal_ok:
+            return goal_ok, ("里程闸: 从%s起才走 %.2fm, 要 %.2fm"
+                             % (self.board_anchor, gtrav, gmin))
+        # 这一帧记上之后票数会变成多少(不真的写回去)
+        votes = self.goal_hits + 1
+        if votes < self.goal_confirm:
+            return goal_ok, ("投票: 才连上 %d 帧, 要 %d 帧(goal_confirm)"
+                             % (votes, self.goal_confirm))
+        left = self.cool_until - time.time()
+        if left > 0:
+            return goal_ok, ("冷却: 绕障/岔口后还有 %.2fs 不认横线"
+                             "(go_around_cooldown)" % left)
+        if self.phase != "FOLLOW":
+            return goal_ok, "相位: 当前是 %s, 不是 FOLLOW" % self.phase
+        return goal_ok, None
+
     def start_approach(self, gy):
         """车已停稳, 在这里打点(里程计不含刹车滑行), 然后继续巡线"""
         self.mark_xy = self.odom_xy
@@ -2786,24 +3499,115 @@ class LaneFollow(object):
             rospy.logwarn("没收到 /odom(base_driver 读编码器就在发这个), "
                           "退化成 速度x时间 估距, 误差较大")
 
+    def corner_trace(self, note="", fit=None, cmd=None, extra=None):
+        """终点雷达闭环全程逐帧落盘: 原始雷达 + 当帧拟合/判定/指令, 一行一个
+        JSON, **写一行 flush 一行**(append 模式) —— Ctrl-C 杀掉进程也不丢已写
+        的帧, 出问题直接把 dump/corner_trace_NN.jsonl 发来对账。
+
+        和 avoid_trace 同一种格式(scan.mm 是毫米整数), 离线脚本能复用。
+        """
+        if not self.corner_trace_on or self._corner_fh is None:
+            return
+        try:
+            m = self.scan
+            pose = self.car_pose()
+            rec = {
+                "t": round(time.time() - self.t_boot, 3),
+                "wall": round(time.time(), 3),
+                "phase": self.phase,
+                "note": note,
+                "odom": None if pose is None else [round(v, 4) for v in pose],
+                "elapsed": (None if self.corner_t0 is None else
+                            round(time.time() - self.corner_t0, 3)),
+                "stable": self.corner_stable,
+                "target": self.corner_target_dist,
+                "target_side": self.corner_target_side_dist,
+                "tol": self.corner_target_tol,
+                "lidar_x": self.board_lidar_x,
+                "yaw_off": round(self.board_yaw_off, 5),
+            }
+            if fit is not None:
+                fr = {"ok": bool(fit.get("ok")), "why": _s(fit.get("why", "")),
+                      "partial": bool(fit.get("partial", False))}
+                for k in ("x_wall", "y_wall"):
+                    w = fit.get(k)
+                    fr[k] = None if w is None else {
+                        "d": round(float(w["distance"]), 4),
+                        "n": [round(float(v), 4) for v in w["normal"]],
+                        "res": round(float(w["residual"]), 4),
+                        "span": round(float(w["span"]), 3),
+                        "pts": int(w["points"])}
+                fr["x_sign"] = fit.get("x_sign")
+                fr["y_sign"] = fit.get("y_sign")
+                rec["fit"] = fr
+            if cmd is not None:
+                rec["cmd"] = [round(float(v), 4) for v in cmd]
+            if extra:
+                rec.update(extra)
+            if m is not None:
+                rec["scan"] = {
+                    "amin": round(m.angle_min, 6),
+                    "ainc": round(m.angle_increment, 8),
+                    "rmin": m.range_min, "rmax": m.range_max,
+                    "stamp": (round(m.header.stamp.to_sec(), 3)
+                              if hasattr(m, "header") else None),
+                    "mm": [0 if (r != r or r in (float("inf"),
+                                                 float("-inf")))
+                           else int(r * 1000.0) for r in m.ranges],
+                }
+            self._corner_fh.write(json.dumps(rec) + "\n")
+            self._corner_fh.flush()          # 一行一刷, 别攒
+        except Exception as e:
+            if not self._corner_trace_warned:
+                self._corner_trace_warned = True
+                rospy.logwarn("终点雷达 trace 写失败(不影响控制): %r", e)
+
+    def _corner_trace_open(self):
+        if not (self.corner_trace_on and self.dump_dir):
+            return
+        try:
+            self._corner_trace_close()
+            self._corner_n += 1
+            fn = os.path.join(self.dump_dir,
+                              "corner_trace_%02d.jsonl" % self._corner_n)
+            # ⚠ append 模式: 万一同名文件已存在(重启没清 dump)也只是接着写,
+            #   而且每行都 flush, 被 Ctrl-C 杀掉最多丢半行
+            self._corner_fh = open(fn, "a")
+            rospy.loginfo("终点雷达逐帧轨迹 -> %s (append, 每帧 flush)", fn)
+        except Exception as e:
+            rospy.logwarn("终点雷达 trace 开不了(不影响控制): %r", e)
+            self._corner_fh = None
+
+    def _corner_trace_close(self, note=""):
+        if self._corner_fh is not None:
+            try:
+                if note:
+                    self.corner_trace(note)
+                self._corner_fh.close()
+            except Exception:
+                pass
+            self._corner_fh = None
+
     def start_corner_adjust(self, gy):
         """视觉命中终点后，直接切入两墙雷达闭环。"""
         self._corner_goal_y = gy
         self.corner_t0 = time.time()
         self.corner_stable = 0
         self._corner_last_fit = None
+        self._corner_first_ok_t = None
+        self._corner_level = 0            # 停滞升级到第几级
+        self._corner_yaw_forced = False   # 第 2 级: 航向不等了
+        self._corner_best_prog = float("inf")
+        self._corner_prog_t = time.time()
+        # 看到白线就开始落盘: 入口这一帧的扫描先写一行(白线命中那一刻雷达
+        # 看到什么), 之后 step_corner_adjust 每帧一行
+        self._corner_trace_open()
+        self.corner_trace("enter gy=%d" % gy)
         self.set_phase("CORNER_ADJUST", "终点视觉命中, 直接用雷达找两面墙停车")
 
     @staticmethod
     def _corner_clip(value, limit):
         return max(-limit, min(limit, value))
-
-    @staticmethod
-    def _corner_angle_error(actual, expected):
-        """返回从 actual 转到 expected 所需的车体正向角误差。"""
-        dot = actual[0] * expected[0] + actual[1] * expected[1]
-        cross = expected[0] * actual[1] - expected[1] * actual[0]
-        return math.atan2(cross, dot)
 
     def _corner_fallback_to_approach(self, reason):
         """雷达确认两面墙仍在 1m 外时，使用原来的前进停车流程。"""
@@ -2818,8 +3622,9 @@ class LaneFollow(object):
     def step_corner_adjust(self):
         """返回 (vx, vy, wz)，稳定后返回零并切换 STOPPED。
 
-        两面墙均以车心到墙的垂直距离计算。航向只做小角度软锁；偏航
-        超过 hold 阈值时暂时不平移，避免边转边横移把两个距离耦合起来。
+        两面墙均以车心到墙的垂直距离计算, 平移沿**每面墙自己的法向**逼近
+        (车斜着进也对)。航向只做小角度软锁(离最近车体轴 <= align_max 才转,
+        更斜就不转直接滑进去); 默认边转边平移, corner_turn_first 时先转后移。
         """
         if self.corner_t0 is None:
             self.set_phase("STOPPED", "雷达角落控制未初始化, 超时停车")
@@ -2827,13 +3632,27 @@ class LaneFollow(object):
         elapsed = time.time() - self.corner_t0
         if elapsed > self.corner_timeout:
             self.set_phase("STOPPED", "雷达角落调整超时 %.1fs, 强制停车" % elapsed)
+            self._corner_trace_close("timeout")
             return 0.0, 0.0, 0.0
         if not self.scan_fresh():
             if time.time() - self._corner_log_t > 1.0:
                 self._corner_log_t = time.time()
-                rospy.logwarn("[终点雷达] /scan 陈旧, 暂停调整 %.1fs/%.1fs",
-                              elapsed, self.corner_timeout)
+                rospy.logwarn("[终点雷达] /scan %s, 暂停调整 %.1fs/%.1fs%s",
+                              "从没收到过" if self.scan is None else "陈旧",
+                              elapsed, self.corner_timeout,
+                              "(雷达起了吗? lane_proto.launch 的 start_lidar "
+                              "跟 board_in_lane/use_lidar 走)"
+                              if self.scan is None else "")
             self.corner_stable = 0
+            self.corner_trace("scan stale")
+            # 一直没雷达就别干等 30s: 和"拟合不到墙"一样, 过了宽限期退回盲推
+            # (实车 2026-08-19: board_in_lane:=false 没起雷达, 这里卡了 16s)
+            if self._corner_first_ok_t is None and \
+                    elapsed > self.corner_no_wall_grace:
+                self._corner_fallback_to_approach(
+                    "%.1fs 内没有雷达数据(/scan %s)" % (
+                        elapsed, "从没收到" if self.scan is None else "陈旧"))
+                self._corner_trace_close("fallback: no scan")
             return 0.0, 0.0, 0.0
         msg = self.scan
         xs, ys = scan_xy(
@@ -2843,62 +3662,179 @@ class LaneFollow(object):
             self_margin=self.board_self_margin)
         fit = corner_wall_fit(
             xs, ys, max_dist=self.corner_max_fit_dist,
-            sector_half_width=self.corner_sector_half_width,
             min_pts=self.corner_min_pts, min_span=self.corner_min_span,
             max_residual=self.corner_max_residual,
             angle_tol_deg=self.corner_wall_angle_tol_deg,
-            cluster_gap=self.corner_cluster_gap)
+            cluster_gap=self.corner_cluster_gap,
+            back_excl_deg=self.corner_back_excl_deg,
+            front_half_deg=self.corner_front_half_deg)
         self._corner_last_fit = fit
         if not fit["ok"]:
             if time.time() - self._corner_log_t > 1.0:
                 self._corner_log_t = time.time()
-                rospy.logwarn("[终点雷达] 两墙拟合未通过: %s (%.1fs)",
+                rospy.logwarn("[终点雷达] 拟合未通过: %s (%.1fs)",
                               fit["why"], elapsed)
             self.corner_stable = 0
+            # 连前墙都拟合不到, 闭环无从谈起。以前这里原地干等到 30s 超时;
+            # 现在等 corner_no_wall_grace 秒(雷达偶尔一两帧丢墙很正常),
+            # 还不行就退回盲推 —— 至少车会动。
+            self.corner_trace("fit fail", fit=fit, cmd=(0.0, 0.0, 0.0))
+            if self._corner_first_ok_t is None and \
+                    elapsed > self.corner_no_wall_grace:
+                self._corner_fallback_to_approach(
+                    "%.1fs 内没拟合到前墙" % elapsed)
+                self._corner_trace_close("fallback: no wall")
             return 0.0, 0.0, 0.0
+        if self._corner_first_ok_t is None:
+            self._corner_first_ok_t = time.time()
 
         xwall, ywall = fit["x_wall"], fit["y_wall"]
-        if (xwall["distance"] > self.corner_fallback_dist or
-                ywall["distance"] > self.corner_fallback_dist):
+        partial = ywall is None                 # 只有前墙
+        # 只用前墙的距离做"退回盲推"的判据。侧墙远(比如车道不贴墙)不是
+        # 退回的理由 —— 前墙近就说明真到角落了, 按前墙闭环开进去就是。
+        if xwall["distance"] > self.corner_fallback_dist:
+            self.corner_trace("fallback: front wall too far", fit=fit)
             self._corner_fallback_to_approach(
-                "x=%.2f y=%.2f" % (xwall["distance"], ywall["distance"]))
+                "前墙 %.2fm > %.2f" % (xwall["distance"],
+                                     self.corner_fallback_dist))
+            self._corner_trace_close()
             return 0.0, 0.0, 0.0
 
         ex = xwall["distance"] - self.corner_target_dist
-        ey = ywall["distance"] - self.corner_target_dist
-        x_expected = (float(fit["x_sign"]), 0.0)
-        y_expected = (0.0, float(fit["y_sign"]))
-        x_yaw = self._corner_angle_error(xwall["normal"], x_expected)
-        y_yaw = self._corner_angle_error(ywall["normal"], y_expected)
-        yaw_error = 0.5 * (x_yaw + y_yaw)
+        # 前墙(x) 0.25 / 侧墙(y, 车道那一侧的围挡) 0.21 —— 车道 42cm 车在中间
+        ey = 0.0 if partial else ywall["distance"] - self.corner_target_side_dist
+        # 航向误差 = 墙法向离最近车体轴还差多少(折到 ±45°, 两面墙平均, 由
+        # corner_wall_fit 算好)。正 = 车要左转。**只对齐, 不挑轴**: 车斜着
+        # 进场时转到最近的对齐位就行, 不管哪面墙最后算"前"。
+        yaw_error = math.radians(float(fit["yaw_err_deg"]))
         yaw_limit = math.radians(self.corner_wall_angle_tol_deg)
-        yaw_locked = abs(yaw_error) <= math.radians(self.corner_yaw_hold_deg)
-        vx = fit["x_sign"] * self.corner_kp * ex if yaw_locked else 0.0
-        vy = fit["y_sign"] * self.corner_kp * ey if yaw_locked else 0.0
-        vx = self._corner_clip(vx, self.corner_max_speed)
-        vy = self._corner_clip(vy, self.corner_max_speed)
+        # 太斜(> align_max)就不转了, 直接滑进去; 终点只看位置
+        skip_align = abs(yaw_error) > math.radians(self.corner_yaw_align_max_deg)
+        # ---- 停滞检测 / 升级 ----
+        # 进度量 = 离"全部满足"还差多少(各项超出容差的部分取最大)。3s 没有
+        # 明显进展(< 3mm / 0.5°)就升级:
+        #   第 1 级: 容差放宽一倍(位置 x2, 航向 x1.5)
+        #   第 2 级: 直接进下一步 —— 还在对航向就不等了直接平移; 已经在
+        #           平移就就地当作到位, 结束播报。
+        # 实车 2026-08-18: 停在 x=0.267(要 <=0.26), cmd 只有 0.014m/s, 底盘
+        # 平移死区吃掉了, 于是 1.7cm 永远差着 —— 有了下面的托底本不该再卡,
+        # 这个升级是**第二道**保险(比如轮子打滑/雷达偏置 1cm 之类)。
+        tol_p = self.corner_target_tol * (2.0 if self._corner_level >= 1 else 1.0)
+        yaw_hold = math.radians(self.corner_yaw_hold_deg *
+                                (1.5 if self._corner_level >= 1 else 1.0))
+        yaw_locked = (abs(yaw_error) <= yaw_hold or self._corner_yaw_forced
+                      or skip_align)
+        # 平移放不放行: 默认边转边平移; corner_turn_first 时先转到位
+        translate = yaw_locked or not self.corner_turn_first
+        prog = max(abs(ex) - tol_p,
+                   0.0 if partial else abs(ey) - tol_p,
+                   0.0 if skip_align else
+                   (abs(yaw_error) - yaw_hold) / math.radians(20.0) * 0.1,
+                   0.0)                       # 航向按 20°≈10cm 折算
+        if prog < self._corner_best_prog - 0.003:
+            self._corner_best_prog = prog
+            self._corner_prog_t = time.time()
+        stalled = time.time() - self._corner_prog_t > self.corner_stall_s
+        if stalled and prog > 0.0:
+            self._corner_prog_t = time.time()
+            self._corner_best_prog = prog
+            if self._corner_level == 0:
+                self._corner_level = 1
+                rospy.logwarn("[终点雷达] %.0fs 没进展(还差 %.3f), 容差放宽一倍: "
+                              "位置 ±%.0fmm 航向 ±%.1f°",
+                              self.corner_stall_s, prog,
+                              1000 * self.corner_target_tol * 2,
+                              self.corner_yaw_hold_deg * 1.5)
+                tol_p = self.corner_target_tol * 2.0
+                yaw_hold = math.radians(self.corner_yaw_hold_deg * 1.5)
+                yaw_locked = (abs(yaw_error) <= yaw_hold or
+                              self._corner_yaw_forced or skip_align)
+                translate = yaw_locked or not self.corner_turn_first
+            elif not yaw_locked:
+                self._corner_level = 2
+                self._corner_yaw_forced = True
+                yaw_locked = translate = True
+                rospy.logwarn("[终点雷达] 放宽后又 %.0fs 没进展, 航向不等了"
+                              "(还偏 %.1f°), 直接平移", self.corner_stall_s,
+                              math.degrees(yaw_error))
+            else:
+                self._corner_level = 3
+                self.corner_trace("give up: stalled", fit=fit)
+                self._corner_trace_close()
+                self.set_phase(
+                    "STOPPED", "雷达角落: 放宽后仍不收敛(x=%.3f y=%s yaw=%.1f°), "
+                    "就地结束" % (xwall["distance"],
+                                 "-" if partial else "%.3f" % ywall["distance"],
+                                 math.degrees(yaw_error)))
+                return 0.0, 0.0, 0.0
+
+        # ---- 平移: 沿每面墙**自己的法向**逼近, 不假设墙和车体轴平行 ----
+        # v = kp*(ex*n_x + ey*n_y), n 是车体系下从车指向墙的单位法向。车斜着
+        # 也对: 该往哪面墙靠就沿它的垂线走, 两面互相垂直互不干扰。
+        vx = vy = 0.0
+        if translate:
+            if abs(ex) > tol_p:
+                vx += self.corner_kp * ex * xwall["normal"][0]
+                vy += self.corner_kp * ex * xwall["normal"][1]
+            if not partial and abs(ey) > tol_p:
+                vx += self.corner_kp * ey * ywall["normal"][0]
+                vy += self.corner_kp * ey * ywall["normal"][1]
+            spd = math.hypot(vx, vy)
+            if spd > self.corner_max_speed:
+                vx, vy = (vx * self.corner_max_speed / spd,
+                          vy * self.corner_max_speed / spd)
+            # ⚠ 平移死区托底: 底盘 |v| < move_min_speed(0.06) 基本不动。实车
+            #   2026-08-18: 差 1.7cm 时 P 只给 0.014m/s, 车纹丝不动, 稳定计数
+            #   永远 0/5。还没进容差就至少给 move_min(按合速度算, 方向不变);
+            #   进了容差上面就没加, 是 0(别来回蹭)。
+            #   12Hz 雷达一拍 0.06*0.083 = 5mm, 容差 ±10mm, 不会过冲振荡。
+            elif 0.0 < spd < self.move_min:
+                vx, vy = (vx * self.move_min / spd, vy * self.move_min / spd)
         wz = self._corner_clip(self.corner_yaw_kp * yaw_error,
                                self.corner_max_yaw_speed)
-        in_target = (abs(ex) <= self.corner_target_tol and
-                     abs(ey) <= self.corner_target_tol and
-                     abs(yaw_error) <= yaw_limit)
+        # ⚠ 转向死区托底: 底盘 |wz| < az_min(≈0.12) 电机根本不转。实车
+        #   2026-08-18: yaw 从 -21.8° 收到 -5.6° 后卡死 —— 差 0.6° 锁不上,
+        #   而 P 给的 0.078 rad/s 电机吃掉了, 于是永远锁不上、永远不平移。
+        #   还没锁定就至少给 az_min; 锁定之后小抖动就别管了(给 0)。
+        if not yaw_locked and 0.0 < abs(wz) < self.az_min:
+            wz = math.copysign(self.az_min, wz)
+        elif yaw_locked:
+            wz = 0.0
+        # 只有前墙时侧向没有约束: 前墙到位就算到位(横向由前面的巡线保证,
+        # 车本来就在车道里)。停下来时日志里会写明"侧墙未见"。
+        in_target = (abs(ex) <= tol_p and
+                     (partial or abs(ey) <= tol_p) and
+                     (abs(yaw_error) <= yaw_limit or self._corner_yaw_forced
+                      or skip_align))
         self.corner_stable = self.corner_stable + 1 if in_target else 0
         if time.time() - self._corner_log_t > 0.5:
             self._corner_log_t = time.time()
-            rospy.loginfo("[终点雷达] %s yaw=%.1f° 距离 x=%.3f y=%.3f "
+            rospy.loginfo("[终点雷达] %s yaw=%.1f° 距离 x=%.3f y=%s "
                           "误差=(%+.3f,%+.3f) cmd=(%+.3f,%+.3f,%+.3f) "
                           "稳定=%d/%d",
                           fit["why"], math.degrees(yaw_error),
-                          xwall["distance"], ywall["distance"], ex, ey,
-                          vx, vy, wz, self.corner_stable,
+                          xwall["distance"],
+                          "-" if partial else "%.3f" % ywall["distance"],
+                          ex, ey, vx, vy, wz, self.corner_stable,
                           self.corner_stable_frames)
+        self.corner_trace("step", fit=fit, cmd=(vx, vy, wz), extra={
+            "ex": round(ex, 4), "ey": round(ey, 4),
+            "yaw_err_deg": round(math.degrees(yaw_error), 2),
+            "yaw_locked": bool(yaw_locked), "in_target": bool(in_target),
+            "skip_align": bool(skip_align),
+            "level": self._corner_level, "tol": round(tol_p, 4),
+            "prog": round(prog, 4)})
         if self.corner_stable >= self.corner_stable_frames:
+            self._corner_trace_close("stopped")
             self.set_phase(
-                "STOPPED", "雷达角落停车稳定: x=%.3fm y=%.3fm yaw=%.1f° "
-                "连续%d帧(名义朝向 %.0f°)" % (
-                    xwall["distance"], ywall["distance"],
+                "STOPPED", "雷达角落停车稳定: x=%.3fm y=%s yaw=%.1f° "
+                "连续%d帧%s" % (
+                    xwall["distance"],
+                    "-(侧墙未见, 仅按前墙)" if partial
+                    else "%.3fm" % ywall["distance"],
                     math.degrees(yaw_error), self.corner_stable_frames,
-                    fit["nominal_yaw_deg"]))
+                    "" if partial else "(名义朝向 %.0f°)"
+                    % fit["nominal_yaw_deg"]))
             return 0.0, 0.0, 0.0
         return vx, vy, wz
 
@@ -2964,6 +3900,7 @@ class LaneFollow(object):
                           self.dumper.done, self.dumper.dropped)
             self.dumper.stop()
         self.kill_yolo()                 # 认灯进程别留着占显存
+        self._corner_trace_close("shutdown")
         zero = Twist()
         n_ok = 0
         for _ in range(12):                  # 12 x 50ms = 0.6s
@@ -3018,6 +3955,9 @@ class LaneFollow(object):
             self.phase, cov, self.goal_cover, lbest, self.goal_line_cover,
             lcnt, self.goal_line_count, self._blk, "HIT" if hit else "-",
             ("  y=%d" % gy) if gy >= 0 else "")
+        if hit and self._goal_why:
+            # 图上直接写死"为什么没停", 省得再去翻日志对时间戳
+            note += "  |没停: %s" % self._goal_why
         if self.is_fork:
             note += "  fork:%s" % ("done" if self.fork_done else "pending")
         if self.phase == "YOLO":
@@ -3107,7 +4047,11 @@ class LaneFollow(object):
         return frame
 
     def yolo_frame(self):
-        """喂给认灯的那一帧(见 yolo_use_raw / yolo_zoom)。都是**已翻正**的。"""
+        """喂给认灯的那一帧(见 yolo_crop / yolo_use_raw / yolo_zoom)。
+        都是**已翻正**的。"""
+        crop = self.crop_frame()
+        if crop is not None:
+            return crop
         if self.yolo_use_raw and self._raw is not None:
             im = cv2.flip(self._raw, 1) if self.mirror else self._raw
         else:
@@ -3115,6 +4059,200 @@ class LaneFollow(object):
         if im is None or self.yolo_zoom <= 1.001:
             return im
         return self.zoom_center(im, self.yolo_zoom, self.yolo_zoom_cy)
+
+    def restore_cam_res(self):
+        """认完把相机切回标定分辨率。**必须切回来** —— 巡线的去畸变映射
+        是按 640x480 标的, 高分辨率的帧经 to_4x3 裁缩之后视场对不上。"""
+        if self._cam_switched:
+            self._cam_switched = False
+            self.set_cam_res(self.W, self.H, "认灯完")
+
+    def _new_cap(self, w, h, tries=3):
+        """按 (w,h) 重新打开相机。返回 cap 或 None。
+
+        ⚠ **必须重开, 不能 cap.set**。V4L2 不允许在 streaming 中换分辨率:
+          实车 2026-08-18 试过 cap.set, 驱动只是把参数记下来, 原来那批
+          mmap buffer 立刻作废(VIDIOC_DQBUF/QBUF: Invalid argument), 而
+          cap.get 还照样回报 1920x1080 **说成功了**。
+          所以这里认的不是 cap.get, 而是**真读到一帧、且尺寸对得上**。
+        ⚠ 刚 release 完设备节点未必立刻空出来, 所以开失败会隔 150ms 再试,
+          一共 tries 次。
+        """
+        fcc = getattr(self, "_fourcc", "MJPG")
+        for k in range(max(1, tries)):
+            cap = None
+            try:
+                # ⚠ 只走 V4L2, **不要**退回不带后端的 VideoCapture(dev):
+                #   这台 nvidia 版 OpenCV 会把设备路径当 GStreamer 文件管线
+                #   去开, 对 /dev/video* 永远 "unable to start pipeline",
+                #   而且那个半死的对象析构时 gst_adapter_push 断言 -> SIGSEGV
+                #   (实车 2026-08-18 两趟进程都是这么 -11 死的)。
+                try:
+                    cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
+                    if not cap.isOpened():
+                        cap.release()
+                        cap = None
+                except Exception:
+                    cap = None
+                if cap is not None and cap.isOpened():
+                    if fcc and fcc != "NONE" and len(fcc) == 4:
+                        cap.set(cv2.CAP_PROP_FOURCC,
+                                cv2.VideoWriter_fourcc(*fcc))
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+                    if getattr(self, "_cam_fps_req", 0.0) > 0:
+                        cap.set(cv2.CAP_PROP_FPS, self._cam_fps_req)
+                    try:
+                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    except Exception:
+                        pass
+                    # 真读几帧: 头一两帧常常是空的/上一档尺寸的
+                    for _ in range(8):
+                        ok, f = cap.read()
+                        if (ok and f is not None and f.shape[1] == w
+                                and f.shape[0] == h):
+                            return cap
+                        time.sleep(0.02)
+                    rospy.logwarn("重开相机到 %dx%d(第 %d 次): 读不到对尺寸"
+                                  "的帧", w, h, k + 1)
+                else:
+                    rospy.logwarn("重开相机到 %dx%d(第 %d 次): 打不开 %s",
+                                  w, h, k + 1, self.device)
+            except Exception as e:
+                rospy.logwarn("重开相机到 %dx%d(第 %d 次)出错: %s",
+                              w, h, k + 1, _s(e))
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+            time.sleep(0.15)
+        return None
+
+    def _set_cam_res_locked(self, w, h, why):
+        """set_cam_res 的正体, 调用方必须已经拿着 self._cam_lock。"""
+        if self.cap is None or self.grab is None:
+            rospy.logwarn("%s: 用的是 ROS 相机话题, 改不了分辨率 —— "
+                          "退回整帧缩放(和以前一样)", _s(why))
+            return False
+        cur = self.cam_now
+        if cur == (w, h):
+            return True
+        t0 = time.time()
+        old_grab, old_cap = self.grab, self.cap
+        # ---- 第一步, 也是最要紧的一步: 等取帧线程**真的退出**再动 cap ----
+        if not old_grab.stop(join=1.0):
+            # 1s 都没从 cap.read() 出来 = 相机本身卡了。这时候强行 release
+            # 就是实车 2026-08-18 那一套(线程炸/流停不下来/开不回来/SIGSEGV)。
+            # 宁可不切: 撤销 stop 让它继续跑, 原样返回。
+            old_grab.stopped = False
+            if not old_grab.is_alive():          # 刚好在这缝里退出了
+                self.grab = FrameGrabber(old_cap)
+                self.grab.start()
+            rospy.logwarn("%s: 取帧线程 1s 内没退出(cap.read 卡住?), 放弃切"
+                          "换, 相机保持 %dx%d", _s(why), cur[0], cur[1])
+            return False
+        try:
+            old_cap.release()
+        except Exception as e:
+            rospy.logwarn("%s: release 旧相机出错: %s", _s(why), _s(e))
+        del old_cap
+        cap = self._new_cap(w, h)
+        ok = cap is not None
+        if not ok:
+            cap = self._new_cap(cur[0], cur[1])     # 退回原分辨率
+            if cap is None:
+                rospy.logerr("%s: 相机切换失败且**开不回原分辨率**了 —— "
+                             "这趟没法继续了", _s(why))
+                self.cap = None
+                return False
+        self.cap = cap
+        self.cam_now = (w, h) if ok else cur
+        self.grab = FrameGrabber(self.cap)
+        self.grab.start()
+        (rospy.loginfo if ok else rospy.logwarn)(
+            "%s: 相机 %dx%d -> %dx%d %s (%.0fms)", _s(why), cur[0], cur[1],
+            w, h, "成功" if ok else "失败, 退回 %dx%d" % cur,
+            1000.0 * (time.time() - t0))
+        return ok
+
+    def set_cam_res(self, w, h, why):
+        """临时改采集分辨率(release + 重开)。返回 True = 真的换成了。
+
+        为什么"临时": 巡线全程用 640x480(鱼眼标定就是在这个模式上做的),
+        只有认灯那一小段切到 1920x1080 —— 从整帧里原生裁一块 640x352 喂
+        yolo, 灯从 28px 变 84px。认完立刻切回去, 去畸变映射一秒都没被
+        高分辨率的帧碰过。
+
+        加锁: 预切线程(挪 140mm 时)、start_yolo(主线程)、认灯收尾线程都会
+        调它, 两个同时换 cap 就又是一场事故。锁里是幂等的 —— 已经是目标
+        尺寸就直接返回 True。
+        """
+        with self._cam_lock:
+            return self._set_cam_res_locked(w, h, why)
+
+    def _preswitch_cam(self):
+        """在盲走那 140mm 的时候提前把相机切到高分辨率, 到位就能直接认灯。
+        切换本身几百毫秒到一秒, 藏在盲走段里就不占"绿灯->发车"的时间。"""
+        with self._cam_lock:
+            ok = self._set_cam_res_locked(self.yolo_cam_w, self.yolo_cam_h,
+                                          "认灯(预切)")
+            self._preswitch_result = ok
+
+    def crop_frame(self):
+        """从**整帧**里按原始像素抠一块 net 大小的窗口。不适用就返回 None。
+
+        ⚠ 先翻正再裁: 相机原始输出是镜像的, 而 yolo_crop_cx 是在**翻正后**
+          (也就是 dump 图里你看到的那个朝向)量的。反过来做的话中心会镜像
+          到另一边去 —— 0.47 变成 0.53, 在 1920 宽上差 115px, 灯就出框了。
+        ⚠ 认了 yolo_crop_timeout 秒还没定案就放弃裁剪, 改喂整帧(缩到 net
+          大小 = 原来的行为)。灯要是压根没落在窗口里, 裁剪就是在帮倒忙,
+          得有条退路。
+        """
+        if not self.yolo_crop or self._full is None:
+            return None
+        # 只有**真的切到高分辨率了**才裁。切换失败时整帧还是 640x480,
+        # 那时候裁 640x352 等于把画面上下切掉一块(宽度一样, 高度变小),
+        # 灯反而更容易被切没 —— 该老老实实退回整帧缩放。
+        if not self._cam_switched:
+            return None
+        if self._crop_gave_up:
+            return None
+        if (self.yolo_crop_timeout > 0 and self.yolo_t0 and
+                time.time() - self.yolo_t0 > self.yolo_crop_timeout):
+            self._crop_gave_up = True
+            rospy.logwarn("认灯: 裁窗口认了 %.0fs 还没定案 -> 改喂整帧"
+                          "(灯可能不在窗口里, 调 yolo_crop_cx/cy)",
+                          self.yolo_crop_timeout)
+            return None
+        im = self._full
+        h, w = im.shape[:2]
+        cw, ch = min(self.yolo_crop_w, w), min(self.yolo_crop_h, h)
+        if cw >= w and ch >= h:
+            return None                  # 整帧本来就没比窗口大, 裁了没意义
+        if self.mirror:
+            im = cv2.flip(im, 1)
+        x0 = int(round(self.yolo_crop_cx * w - cw / 2.0))
+        y0 = int(round(self.yolo_crop_cy * h - ch / 2.0))
+        x0 = max(0, min(w - cw, x0))
+        y0 = max(0, min(h - ch, y0))
+        out = im[y0:y0 + ch, x0:x0 + cw]
+        if self._crop_log is None:
+            self._crop_log = (w, h, x0, y0, cw, ch)
+            rospy.loginfo("认灯: 整帧 %dx%d -> 原生裁 %dx%d @(%d,%d) "
+                          "(中心 %.3f,%.3f); 等效变焦 %.2fx",
+                          w, h, cw, ch, x0, y0, self.yolo_crop_cx,
+                          self.yolo_crop_cy, float(w) / cw)
+            if self.dump_dir:
+                try:
+                    cv2.imwrite(os.path.join(self.dump_dir, "yolo_crop.jpg"),
+                                out)
+                    rospy.loginfo("认灯窗口存了一张 -> %s/yolo_crop.jpg "
+                                  "(灯不在里面就调 yolo_crop_cx/cy)",
+                                  self.dump_dir)
+                except Exception as e:
+                    rospy.logwarn("存认灯窗口失败: %s", _s(e))
+        return out
 
     @staticmethod
     def zoom_center(im, z, cy=0.45):
@@ -3128,6 +4266,10 @@ class LaneFollow(object):
 
     def step(self, frame, dump_i=None):
         t = time.time()
+        # 认灯要的是**没被 to_4x3 缩过**的整帧: 相机开到 1920x1080 时,
+        # to_4x3 会把它裁成 4:3 再缩到 640x480, 灯的像素在这一步就没了。
+        # 巡线那条路完全不变, 还是吃 to_4x3 之后的 640x480。
+        self._full = frame
         frame = self.to_4x3(frame, self.W, self.H)
         self._raw = frame
         # 先去畸变再翻转: 鱼眼标定是在相机原始输出(镜像的)上做的,
@@ -3154,6 +4296,15 @@ class LaneFollow(object):
                 max_deg=self.goal_max_deg, line_cover=self.goal_line_cover)
         hit = (cov >= self.goal_cover and lbest >= self.goal_line_cover
                and lcnt >= self.goal_line_count)
+        # HIT 了却停不下来的原因, 现在就算好写进 dump 图 —— 相位机在后面,
+        # 等它算完再画就晚一帧了。**只管终点那一支**: Y 岔口那条横线本来
+        # 就不设闸, 报"没触发"纯属噪声。
+        if hit and not (self.is_fork and not self.fork_done) and \
+                self.phase not in ("CORNER_ADJUST", "PAUSE", "APPROACH",
+                                   "STOPPED"):
+            self._goal_why = self.goal_gate(hit)[1]
+        elif not hit:
+            self._goal_why = None
         t = self._lap("横线", t)
         if dump_i is not None:
             self._dump(und, mask, IL, IR, az, dump_i, err,
@@ -3328,6 +4479,19 @@ class LaneFollow(object):
                 if stale > self.rate_hz * 3:
                     rospy.logerr("3 秒没有新帧, 相机掉了? 停车退出")
                     break
+                # 盲走那几个相位(odom/雷达驱动, 压根不看图)在断帧时**继续
+                # 发上一条指令** —— 底盘 cmd_timeout 只有 0.2s, 断帧就不发
+                # 的话车会被刹停。认灯完切回 640x480 时取帧线程要暂停一下,
+                # 正好撞在冲线途中(实车会看到车走一半顿一下)。
+                # 只兜 cam_gap_hold 秒, 再久就是真掉相机了, 该停。
+                if (self._last_tw is not None
+                        and self.phase in BLIND_PHASES
+                        and stale <= self.rate_hz * self.cam_gap_hold):
+                    if not self.dry_run:
+                        self.pub.publish(self._last_tw)
+                    if stale == 1:
+                        rospy.loginfo("断帧但在 %s(盲走), 继续发上一条指令 "
+                                      "免得底盘 0.2s 超时刹车", self.phase)
                 rate.sleep()
                 continue
             stale = 0
@@ -3370,54 +4534,77 @@ class LaneFollow(object):
             # 永远攒不满 3 帧, 车就直接开过岔口不转弯了(实车 dump 里
             # fork:pending 一路 HIT 却没反应, 就是我这里漏掉的)。
             # 起点到 Y 岔口之间本来也不会有板子, 不需要防。
-            gmin = self.goal_min_travel
-            if gmin < 0.0:
-                # 同样按路线选, 不按 board_anchor(两臂转完也会变"岔口")
-                gmin = ((self.goal_gate_arm
-                         if abs(self.start_turn_deg) > 1.0
-                         else self.goal_gate_y) if self.board_on else 0.0)
-            if self.is_fork and not self.fork_done:
-                gmin = 0.0                      # 岔口那条线不设闸
-            gtrav = self.board_travel(self.t_follow0) if gmin > 0.0 else 0.0
-            goal_ok = (gmin <= 0.0) or (gtrav >= gmin)
+            # 四道闸集中在 goal_gate() 里, dump 图和这里用的是同一份判断
+            goal_ok, why = self.goal_gate(hit)
+            # ⚠ 顺序: 先按**这一帧**的结果打日志, 再累加票数。反过来的话
+            #   "才连上 N 帧"里的 N 会多算一帧。
+            fork_line = self.is_fork and not self.fork_done
+            # 已经在处理终点(CORNER_ADJUST/PAUSE/APPROACH/STOPPED)时白线当然
+            # 还一直 HIT, "为什么没停"这个问题不成立, 别刷屏
+            in_goal_phase = self.phase in ("CORNER_ADJUST", "PAUSE",
+                                           "APPROACH", "STOPPED")
+            if hit and why and not fork_line and not in_goal_phase:
+                # 只有原因变了、或者隔了 0.5s 才打, 免得 19fps 刷屏;
+                # 但**原因一变必打**, 不会漏掉状态切换那一下。
+                if (why != self._goal_why_last
+                        or time.time() - self._goal_gate_t > 0.5):
+                    self._goal_gate_t = time.time()
+                    self._goal_why_last = why
+                    rospy.loginfo("[终点] t=%.3f 画了橙线(覆盖%.2f 最佳线%.2f "
+                                  "%d条 y=%d)但没停车 -> %s",
+                                  time.time(), cov, lbest, lcnt, gy, why)
+            elif not hit:
+                self._goal_why_last = ""
             self.goal_hits = (self.goal_hits + 1) if (hit and goal_ok) else 0
-            if hit and not goal_ok and time.time() - self._goal_gate_t > 2.0:
-                self._goal_gate_t = time.time()
-                rospy.loginfo("[终点] 看到横线但里程不够, 先不认 (从%s起已走 "
-                              "%.2fm, 要 %.2fm; 板子的白面长得就像终点线)",
-                              self.board_anchor, gtrav, gmin)
             confirmed = self.goal_hits >= self.goal_confirm
-            # 围挡定位判终点(goal_mode=wall/both)。终点框就在场地角落里,
-            # 拟合矩形围挡直接给出"离前墙还有多远", 不经过分割网, 板子
-            # 的白面影响不了它。
-            if self.phase == "FOLLOW" and self.goal_mode in ("wall", "both") \
-                    and time.time() >= self.cool_until and not (
-                        self.is_fork and not self.fork_done):
-                wok, wd, wtxt = self.wall_goal()
-                if time.time() - self._wall_log_t > 1.0:
-                    self._wall_log_t = time.time()
-                    rospy.loginfo("[围挡定位] %s -> %s", wtxt or "-",
-                                  "到位" if wok else ("还差 %.2fm" % (
-                                      wd - self.goal_wall_dist)
-                                      if wd > 0 else "不可用"))
-                if wok:
-                    self.set_phase("STOPPED", "围挡定位: 车心离终点角落前墙 "
-                                   "%.2fm(目标 %.2f), 到位停车"
-                                   % (wd, self.goal_wall_dist))
+            # 地图定位判终点(goal_mode=both): 离 goal_map_xy 不到 goal_map_dist
+            # 就和白线一样触发(OR)。只在终点那一支(岔口横线不管), 冷却期内不
+            # 触发; 没 /robot_pose 就永远 False, 等于只看白线。
+            map_hit = False
+            if self.phase == "FOLLOW" and self.goal_mode == "both" \
+                    and self.goal_map_xy is not None:
+                map_hit, md, mtxt = self.map_goal()
+                fork_branch_now = self.is_fork and not self.fork_done
+                if fork_branch_now or time.time() < self.cool_until:
+                    map_hit = False
+                # 有定位每秒一行; 没 topic/过期只是每 30s 提一句(静默忽略)
+                if mtxt and time.time() - self._map_log_t > (
+                        1.0 if md >= 0 else 30.0):
+                    self._map_log_t = time.time()
+                    rospy.loginfo("[地图终点] %s -> %s%s", mtxt,
+                                  "触发" if map_hit else "未到(阈值 %.2f)"
+                                  % self.goal_map_dist,
+                                  " (岔口支路, 不算)" if fork_branch_now else "")
+                if map_hit and not confirmed:
+                    self._goal_why = ""
+                    self._map_why = "地图定位 %s <= %.2f" % (mtxt, self.goal_map_dist)
+                    rospy.loginfo("[终点] t=%.3f %s, 白线%s -> 按终点处理",
+                                  time.time(), self._map_why,
+                                  "也检出" if hit else "没检出")
             # 终点横线的雷达复核。⚠ 只复核**终点**那一支: 起点到 Y 岔口
             # 之间不会有板子, 所以 Y 岔口那条横线照原样走, 不受影响。
             fork_branch = self.is_fork and not self.fork_done
             if (self.phase == "FOLLOW" and confirmed and not fork_branch
                     and time.time() >= self.cool_until):
                 veto, vd = self.goal_board_veto()
+                if veto and map_hit:
+                    rospy.logwarn("[终点] 雷达 %.2fm 处有块实体, 但地图定位说已"
+                                  "到终点(%s), 按终点算", vd, self._map_why)
+                    veto = False
                 if veto:
                     self.goal_hits = 0
                     confirmed = False
+                    # 第四道闸的结果也塞进去, 下一帧的 dump 图就能写出来
+                    self._goal_why = ("雷达否决: %.2fm 处是一块有限宽的实体"
+                                      "(拦路板), 不是终点线" % vd)
                     if time.time() - self._veto_log_t > 1.0:
                         self._veto_log_t = time.time()
-                        rospy.logwarn("视觉判到终点横线(覆盖%.2f), 但雷达在 "
-                                      "%.2fm 处看到一块有限宽的实体 —— "
-                                      "那是拦路板不是终点线, 不停车", cov, vd)
+                        rospy.logwarn("[终点] t=%.3f 视觉判到终点横线(覆盖"
+                                      "%.2f), 但雷达在 %.2fm 处看到一块有限宽"
+                                      "的实体 —— 那是拦路板不是终点线, 不停车",
+                                      time.time(), cov, vd)
+            if map_hit and not fork_branch:
+                confirmed = True                 # 地图定位 OR 白线
             if self.phase == "FOLLOW" and confirmed \
                     and time.time() >= self.cool_until:
                 if self.is_fork and not self.fork_done:
@@ -3429,12 +4616,17 @@ class LaneFollow(object):
                     else:
                         self.begin_fork()
                 elif self.use_lidar:
+                    if map_hit:
+                        rospy.loginfo("[终点] 触发源: %s%s", self._map_why,
+                                      " + 白线" if self.goal_hits >=
+                                      self.goal_confirm else "(白线未检出)")
                     self.start_corner_adjust(gy)
                 elif self.goal_pause > 0:
                     self.pause_until = time.time() + self.goal_pause
-                    self.set_phase("PAUSE", "检出终点框(覆盖%.2f 最佳线%.2f "
+                    self.set_phase("PAUSE", "检出终点框(%s覆盖%.2f 最佳线%.2f "
                                    "%d条, 线在第%d行), 先刹停 %.1fs 打点"
-                                   % (cov, lbest, lcnt, gy, self.goal_pause))
+                                   % (self._map_why + "; " if map_hit else "",
+                                      cov, lbest, lcnt, gy, self.goal_pause))
                 else:
                     self.start_approach(gy)
             elif self.phase == "PAUSE":
@@ -3471,6 +4663,13 @@ class LaneFollow(object):
                 fork_cmd = self.step_fork_turn()
                 if fork_cmd is None:
                     self.fork_done = True
+                    # 只有走中间那条才会经过 FORK_TURN(两臂是在 apply_branch
+                    # 里直接置 fork_done, 不进这个相位), 所以在这里换模板
+                    # 正好就是"Y 字分叉之后"。
+                    if self.dec_y is not None:
+                        self.dec = self.dec_y
+                        rospy.loginfo("Y 支路: 触发区模板换成 %s",
+                                      _s(os.path.basename(self.tpl_y_path)))
                     t_follow0 = [None, None]      # 里程从岔口重新起算
                     self.board_anchor = "岔口"
                     self._early_done = False
@@ -3481,7 +4680,7 @@ class LaneFollow(object):
                                    "免得分叉口那条线被当成终点)"
                                    % self.fork_cooldown)
             elif self.phase in ("AVOID_REV", "AVOID_OUT", "AVOID_FWD", "AVOID_BACK",
-                           "AVOID_ALIGN", "AVOID_TURN0"):
+                           "AVOID_ALIGN", "AVOID_TURN0", "AVOID_POSE"):
                 avoid_cmd = self.step_go_around()
             elif self.phase == "CORNER_ADJUST":
                 corner_cmd = self.step_corner_adjust()
@@ -3514,7 +4713,7 @@ class LaneFollow(object):
             elif self.phase == "FORK_TURN":       # 原地转, 不前进
                 tw.linear.x, tw.angular.z = 0.0, (fork_cmd or 0.0)
             elif self.phase in ("AVOID_REV", "AVOID_OUT", "AVOID_FWD", "AVOID_BACK",
-                           "AVOID_ALIGN", "AVOID_TURN0"):
+                           "AVOID_ALIGN", "AVOID_TURN0", "AVOID_POSE"):
                 # 麦轮横移: 开环, 不转车头(转了之后横回来对不上原航向),
                 # 也不看视觉 —— 这几秒车根本不在车道上。
                 vx, vy = avoid_cmd or (0.0, 0.0)
@@ -3543,8 +4742,19 @@ class LaneFollow(object):
             elif aligned and not now_aligned:
                 rospy.loginfo("偏了 (IL=%.2f IR=%.2f), 开始修正", IL, IR)
             aligned = now_aligned
+            self._last_tw = tw
             if not self.dry_run:
                 self.pub.publish(tw)
+
+            # 认灯的收尾(杀子进程 + 相机切回 640x480)拖到**指令发出之后**:
+            # 这两件事都可能阻塞几百 ms 到 2s, 而车这会儿已经在冲线了,
+            # 阻塞落在这里只是晚几拍收油, 落在发车之前就是白等。
+            if self._yolo_cleanup_pending:
+                self._yolo_cleanup_pending = False
+                # 丢到后台线程去做: 这两件事最坏能卡 2s(close 的 grace)+
+                # 几百 ms(cap.set), 卡在控制环里就是 2 秒不发 cmd_vel,
+                # 底盘 cmd_timeout 只有 0.2s, 车当场被刹停在冲线半路。
+                threading.Thread(target=self._yolo_cleanup).start()
 
             # 交接模式下跑完一趟就退出进程, 让主流程接着走下一步;
             # 独立测试时默认 false, 停在 STOPPED 里等你 Ctrl-C 看日志。

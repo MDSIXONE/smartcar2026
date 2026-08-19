@@ -10,6 +10,7 @@ add_compile_options(-std=c++11)
 find_package(catkin REQUIRED COMPONENTS
   costmap_2d
   cv_bridge
+  dynamic_reconfigure
   geometry_msgs
   nav_core
   nav_msgs
@@ -109,7 +110,7 @@ find_package(catkin REQUIRED COMPONENTS
 catkin_package(
   INCLUDE_DIRS include
   LIBRARIES cym_planner
-  CATKIN_DEPENDS costmap_2d cv_bridge geometry_msgs nav_core nav_msgs pluginlib roscpp sensor_msgs std_msgs tf tf2_ros
+  CATKIN_DEPENDS costmap_2d cv_bridge dynamic_reconfigure geometry_msgs nav_core nav_msgs pluginlib roscpp sensor_msgs std_msgs tf tf2_ros
 )
 
 ###########
@@ -126,6 +127,7 @@ include_directories(
 ## Declare a C++ library
  add_library(cym_planner
    src/cym_planner.cpp
+   src/inflation_recovery.cpp
  )
 
 add_dependencies(cym_planner ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
@@ -198,6 +200,7 @@ target_link_libraries(cym_planner
 ## Mark other files for installation (e.g. launch and bag files, etc.)
  install(FILES
    cym_planner_plugin.xml
+   cym_planner_plugins.xml
    DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
  )
 
@@ -223,6 +226,9 @@ if(CATKIN_ENABLE_TESTING)
   )
   catkin_add_gtest(cym_planner_local_elastic_path_test
     test/local_elastic_path_test.cpp
+  )
+  catkin_add_gtest(cym_planner_inflation_recovery_schedule_test
+    test/inflation_recovery_schedule_test.cpp
   )
 endif()
 

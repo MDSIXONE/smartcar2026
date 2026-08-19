@@ -34,6 +34,7 @@ struct PlannerTuning
           final_yaw_max_vel(0.0),
           final_yaw_tolerance(0.10),
           final_linear_x_gain(0.0),
+          goal_position_tolerance(0.08),
           obstacle_lookahead_distance(0.0),
           obstacle_cost_threshold(253),
           carry_speed_scale(1.0),
@@ -57,6 +58,7 @@ struct PlannerTuning
     double final_yaw_max_vel;
     double final_yaw_tolerance;
     double final_linear_x_gain;
+    double goal_position_tolerance;
     double obstacle_lookahead_distance;
     int obstacle_cost_threshold;
     double carry_speed_scale;

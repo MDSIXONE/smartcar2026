@@ -7,7 +7,15 @@ trackseg.py — 固化 mnv2 分割网的 Python 封装 (ctypes, 零依赖 torch)
     ts = TrackSeg()                       # 自动找 libtrackseg.so(CUDA),
                                           # 没有就退 libtrackseg_cpu.so
     mask = ts.infer(frame_bgr)            # 任意分辨率 BGR 帧
-    # mask: (192,320) uint8  0其他 1场地 2白线 3红绿灯
+    # mask: (192,320) uint8  0其他 1场地 2白线 3遮挡物(红绿灯+拦路板)
+    #
+    # 类 3 是**红绿灯箱体和拦路板合起来**的一类。用到它的只有
+    # lane_common.goal_block, 那里问的是"终点横线这段是不是被实体挡住了",
+    # 挡它的是 LED 箱还是块板子判断完全一样。合成一类的好处是类别数还是 4,
+    # cuda/ 那套 .so 一行都不用改(net_graph.inc 里 head.1 是 48->4,
+    # OP_ARGMAX 也是 4)。标注文件里 tl/bd 一直是分开存的, 合并只发生在
+    # 生成掩码时(annotate_gui.MERGE_BD_INTO_TL), 要拆回 5 类得连同
+    # net_graph.inc / export_cuda_weights.py 一起改。
     mask_full = ts.infer(frame_bgr, out_size=True)   # 缩回原帧大小
     logits = ts.infer_logits(frame_bgr)   # (4,192,320) float32
 

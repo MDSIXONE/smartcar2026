@@ -51,21 +51,24 @@
          ⚠ 只复核终点那一支: 起点到 Y 岔口之间不会有板子, Y 岔口那条
            横线照原样走。雷达没数据时放行并告警(拦住的话车永远到不了终点)。
          auto = 跟着 board_in_lane 走 -->
-    <!-- 终点判据: vision=只看白线(旧逻辑) / wall=用围挡定位 / both=都行。
-         场地是 5x2.5m 封闭矩形, 终点框(实测 50x50cm)就塞在角落里。雷达
-         在里面同时看得到四面墙, 拟合出矩形直接给"离前墙还有多远"。
-         比看白线强: 不经分割网(板子的白面骗不到它); 量的是**垂直**距离,
-         车头没对正墙也准(单束读数偏 20° 会被 1/cos 放大 6%); 直接给出
-         还差多少米, 不用"检出横线->再盲走 N 米"。
-         仿真实测(杂物/板子/3cm噪声/两个角落/两种进入朝向)误差 <=0.3cm;
-         噪声 6cm 或一面墙被挡掉大半时长宽对不上会自动拒绝, 不误判。
-         ⚠ field_w/h 要按**实测**填: 图上那圈虚线是绘图外框(518x258cm),
-           不是墙。先用 goal_mode:=both 跑, 看日志里"量出 AxB"是多少。 -->
-    <arg name="goal_mode" default="vision"/>
-    <arg name="goal_wall_dist" default="0.25"/>
-    <arg name="field_w" default="5.0"/>
-    <arg name="field_h" default="2.5"/>
-    <arg name="field_tol" default="0.25"/>
+    <!-- 终点判据(白线那一路**始终是视觉**):
+           visual  只看白线(默认)
+           both    白线 **或** 地图定位: 完整版驱动(ucar_2026/2026.launch)里
+                   robot_pose_publisher 发 /robot_pose(map->base_link,
+                   geometry_msgs/Pose; is_stamped 时是 PoseStamped, 两种都收),
+                   车心离 goal_map_xy 不到 goal_map_dist 米就和白线一样触发,
+                   之后照常走 use_lidar 那套(雷达角落闭环 / 盲推)。
+                   精简版驱动没这个 topic -> 静默不触发, 等于 visual。
+         goal_map_xy: 地图系终点坐标 "x,y"(米), 空 = 地图那一路不用。终点框
+           50x50cm 在巡线场地(地图 x∈[-2.5,2.5], y∈[-3.0,-0.5])的某个角落, 填框
+           中心: 左下 "-2.25,-2.75" 右下 "2.25,-2.75" 左上 "-2.25,-0.75"
+           右上 "2.25,-0.75"(按 iflysse_field_walls_without_middle_vertices 图)。
+         旧值 vision/wall 兼容(vision=visual, wall=both), 整场矩形拟合已删。 -->
+    <arg name="goal_mode" default="visual"/>
+    <arg name="goal_map_xy" default=""/>
+    <arg name="goal_map_dist" default="0.50"/>
+    <arg name="pose_topic" default="/robot_pose"/>
+    <arg name="pose_fresh" default="1.0"/>          <!-- 位姿多久没更新算过期(秒) -->
     <arg name="goal_need_clear" default="auto"/>
     <arg name="goal_clear_range" default="1.5"/>
     <!-- 走过这么远还没检出板子, 就判定本趟无板, 果断切回初赛逻辑:
@@ -146,6 +149,10 @@
            横让 0.538m, 前进到板心在车后 0.371m。
          ⚠ 前提: 检出距离要 >= 车半长+禁区 = 0.371m, 否则横移时车是贴着
            板面蹭过去的。检出太近会自动先倒一小段(AVOID_REV)再横移。
+         车进场歪超过 go_around_align_deg 时, 板前是**一段** AVOID_POSE:
+           边原地转正边沿板法向挪到 keep+伸出量(ψ) 的站位(伸出量 =
+           半长|cosψ|+半宽|sinψ|, 转正过程中单调缩小, 净空只会更富余), 到位
+           就横移。以前是 倒车(留转弯扫掠半径)->原地转正->再前进 三段串行。
          等效角度会随板子距离变(d=0.5 时约 47°/125°), 所以判据用几何量。
          下面两个给 0 = 自动按上式算; 给正值就写死。 -->
     <arg name="go_around_side" default="0.0"/>
@@ -167,11 +174,35 @@
          估计越不准让得越开。0 = 不加余量 -->
     <arg name="go_around_k_sigma" default="1.0"/>
     <arg name="go_around_miss_max" default="8"/>
-    <arg name="go_around_back_tol" default="0.04"/>
+    <!-- 横回段离中垂线多近算回中(m)。
+         go_around_back_src: odom(默认) = 站位到位时(正面看, 整块板在视野里)冻结
+         板面方向 u0、横向偏差 lat0、法向距 lon0, 之后 lat/lon 都按 odom 位移推;
+         **前进段和横回段**都用它(车过了板子雷达看不到背面, 卡尔曼必丢); kf =
+         老逻辑用卡尔曼估的板心。背面只看得见一小段弦(车身挡住, 实车 0.19/0.42m), 弦中点
+         当板心会往看得见那侧偏, "回中到位"实际差 10cm(2026-08-19) —— 所以默认
+         odom, 容差也从 0.04 收到 0.02(odom 量平滑, 20Hz x 0.12m/s 一拍 6mm)。 -->
+    <arg name="go_around_back_tol" default="0.02"/>
+    <arg name="go_around_back_src" default="odom"/>
+    <!-- 板前站位段(AVOID_POSE)到位后再稳这么久(秒)才横移: 法向距 / 航向两项
+         都进容差(0.02m / align_deg)才开始计时, 期间哪项又出了容差就接着调、
+         计时重来。板前**不对中垂线**: 离中垂线的偏差在站位到位时冻结, 横让
+         距离按板端实际位置补偿、横回按 odom 回到中垂线上。0 = 到位立刻横移。
+         横回段和板面的距离也闭环: 板子背面一转进雷达可见扇区就拟直线量法向
+         距, 修正 odom 推算; 车尾离板面不够 tail 就先前进补够再横回。 -->
+    <arg name="go_around_pose_settle" default="1.0"/>
     <arg name="scan_stale" default="0.4"/>   <!-- 雷达帧多久算陈旧 -->
     <arg name="go_around_speed" default="0.12"/>
     <arg name="go_around_max" default="1"/>       <!-- 最多绕几次, 超了就停 -->
-    <arg name="go_around_cooldown" default="3.0"/><!-- 绕完多久内不认板子/横线 -->
+    <arg name="go_around_cooldown" default="3.0"/><!-- 绕完多久内不认板子 -->
+    <!-- 绕完多久内不认**终点横线**。默认 0 = 立刻放开。
+         和上面那个拆开了: 绕完板子在车屁股后面, 相机朝前看不见, 不存在
+         "把板面当终点线"; 防这个的本来就是里程闸(两臂 2.40m)。
+         实车 2026-08-18: 终点线以 cov=1.00/line=1.00/16条 满分检出, 整段
+         落在 3s 冷却里被丢弃, 线滑出扫描带比闸门打开只早 0.045s; 车又跑了
+         0.46m 才认到下一条横线, 在那儿打点再推 0.5m, 撞墙。
+         ⚠ 岔口转弯后那次冷却**不受影响**, 仍是 go_around_cooldown 秒 ——
+           那是防分叉口自己那条横线被当终点, 风险是真的。 -->
+    <arg name="go_around_cooldown_goal" default="0.0"/>
     <!-- 自车剔除余量(米)。车上两根小 WiFi 天线在 footprint 里面, 雷达扫得到。
          按位置剔除: 车身矩形(±0.171 x ±0.128)再加这个余量之内的点全丢。
          **不能改成按最小距离剔** —— 板子实测能停在 0.285m。
@@ -190,6 +221,27 @@
          (车半长+禁区)*tan(theta)(15° 时 7.3cm), 而且航向偏差原样留着,
          后半程只会越走越偏。 -->
     <arg name="go_around_align_deg" default="3.0"/>
+    <!-- 两臂车道中心线半径(米), 0 = 关掉曲率修正。
+         绕板三段全在**板子系**里走直线, 而板法线只是**板子那一点**的车道
+         切线。第二段前进那 d 米走直线、车道却是弧, 等车走到板后 d 米,
+         真正的中心线已经转过 asin(d/R) 并往内偏了 R(1-cos)。收尾按板法线
+         摆车就摆在过期基准上了。
+         实测 2026-08-18: 偏航 15°、横向 5cm。两个数自洽:
+           由 15° 反解 R=0.371/sin15°=1.433m; 由 5cm 反解 0.05/(1-cos15°)=1.467m
+         修正量跟**实际**前进距离走, 不是写死 15°:
+           0.371m -> 15.0°/4.9cm   0.45m -> 18.3°/7.2cm   0.58m -> 23.9°/12.3cm
+         ⚠ 只在两臂生效, Y 支路是直线不修。
+         ⚠ 方向取"小半径侧"的几何规则, 不跟着实际避让方向走 —— 那一侧被挡
+           住时会翻到另一边让, 但赛道往哪弯和车从哪边绕过去没有关系。 -->
+    <arg name="board_arc_r" default="1.43"/>
+    <arg name="board_arc_max_deg" default="30.0"/>
+    <!-- 横向修正的倍率, 航向不受影响。
+         航向和横向本来是同一个 R 算出来的(phi=asin(d/R), off=R(1-cos phi)),
+         绑死在一起 —— 调 board_arc_r 会同时动两个。这个把横向单独拎出来:
+           1.0 = 按几何算(默认)    0 = 只修航向不修横向    0.5 = 只修一半
+         想要某个具体的厘米数就反算: scale = 想要的偏移 / (R*(1-cos phi))
+           R=1.43 前进 0.371m 时几何值是 4.9cm, 要 3cm 就填 0.61 -->
+    <arg name="board_arc_lat_scale" default="1.0"/>
     <!-- 横回段的"过冲保护"要横移够这么远才上膛(m)。刚切进那一段时底盘
          还在收前一段的速度, 车几乎没动, 而板子估计自己在漂 —— 太小会被
          那几帧误触发, 三段绕障只跑两段就收了(实车 2026-08-16)。 -->
@@ -245,29 +297,113 @@
     <arg name="fourcc" default="MJPG"/>
     <arg name="allow_size_mismatch" default="false"/>
     <arg name="cam_fps" default="0"/>
-    <!-- 终点框: use_lidar:=true 时视觉命中后直接进入雷达角落闭环；
-         两面墙稳定在目标距离后停车退出，不调用终点导航。若两面墙
-         仍有一面超过 corner_fallback_dist，则退回原来的 PAUSE+APPROACH。 -->
-    <arg name="use_lidar" default="false"/>
+    <!-- ==== 认灯用高分辨率原生裁剪 ====
+         cam_w/cam_h: 采集分辨率, 0 = 用标定尺寸(640x480, 也就是原来的行为)。
+         yolo_crop:  从**整帧**里按原始像素抠一块 net 大小的窗口喂 yolo。
+         和 yolo_zoom 的区别: zoom 是先抠再插值放大回去, 细节是假的; 这里
+         是 1:1 原生像素。640x352 的窗口在 1920x1080 上只占 1/3 宽 = 3 倍
+         光学变焦, 灯从 29px 变 87px。
+         窗口中心按**归一化**给, 换分辨率不用重算。默认值是从 2026-08-18
+         那张实拍量的: 灯箱 x=288~316 y=106~130(640x360), 中心 (301,118)
+         -> (0.470, 0.327), 偏左偏上, 不是物理中心。
+         ⚠ 中心是在**翻正后**(dump 图里那个朝向)量的, 代码也是先翻正再裁。
+         yolo_crop_timeout: 裁窗口认了这么久还没定案就放弃, 改喂整帧
+         (缩到 net 大小 = 原来的行为)。灯没落在窗口里时的退路。
+         ⚠⚠ 开高分辨率之前必看: 巡线仍走 to_4x3 裁缩回 640x480, 但**去畸变
+            映射是按 640x480 标定的**。很多 USB 相机的 640x480 模式不是高分
+            模式的等比缩放(换了读出窗口或 binning, 视场不一样), 那样缩回来
+            的帧喂进 maps_640 就是错的, 车道线角度和位置全偏。
+            开之前先用 v4l2-ctl 的 list-formats-ext 看相机有哪些模式, 开了之后拿 dump/latest.jpg 和原来的对一眼, 车道线位置必须
+            一致。对不上就别用, 或者按新分辨率重标定。 -->
+    <arg name="cam_w" default="0"/>
+    <arg name="cam_h" default="0"/>
+    <!-- 认灯期间**临时**切到的分辨率, 认完立刻切回 640x480。
+         实测这台相机支持 1920x1080 / 1280x720 / 800x600 / 640x480 /
+         640x360 / 320x240, 都是 30fps, 取最大那个。
+         这样巡线全程用 640x480(鱼眼标定就是在这个模式上做的), 高分辨率的
+         帧一秒都不会经过去畸变映射, 前面担心的视场失配问题不存在。
+         切换在 start_yolo 里做, 切回在 kill_yolo 里做 —— 放 kill_yolo 是
+         因为退出认灯的路不止一条(定案/超时兜底/连错三次/急停/关机)。
+         ROS 共享相机话题下切不了(那是别的节点在发), 会退回整帧缩放。 -->
+    <arg name="yolo_cam_w" default="1920"/>
+    <arg name="yolo_cam_h" default="1080"/>
+    <arg name="yolo_crop" default="true"/>
+    <arg name="yolo_crop_cx" default="0.470"/>
+    <arg name="yolo_crop_cy" default="0.327"/>
+    <arg name="yolo_crop_w" default="640"/>
+    <arg name="yolo_crop_h" default="352"/>
+    <arg name="yolo_crop_timeout" default="20.0"/>
+    <!-- 白线命中(始终是视觉判)之后怎么进终点:
+           self  巡线自己用雷达拟合终点角落的两面墙, 闭环开进终点框, 车心离
+                 前墙 corner_target_dist、侧墙 corner_target_side_dist 就停(CORNER_ADJUST)。**默认**。
+                 true / lidar 也是这个意思。
+           false 老路: PAUSE 1s 打点 -> 盲推 goal_stop_distance 米。
+         细则:
+           * 只拟合到前墙、侧墙没进视野: 按前墙闭环**前进**, 横向先不动,
+             侧墙进来再一起收; 前墙到位就算到位(横向由巡线保证)。
+           * 前墙 > corner_fallback_dist: 说明其实没到角落(多半是白线误触),
+             退回盲推。侧墙远**不算**退回理由(车道未必贴墙)。
+           * 进来 corner_no_wall_grace 秒还拟合不到前墙: 退回盲推, 别原地
+             干等 30s。
+         ⚠ 三态字符串, 必须 type="str"。 -->
+    <arg name="use_lidar" default="self"/>
     <arg name="goal_enable" default="true"/>
     <arg name="goal_pause" default="1.0"/>          <!-- 检出后刹停几秒打点 -->
     <arg name="goal_stop_distance" default="0.50"/> <!-- 打点后再走多远停 -->
     <arg name="goal_confirm" default="1"/>          <!-- 连续N帧检出才算数; 车快时留不住3帧 -->
     <!-- 雷达角落停车: 距离是车心到墙的垂直距离；0.25±0.01 即 0.24~0.26m -->
-    <arg name="corner_target_dist" default="0.25"/>
+    <arg name="corner_target_dist" default="0.25"/>       <!-- 前墙 -->
+    <!-- 侧墙(车道那一侧的围挡): 车道 42cm, 车在道中间离墙 0.21 -->
+    <arg name="corner_target_side_dist" default="0.21"/>
     <arg name="corner_target_tol" default="0.01"/>
     <arg name="corner_max_fit_dist" default="2.00"/>
-    <arg name="corner_fallback_dist" default="1.00"/>
-    <arg name="corner_sector_half_width" default="0.45"/>
+    <!-- 前墙超过这个距离就退回盲推。白线在画面底部命中时前墙约 0.8~1.1m,
+         1.0 卡在临界上会误退; 场地短边 2.5m, 1.6 已经是"明显不在角落"。 -->
+    <arg name="corner_fallback_dist" default="1.60"/>
+    <arg name="corner_no_wall_grace" default="1.5"/>
+    <!-- 终点雷达闭环全程逐帧落盘: dump/corner_trace_NN.jsonl, 一行一帧, 含原始
+         雷达 ranges(毫米整数) + 那一帧的拟合(两墙距离/法向/残差/点数)、误差、
+         指令、稳定计数。**append 模式、每行 flush**, 被 Ctrl-C 杀掉最多丢半
+         行。白线命中进 CORNER_ADJUST 就开始写, 入口那一帧也记。
+         和 avoid_trace 同格式, 离线脚本可复用。出问题把这个文件发来。 -->
+    <arg name="corner_trace" default="true"/>
+    <!-- 停滞升级: 这么多秒没进展(位置 <3mm/航向 <0.5°)就升一级:
+           1 级 容差放宽一倍(位置 x2, 航向 x1.5)
+           2 级 还在对航向就不等了直接平移
+           3 级 已在平移就就地当作到位, 结束播报
+         平移/转向都有死区托底(move_min_speed / min_turn_speed), 正常不该
+         走到这里; 这是第二道保险(打滑、雷达偏置之类)。 -->
+    <arg name="corner_stall_s" default="3.0"/>
+    <!-- 墙的拟合不分扇区、不预设车的朝向: 先把车周所有直线段抠出来(RANSAC,
+         按"沿线连成一片"打分, 两面墙各一小段拼不成一条), 再挑一对互相垂直
+         的当两面墙。实车 2026-08-18 顶着角尖 45° 进场(两墙法向 +58°/-32°)
+         就是这么解的。
+           corner_back_excl_deg  身后这个锥角内的线不当墙(那是刚绕过的板子;
+                                 别开太大: 车斜 36° 进场时侧墙法向已到 126°)
+           corner_front_half_deg 只拟到一条时, 它得在前方这个半角内才按
+                                 "只有前墙"闭环前进 -->
+    <arg name="corner_back_excl_deg" default="40.0"/>
+    <arg name="corner_front_half_deg" default="60.0"/>
+    <!-- 航向: 墙法向离最近车体轴 <= align_max 才去转(转到和墙平行); 更斜就
+         不转, 直接沿墙法向斜着滑进终点 —— 终点只看位置不看朝向。
+         turn_first=false(默认): 边转边平移(平移沿当帧量到的墙法向, 不耦合);
+         true: 老逻辑, 先转到位(±yaw_hold)再平移。 -->
+    <arg name="corner_yaw_align_max_deg" default="35.0"/>
+    <arg name="corner_turn_first" default="false"/>
     <arg name="corner_min_pts" default="8"/>
     <arg name="corner_min_span" default="0.12"/>
     <arg name="corner_max_residual" default="0.025"/>
     <arg name="corner_wall_angle_tol_deg" default="10.0"/>
     <arg name="corner_cluster_gap" default="0.05"/>
     <arg name="corner_kp" default="0.80"/>
-    <arg name="corner_max_speed" default="0.08"/>
+    <!-- 平移限速。0.08 从 1m 挪到 0.25 要十几秒; 0.15 一半时间, 步长 8mm
+         (19Hz)对 ±1cm 的容差仍然够细。嫌抖就调回 0.08。 -->
+    <arg name="corner_max_speed" default="0.15"/>
     <arg name="corner_yaw_kp" default="0.80"/>
-    <arg name="corner_yaw_hold_deg" default="5.0"/>
+    <!-- 航向偏差小于这个算"锁定"(turn_first 时小于它才平移)。别设得比底盘一拍能转的角度还小: 转向
+         死区 az_min=0.12rad/s, 雷达 12Hz -> 一拍 0.57°, 5° 的窗够进但没余量;
+         6° 稳一点。真正防卡死的是代码里的 az_min 托底。 -->
+    <arg name="corner_yaw_hold_deg" default="6.0"/>
     <arg name="corner_max_yaw_speed" default="0.16"/>
     <arg name="corner_stable_frames" default="5"/>
     <arg name="corner_timeout" default="30.0"/>
@@ -320,6 +456,30 @@
          方向写, 而我们喂 yolo 的是**已翻正**的帧, 两次镜像抵消不掉一次)。
          哪天换了非镜像数据重训, 把这里改回 false -->
     <arg name="yolo_swap_lr" default="true"/>
+    <!-- 黄灯放不放行。默认 false = 当红灯处理(继续等绿灯) —— 规则里黄灯
+         是"减速停车", 抢黄灯被判罚不值当。传 true 则 "yellow left" 等同
+         "left" 直接按方向走。 -->
+    <!-- 黄灯放不放行: false / true / adaptive(默认)
+         false    黄灯当红灯等
+         true     黄灯等同方向灯, 直接走
+         adaptive 前 yellow_go_after(10)秒当红灯等 —— 赌它马上变绿, 抢一个
+                  干净的绿灯发车; 等过了还是黄就认了它走, 总比一路空等到
+                  yolo_wait_max(60s) 再按 fallback 瞎走强。
+         ⚠ 必须 type="str", 否则 roslaunch 会把 adaptive 之外的值转成 bool -->
+    <arg name="yellow_go" default="adaptive"/>
+    <arg name="yellow_go_after" default="10.0"/>
+    <!-- 认到灯之后冲到三岔口那一段的速度倍率。那段是盲走固定里程(odom 打点
+         计距), 路上没有判断也没有障碍, 慢慢挪纯属浪费: 0.30m @0.12m/s 要
+         2.5s, 加倍 1.25s。只在**真认到灯**时加倍, 等超时走 fallback 那次
+         不加(那时候不知道前面是什么, 该稳着来)。过冲就调回 1.0。 -->
+    <arg name="start_dash_gain" default="2.0"/>
+    <!-- 断帧兜底(秒): 盲走那几个相位(START_MOVE/FORK_*/AVOID_*/CORNER)
+         在拿不到新帧时继续发上一条指令的最长时间。底盘 cmd_timeout 只有
+         0.2s, 断帧就不发的话车会被刹停 —— 认灯完把相机切回 640x480 时取帧
+         线程要暂停一下, 正好撞在冲线途中。
+         ⚠ FOLLOW / APPROACH 不吃这个兜底: 那两个靠视觉闭环, 断帧还硬走
+           等于闭着眼睛开。超过这个时间仍然按原来的 3 秒无帧停车退出。 -->
+    <arg name="cam_gap_hold" default="1.0"/>
     <arg name="yolo_use_raw" default="false"/>    <!-- true=喂没去畸变的帧 -->
     <!-- 起点看的是**远处**的灯, 在 640x480 里可能只有十几个像素。>1 就先抠
          中间放大再送(数字变焦), 认不到远灯时先试 1.5~2.5 -->
@@ -362,11 +522,25 @@
     <!-- 空=用 config/red_template.png; 想试平行四边形版就指到
          $(find lane_proto)/config/red_template_band.png -->
     <arg name="template" default=""/>
+    <!-- Y 支路专用触发区模板: 转完 Y 字岔口(FORK_TURN 结束)之后换成这张。
+         Y 那一段和两臂的车道形状不一样(直、更窄), 同一张模板要么太松要么
+         太紧。空 = 不换, 全程用上面那张; 和 template 指到同一个文件也等于
+         不换。开机就加载, 路径写错立刻报错, 不会等车跑到岔口才炸。
+         只有走**中间那条**才会经过 FORK_TURN(两臂在 apply_branch 里直接
+         置 fork_done, 不进那个相位), 所以这里换正好是"Y 字分叉之后"。 -->
+    <arg name="template_y"
+         default="$(find lane_proto)/config/red_template_band2.png"/>
     <!-- 精简 bringup 现在也带雷达和 imu 的 TF。单独测试拦路板时它必须起,
          交接模式下底盘/雷达由 2026.launch 提供, start_base_driver:=false -->
+    <!-- 雷达: 拦路板检测(board_in_lane)或终点雷达角落闭环(use_lidar 不是
+         false)任一个开着就得起。以前只跟 board_in_lane 走, board_in_lane:=false
+         + use_lidar:=self 时 /scan 根本没人发, CORNER_ADJUST 一进去就"/scan 陈旧"
+         干等到超时(实车 2026-08-19 卡死 16s 手动 Ctrl-C)。 -->
+    <arg name="start_lidar"
+         default="$(eval arg('board_in_lane') or str(arg('use_lidar')).lower() not in ('false', '0', 'no', 'off'))"/>
     <include if="$(arg start_base_driver)"
              file="$(find ucar_controller_simple)/launch/base_driver.launch">
-        <arg name="start_lidar" value="$(arg board_in_lane)"/>
+        <arg name="start_lidar" value="$(arg start_lidar)"/>
         <arg name="lidar_port" value="$(arg lidar_port)"/>
     </include>
     <node pkg="lane_proto" type="lane_follow.py" name="lane_follow"
@@ -387,10 +561,10 @@
         <param name="exit_on_stop" type="bool" value="$(arg exit_on_stop)"/>
         <param name="board_in_lane" type="bool" value="$(arg board_in_lane)"/>
         <param name="goal_mode" type="str" value="$(arg goal_mode)"/>
-        <param name="goal_wall_dist" value="$(arg goal_wall_dist)"/>
-        <param name="field_w" value="$(arg field_w)"/>
-        <param name="field_h" value="$(arg field_h)"/>
-        <param name="field_tol" value="$(arg field_tol)"/>
+        <param name="goal_map_xy" type="str" value="$(arg goal_map_xy)"/>
+        <param name="goal_map_dist" value="$(arg goal_map_dist)"/>
+        <param name="pose_topic" type="str" value="$(arg pose_topic)"/>
+        <param name="pose_fresh" value="$(arg pose_fresh)"/>
         <param name="goal_need_clear" type="str" value="$(arg goal_need_clear)"/>
         <param name="goal_clear_range" value="$(arg goal_clear_range)"/>
         <param name="board_clear_dist" value="$(arg board_clear_dist)"/>
@@ -428,14 +602,25 @@
         <param name="go_around_k_sigma" value="$(arg go_around_k_sigma)"/>
         <param name="go_around_miss_max" value="$(arg go_around_miss_max)"/>
         <param name="go_around_back_tol" value="$(arg go_around_back_tol)"/>
+        <param name="go_around_back_src" type="str"
+               value="$(arg go_around_back_src)"/>
+        <param name="go_around_pose_settle"
+               value="$(arg go_around_pose_settle)"/>
         <param name="scan_stale" value="$(arg scan_stale)"/>
         <param name="go_around_speed" value="$(arg go_around_speed)"/>
         <param name="go_around_max" value="$(arg go_around_max)"/>
         <param name="go_around_cooldown" value="$(arg go_around_cooldown)"/>
+        <param name="go_around_cooldown_goal"
+               value="$(arg go_around_cooldown_goal)"/>
         <param name="go_around_back_arm"
                value="$(arg go_around_back_arm)"/>
         <param name="go_around_align_deg"
                value="$(arg go_around_align_deg)"/>
+        <param name="board_arc_r" value="$(arg board_arc_r)"/>
+        <param name="board_arc_max_deg"
+               value="$(arg board_arc_max_deg)"/>
+        <param name="board_arc_lat_scale"
+               value="$(arg board_arc_lat_scale)"/>
         <param name="go_around_trace" type="bool"
                value="$(arg go_around_trace)"/>
         <param name="go_around_dump_span"
@@ -462,20 +647,41 @@
         <param name="allow_size_mismatch" type="bool"
                value="$(arg allow_size_mismatch)"/>
         <param name="cam_fps" value="$(arg cam_fps)"/>
+        <param name="cam_w" value="$(arg cam_w)"/>
+        <param name="cam_h" value="$(arg cam_h)"/>
+        <param name="yolo_cam_w" value="$(arg yolo_cam_w)"/>
+        <param name="yolo_cam_h" value="$(arg yolo_cam_h)"/>
+        <param name="yolo_crop" type="bool" value="$(arg yolo_crop)"/>
+        <param name="yolo_crop_cx" value="$(arg yolo_crop_cx)"/>
+        <param name="yolo_crop_cy" value="$(arg yolo_crop_cy)"/>
+        <param name="yolo_crop_w" value="$(arg yolo_crop_w)"/>
+        <param name="yolo_crop_h" value="$(arg yolo_crop_h)"/>
+        <param name="yolo_crop_timeout" value="$(arg yolo_crop_timeout)"/>
         <param name="template" value="$(arg template)"/>
+        <param name="template_y" value="$(arg template_y)"/>
         <!-- ⚠ 这里以前写死 10.0, 所以命令行 rate:=20 一直不生效 -->
         <param name="rate" value="$(arg rate)"/>
-        <param name="use_lidar" value="$(arg use_lidar)"/>
+        <param name="use_lidar" type="str" value="$(arg use_lidar)"/>
         <param name="goal_enable" value="$(arg goal_enable)"/>
         <param name="goal_pause" value="$(arg goal_pause)"/>
         <param name="goal_stop_distance" value="$(arg goal_stop_distance)"/>
         <param name="goal_confirm" value="$(arg goal_confirm)"/>
+        <param name="corner_no_wall_grace" value="$(arg corner_no_wall_grace)"/>
+        <param name="corner_trace" type="bool" value="$(arg corner_trace)"/>
+        <param name="corner_stall_s" value="$(arg corner_stall_s)"/>
         <param name="corner_target_dist" value="$(arg corner_target_dist)"/>
+        <param name="corner_target_side_dist"
+               value="$(arg corner_target_side_dist)"/>
         <param name="corner_target_tol" value="$(arg corner_target_tol)"/>
         <param name="corner_max_fit_dist" value="$(arg corner_max_fit_dist)"/>
         <param name="corner_fallback_dist" value="$(arg corner_fallback_dist)"/>
-        <param name="corner_sector_half_width"
-               value="$(arg corner_sector_half_width)"/>
+        <param name="corner_back_excl_deg" value="$(arg corner_back_excl_deg)"/>
+        <param name="corner_front_half_deg"
+               value="$(arg corner_front_half_deg)"/>
+        <param name="corner_yaw_align_max_deg"
+               value="$(arg corner_yaw_align_max_deg)"/>
+        <param name="corner_turn_first" type="bool"
+               value="$(arg corner_turn_first)"/>
         <param name="corner_min_pts" value="$(arg corner_min_pts)"/>
         <param name="corner_min_span" value="$(arg corner_min_span)"/>
         <param name="corner_max_residual"
@@ -509,6 +715,10 @@
         <param name="yolo_wait_max" value="$(arg yolo_wait_max)"/>
         <param name="yolo_fallback" type="str" value="$(arg yolo_fallback)"/>
         <param name="yolo_swap_lr" type="bool" value="$(arg yolo_swap_lr)"/>
+        <param name="yellow_go" type="str" value="$(arg yellow_go)"/>
+        <param name="yellow_go_after" value="$(arg yellow_go_after)"/>
+        <param name="start_dash_gain" value="$(arg start_dash_gain)"/>
+        <param name="cam_gap_hold" value="$(arg cam_gap_hold)"/>
         <param name="yolo_use_raw" type="bool" value="$(arg yolo_use_raw)"/>
         <param name="yolo_zoom" value="$(arg yolo_zoom)"/>
         <param name="fork_turn_speed" value="$(arg fork_turn_speed)"/>

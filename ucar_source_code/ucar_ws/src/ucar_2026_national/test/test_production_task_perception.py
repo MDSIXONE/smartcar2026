@@ -23,6 +23,7 @@ from production_task_perception import (  # noqa: E402
     is_navigation_ocr_candidate,
     nearest_numbered_point,
     normalize_production_category,
+    ocr_detection_bbox_area,
     odom_velocity_is_stopped,
     projected_wall_hit,
     select_alignment_detection,
@@ -52,6 +53,39 @@ class ProductionTaskPerceptionTest(unittest.TestCase):
         self.assertFalse(is_navigation_ocr_candidate(
             {"ok": True, "detection": {"text": "", "confidence": 99.0}},
             60.0))
+
+    def test_navigation_candidate_rejects_small_occluded_box(self):
+        small = {
+            "ok": True,
+            "detection": {
+                "text": "食品加工车间", "confidence": 86.0,
+                "bbox": (100, 100, 20, 20),
+            },
+        }
+        borderline = {
+            "ok": True,
+            "detection": {
+                "text": "食品加工车间", "confidence": 86.0,
+                "bbox": (100, 100, 51, 38),
+            },
+        }
+        valid = {
+            "ok": True,
+            "detection": {
+                "text": "食品加工车间", "confidence": 86.0,
+                "bbox": (100, 100, 61, 41),
+            },
+        }
+        self.assertAlmostEqual(ocr_detection_bbox_area(
+            borderline["detection"]), 1938.0)
+        self.assertAlmostEqual(ocr_detection_bbox_area(
+            valid["detection"]), 2501.0)
+        self.assertAlmostEqual(ocr_detection_bbox_area(
+            small["detection"]), 400.0)
+        self.assertFalse(is_navigation_ocr_candidate(small, 60.0, 500.0))
+        self.assertTrue(is_navigation_ocr_candidate(
+            borderline, 60.0, 500.0))
+        self.assertTrue(is_navigation_ocr_candidate(valid, 60.0, 500.0))
 
     def test_odom_stop_gate_checks_all_planar_axes(self):
         self.assertTrue(odom_velocity_is_stopped(

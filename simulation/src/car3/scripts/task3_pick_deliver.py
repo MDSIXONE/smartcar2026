@@ -179,7 +179,7 @@ class PickDeliverTask:
             rospy.get_param("~observation_yaw_tolerance", 0.12)
         )
         self.destination_position_tolerance = float(
-            rospy.get_param("~destination_position_tolerance", 0.05)
+            rospy.get_param("~destination_position_tolerance", 0.08)
         )
         self.destination_yaw_tolerance = float(
             rospy.get_param("~destination_yaw_tolerance", 0.10)

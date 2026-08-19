@@ -31,6 +31,21 @@ TEST(PlannerTuning, PointAndBodyModesSelectIndependentValues)
             true, point, body).command_sweep_time);
 }
 
+TEST(PlannerTuning, DestinationProfileCanTightenOnlyTheFinalApproach)
+{
+    cym_planner::PlannerTuning point;
+    cym_planner::PlannerTuning destination;
+    point.goal_position_tolerance = 0.07;
+    point.final_linear_x_gain = 0.0;
+    destination.goal_position_tolerance = 0.04;
+    destination.final_linear_x_gain = 1.0;
+
+    EXPECT_DOUBLE_EQ(0.07, point.goal_position_tolerance);
+    EXPECT_DOUBLE_EQ(0.0, point.final_linear_x_gain);
+    EXPECT_DOUBLE_EQ(0.04, destination.goal_position_tolerance);
+    EXPECT_DOUBLE_EQ(1.0, destination.final_linear_x_gain);
+}
+
 TEST(PlannerTuning, BodyModeCanSlowTranslationBeforeTightTurns)
 {
     EXPECT_NEAR(

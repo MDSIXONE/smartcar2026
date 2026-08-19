@@ -11,6 +11,7 @@
 launch，运行中的节点不会自动读取文件新值**。当前项目的实际加载链路是：
 
 ```text
+ucar_2026/launch/2026.launch
 ucar_2026_national/launch/2026.launch
 ucar_2026_extra/launch/2026.launch
         └─ ucar_nav/launch/cym_move_base_omni_2026.launch
@@ -92,8 +93,8 @@ TF 正常，再发送运动目标。
 | 文件 | 现场可调位置 | 用途 |
 | --- | --- | --- |
 | `ucar_ws/src/ucar_nav/config/testnav20260721/move_base_params.yaml` | `controller_frequency`、`controller_patience`、`planner_frequency`、`planner_patience`、`oscillation_timeout`、`oscillation_distance` | 控制循环、重规划和振荡判定；当前 `planner_frequency=0.0` 是事件驱动重规划，不要直接改回高频而不做对比 |
-| `ucar_ws/src/ucar_nav/config/testnav20260721/global_costmap_common.yaml` | `footprint`、`obstacle_range`、`raytrace_range`、`inflation_radius`、`cost_scaling_factor` | 全局障碍和安全膨胀；当前全局膨胀半径 `0.217 m` |
-| `ucar_ws/src/ucar_nav/config/testnav20260721/local_costmap_common.yaml` | `footprint`、`obstacle_range`、`raytrace_range`、`expected_update_rate`、`inflation_radius`、`cost_scaling_factor` | 局部激光障碍和实时安全；当前局部膨胀半径 `0.07 m` |
+| `ucar_ws/src/ucar_nav/config/testnav20260721/global_costmap_common.yaml` | `footprint`、`obstacle_range`、`raytrace_range`、`inflation_radius`、`cost_scaling_factor` | 全局障碍和安全膨胀；当前常态膨胀半径 `0.224 m` |
+| `ucar_ws/src/ucar_nav/config/testnav20260721/local_costmap_common.yaml` | `footprint`、`obstacle_range`、`raytrace_range`、`expected_update_rate`、`inflation_radius`、`cost_scaling_factor` | 局部激光障碍和实时安全；当前常态膨胀半径 `0.224 m` |
 | `ucar_ws/src/ucar_nav/config/testnav20260721/local_costmap_params.yaml` | `update_frequency`、`publish_frequency`、`width`、`height`、`resolution` | 局部地图刷新和窗口大小；当前窗口 `1.0 m × 1.0 m` |
 | `ucar_ws/src/ucar_nav/config/testnav20260721/global_costmap_params.yaml` | `update_frequency`、`publish_frequency`、`resolution`、`rolling_window` | 全局地图刷新和是否滚动窗口；通常不作为现场速度调参入口 |
 | `ucar_ws/src/ucar_nav/config/testnav20260721/global_planner_params.yaml` | `allow_unknown`、`default_tolerance`、`use_dijkstra`、`use_grid_path` | 全局路径规划策略；路径绕不过去时先观察地图/footprint，不要直接放宽未知区 |
@@ -102,65 +103,23 @@ TF 正常，再发送运动目标。
 `inflation_radius` 变小会减少安全距离，`obstacle_range`/`raytrace_range` 变大也不能修复
 传感器或 TF 异常。
 
-### 0.4 任务、路线、位置和冲刺参数
+### 0.4 三份现场参数文档
 
-文件分别为：
+现场参数已按比赛流程拆成三份独立文档，每份文档开头都提供“候选搜索词”索引。
+例如直接搜索 `OCR常规点局部膨胀`，即可定位到普通 OCR 点使用的 local costmap
+常态 `inflation_radius`；搜索 `OCR停车局部膨胀`，即可定位到停车阶段的
+`processing_parking_inflation_radius_m`。
 
-- 国赛：`ucar_ws/src/ucar_2026_national/launch/2026.launch`
-- 额外任务：`ucar_ws/src/ucar_2026_extra/launch/2026.launch`
+| 比赛流程 | 独立参数文档 | 主流程入口 | 适合搜索的关键词 |
+| --- | --- | --- | --- |
+| 省赛 | [省赛现场参数](field-parameters-provincial.md) | `ucar_2026/launch/2026.launch` | `OCR常规点局部膨胀`、`OCR路线`、`普通点速度` |
+| 国赛 | [国赛现场参数](field-parameters-national.md) | `ucar_2026_national/launch/2026.launch` | `OCR常规点局部膨胀`、`70点冲刺`、`终点地图坐标闭环`、`绕板` |
+| 额外任务 | [额外任务现场参数](field-parameters-extra.md) | `ucar_2026_extra/launch/2026.launch` | `OCR常规点局部膨胀`、`OCR快捷路线`、`stop_mode`、`target_texts` |
 
-两份 launch 的通用现场参数主要在 `production_task_2026` 节点内：
+三份文档都遵守同一现场规则：先停止任务和发布零速度，再改文件、同步、重启对应流程；
+运行中不会自动读取 launch/YAML/JSON 新值。
 
-| 参数位置 | 作用 |
-| --- | --- |
-| `initial_pose_x`、`initial_pose_y`、`initial_pose_a` | 启动时初始位姿；当前默认 `(-0.25, 2.75, 0)`，必须和车实际放置位置一致 |
-| `task_start_delay` | 启动后等待多久开始任务 |
-| `move_base_ready_timeout`、`safe_start_timeout`、`plan_timeout`、`goal_timeout` | 导航、零速安全门、规划和目标等待超时 |
-| `arrival_tolerance` | 任务层到点判定半径；当前 `0.15 m`，不能代替地图点校准 |
-| `production_route_numbers`、`production_observation_headings_deg` | 生产观察点顺序和到点朝向 |
-| `fallback_production_route_numbers`、`fallback_production_observation_headings_deg` | 主路线没有完成扫码时的外围兜底路线 |
-| `destination_point_number`、`destination_heading_point_number`、`destination_midpoint_point_numbers` | 生产任务结束位置和交接朝向 |
-| `qr_observation_numbers`、`post_qr_waypoint_number`、`post_qr_waypoint_heading_point_number` | 二维码观察点和扫码后路线 |
-| `ocr_*` 参数 | OCR 置信度、扫描速度、旋转超时、像素对准 P/D、对准速度和激光测墙阈值；修改后需重启任务节点 |
-| `camera_mirror`、`camera_width`、`camera_height`、`ocr_side` | 相机镜像和 OCR 图像尺寸；镜像错误会让对准方向反过来 |
-| `lane_proto` include 内的 `linear_speed`、`gain`、`rate`、`goal_pause` | 终点巡线的速度、横向响应和循环频率；国赛当前 `linear_speed=0.2`，额外任务当前 `0.25` |
-
-国赛冲刺专用参数位于国赛 `2026.launch` 的 `production_task_2026` 节点：
-
-| 参数 | 当前值 | 作用 |
-| --- | --- | --- |
-| `sprint_enabled` | `true` | 是否启用 70→288 冲刺段 |
-| `sprint_start_point_number` | `70` | 冲刺起点编号 |
-| `sprint_end_point_number` | `288` | 未设置显式终点坐标时的终点编号 |
-| `sprint_end_x`、`sprint_end_y` | `0.875`、`1.75` | 两者同时非空时，优先使用这个坐标作为冲刺终点 |
-| `sprint_yaw_deg` | `180` | 到达 70 号冲刺起点时的车头角度；现场可改，不需要编译，但要重新启动任务 |
-| `sprint_transverse_enabled` | `false` | `true` 时切到横向 `transverse` 参数；不能和普通前进冲刺混用测试 |
-
-额外任务没有国赛的 `sprint_*` 段；额外任务的 OCR 快捷路线文件是：
-`ucar_ws/src/ucar_2026_extra/config/ocr_route_profile.yaml`。其中可现场改：
-`point`、`heading_deg`、`rotate_angle_deg`、`rotate_dir`、`stop_mode`、`target_texts`。
-`ocr_route_profile: []` 表示关闭快捷模板，恢复 launch 中的固定生产路线。
-
-### 0.5 地图点坐标的位置
-
-生产网格坐标不在 launch，而在 JSON 中：
-
-- 国赛：`ucar_ws/src/ucar_2026_national/config/production_full_grid_all_numbered.json`
-- 额外任务：`ucar_ws/src/ucar_2026_extra/config/production_full_grid_all_numbered.json`
-
-修改一个编号点时，必须同时修改该文件顶层 `points` 和
-`grouped_points.centers` 中的同编号记录。当前国赛和额外任务的 70 号点都是
-`(x_m=2.32, y_m=1.68)`，来源是原坐标执行 `x + 0.07`、`y - 0.07`。JSON 不需要编译，
-但必须重启任务节点；修改后先做解析和编号唯一性检查：
-
-```bash
-python3 -c 'import json; p="ucar_ws/src/ucar_2026_national/config/production_full_grid_all_numbered.json"; d=json.load(open(p)); q=[x for x in d["points"] if x["number"]==70]; assert len(q)==1; print(q[0])'
-```
-
-不要把“改地图点坐标”和“改 `initial_pose_*`”混为一件事：前者改变任务目标位置，后者
-只改变启动时定位初值。
-
-### 0.6 不重启即可做的运行时对比
+### 0.5 不重启即可做的运行时对比
 
 CymPlanner 已订阅 `/ucar/navigation_mode`，只切换已加载的参数组，不会重新读取 YAML。
 只能在车辆静止、任务已取消的情况下手动对比：
@@ -183,7 +142,7 @@ rostopic pub -1 /ucar/carry_mode std_msgs/Bool "data: true"
 内存，运行中改参数服务器不会更新已缓存的 `mode1/mode2/mode3` 控制参数。需要重新加载
 参数时，按前面的流程修改文件并重启节点。
 
-### 0.7 明确不能按“现场参数”处理的内容
+### 0.6 明确不能按“现场参数”处理的内容
 
 - `ucar_ws/src/cym_planner/src/cym_planner.cpp`、`include/`、插件源码、CMake 或依赖：
   改动后必须在小车 Ubuntu 18.04 / ROS Melodic 上重新编译，不能在本机编译后直接当成

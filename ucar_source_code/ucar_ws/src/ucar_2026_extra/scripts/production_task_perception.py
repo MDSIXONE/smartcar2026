@@ -28,6 +28,26 @@ def horizontal_pixel_error(detection, image_width):
     return (left + width / 2.0) - float(image_width) / 2.0
 
 
+def ocr_detection_bbox_area(detection):
+    """Return the visible OCR box area in image pixels."""
+    if not isinstance(detection, dict):
+        return 0.0
+    bbox = detection.get("bbox")
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return 0.0
+    width = float(bbox[2])
+    height = float(bbox[3])
+    if (not is_finite(width) or not is_finite(height) or
+            width <= 0.0 or height <= 0.0):
+        return 0.0
+    return width * height
+
+
+def ocr_detection_is_large_enough(detection, minimum_area_px):
+    """Return whether an OCR box is large enough to enter protected alignment."""
+    return ocr_detection_bbox_area(detection) >= float(minimum_area_px)
+
+
 def alignment_angular_speed(
         error_pixels, kp, kd, maximum_speed, image_is_mirrored,
         previous_error_pixels=None, sample_seconds=None):
@@ -49,7 +69,8 @@ def alignment_angular_speed(
     return max(-maximum, min(maximum, command))
 
 
-def is_navigation_ocr_candidate(response, minimum_confidence):
+def is_navigation_ocr_candidate(
+        response, minimum_confidence, minimum_bbox_area_px=0.0):
     """Return whether a moving OCR response is strong enough to stop for."""
     if not isinstance(response, dict) or not response.get("ok"):
         return False
@@ -61,7 +82,13 @@ def is_navigation_ocr_candidate(response, minimum_confidence):
         confidence = float(detection.get("confidence", -1.0))
     except (TypeError, ValueError):
         return False
-    return bool(text) and confidence >= float(minimum_confidence)
+    if not text or confidence < float(minimum_confidence):
+        return False
+    if (float(minimum_bbox_area_px) > 0.0 and
+            not ocr_detection_is_large_enough(
+                detection, minimum_bbox_area_px)):
+        return False
+    return True
 
 
 def normalize_production_category(text):

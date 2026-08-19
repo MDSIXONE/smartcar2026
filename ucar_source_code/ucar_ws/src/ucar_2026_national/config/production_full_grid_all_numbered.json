@@ -705,8 +705,8 @@
       "row_from_top": 3,
       "column_from_left": 10,
       "region": "outside_top",
-      "x_m": 2.32,
-      "y_m": 1.68
+      "x_m": 2.25,
+      "y_m": 1.75
     },
     {
       "number": 71,
@@ -4764,8 +4764,8 @@
         "row_from_top": 3,
         "column_from_left": 10,
         "region": "outside_top",
-        "x_m": 2.32,
-        "y_m": 1.68
+        "x_m": 2.25,
+        "y_m": 1.75
       },
       {
         "number": 71,

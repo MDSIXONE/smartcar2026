@@ -8,10 +8,13 @@ Gazebo/RViz → bridge → 小车安全检查 → mission。
 
 - 入口包：ucar_2026_national。
 - 地图：iflysse_field_walls_national.yaml。
-- 终点前往交接区域仍由主流程导航完成；交接后常驻 lane_proto 直接接管终点巡线和雷达角落停车，启动时不直接驱动巡线。
+- 终点前往交接区域仍由主流程导航完成；交接后常驻 lane_proto 直接接管终点巡线和地图坐标定点停车，启动时不直接驱动巡线。
 - 当前国赛交接启用 is_fork=yolo、板检测和绕板：board_in_lane=true、
-  go_around=true、board_stop_dist=0.321、go_around_keepout=0.15。
-- 当前巡线速度参数为 linear_speed=0.2、gain=1.2、rate=20、goal_pause=1.0；终点视觉命中后使用两墙雷达闭环，目标距离为 `0.25±0.01m`。
+  go_around=true、board_stop_dist=0.321、go_around_keepout=0.08、
+  board_arc_lat_scale=0.3。
+- 当前巡线速度参数为 linear_speed=0.2、gain=1.2、rate=20、goal_pause=1.0；
+  `use_lidar=true` 保持终点地图定点闭环，物理左支路到点 120，物理右支路到点 111，
+  中间支路到点 111，左右航向 `-90°`、中间航向 `180°`。
 
 ## 2. 仿真端
 
@@ -64,8 +67,9 @@ timeout 5 rosrun tf tf_echo map base_link
 rostopic hz /scan
 ~~~
 
-只有 /odom_raw 有限、两个 TF 正常、/scan 稳定、无 TF_NAN_INPUT/crc16/
-sensor not active，且车辆已回到起点，才能停止 manual 并进入 mission。发现 NaN
+只有 /odom_raw 有限、两个 TF 正常、/scan 稳定、无 TF_NAN_INPUT、head_len 或
+sensor not active，且车辆已回到起点，才能停止 manual 并进入 mission。单帧
+`check crc16 faild(imu)` 由任务记录告警，不单独作为中止条件；发现 NaN
 或 TF 错误时先零速和重启底盘/定位链路，不得继续测试。
 
 ## 4. 启动国赛主流程
@@ -85,8 +89,39 @@ rostopic echo /lane_proto/state
 rostopic echo /lane_proto/result
 ~~~
 
-首次相位应进入黄线对齐/起跑序列，而不是直接把起跑黄线识别成终点并 STOPPED。正常终点应观察到 `FOLLOW -> CORNER_ADJUST -> STOPPED` 且 `/lane_proto/result=GOAL`；只有 `GOAL` 才会让主流程发布 `SUCCEEDED`。如果两面墙任一距离超过 1m，节点会进入原来的 `PAUSE+APPROACH` 兜底。
+首次相位应进入黄线对齐/起跑序列，而不是直接把起跑黄线识别成终点并 STOPPED。正常终点应观察到
+`FOLLOW -> CORNER_ADJUST -> STOPPED` 且 `/lane_proto/result=GOAL`；只有 `GOAL` 才会让主流程发布
+`SUCCEEDED`，随后播报“任务完成”。雷达数据不可用或角落闭环失败时，节点保持零速并按
+`CONFIG/ABORT` 处理，不得继续任务。
 板检测或绕板失败时立即停车，保留终端日志，不要反复重新激活巡线节点。
+
+### 任务完成后给裁判展示仿真场景
+
+国赛主流程完成并播报任务结束后，如需重新随机生成仿真物块和锥桶供裁判查看，
+保持电脑 WSL 中的仿真一键启动脚本和 Gazebo 继续运行，在电脑上新开一个 WSL
+终端执行。以下命令不能在小车终端执行，也不能只复制最后一行；小车使用
+`11311`，仿真使用独立 Master `11312`：
+
+~~~bash
+cd ~/smartcar2026/simulation
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+export ROS_MASTER_URI=http://127.0.0.1:11312
+unset ROS_IP ROS_HOSTNAME
+rostopic list
+~~~
+
+确认 `rostopic list` 能列出仿真话题后，再执行：
+
+~~~bash
+rosrun car3 spawn_cubes.py
+~~~
+
+看到物块坐标、`锥桶: 10/10 个` 和 `完成` 后，即可让裁判查看 Gazebo 窗口中的
+新场景。该命令会先删除旧的 `cube_*` 和 `cone_*`，再生成一组新的随机场景，
+不会复位小车或重新执行国赛任务。若提示 `Unable to register with master node`
+并指向 `11311` 或 `11312`，先回到仿真一键启动终端确认 ROS Master 仍在运行，
+不要反复重试 `rosrun`。
 
 ## 5. 停止和清理
 
@@ -106,6 +141,10 @@ bash ~/ucar_ws/src/ucar_2026_national/scripts/stop_2026_task.sh
 | bridge 报 `Address already in use` | 先停止原仿真一键启动终端，确认旧 bridge 已退出，再只启动一份脚本；确认 `/status` 返回 `state=waiting` 后才能启动车端 mission。 |
 | /map 没有数据或 bridge 不为 waiting | 一键脚本的 ROS_MASTER_URI 必须是 127.0.0.1:11312；先修复仿真，不要启动车端 mission。 |
 | /odom_raw 为 NaN、TF 报 TF_NAN_INPUT | 立即零速并停止；重启底盘/定位链路，确认 odom、odom -> base_link、map -> base_link 均恢复有限值后再开始。 |
-| 日志有 crc16、head_len、sensor not active | 停止流程，检查 CP2102/USB Hub/串口和供电；国赛巡线不能掩盖底盘链路故障。 |
+| 日志有 `check crc16 faild(imu)` | 任务记录限频告警并继续；若伴随 `imu sensor not active`、非有限 odom/TF 或其他底盘链路故障，停止流程检查 CP2102/USB Hub/串口和供电。 |
+| 其他 crc16、head_len、sensor not active | 停止流程，检查 CP2102/USB Hub/串口和供电；国赛巡线不能掩盖底盘链路故障。 |
 | 交接后立即 STOPPED | 检查车端 lane_proto 和国赛 2026.launch 是否为当前版本，重点核对 is_fork=yolo、board_in_lane、go_around 参数；不在现场临时手改参数后继续跑。 |
 | 巡线 Python2 logging 或 cv_bridge 导入错误 | 只能用 ROS Melodic Python2 启动器；不要直接用 Python3 执行 lane_follow.py。 |
+| `production_task_2026` 立即 exit code 1 | 用 `run_melodic_python2.sh` 做入口脚本导入检查；若报 `cannot import name shortest_yaw_delta`，说明任务脚本与 `production_task_geometry.py` 版本不一致。同步成套文件后必须重启整套国赛 launch。 |
+| `post_turn_recenter_trigger` 参数校验失败 | 当前 `arrival_tolerance=0.12`、`post_turn_recenter_trigger=0.06`，后者必须保持为正且小于前者。修改后必须重启 launch，运行中的参数不会热更新。 |
+| `move_base` 显示 `goal reached`，随后出现 `stopped ... from target` | 确认运行的是最新任务脚本并已重启正式 launch。当前版本会对 action 成功但位姿复核超限重发 3 次，仍超限记录 `PRODUCTION_TASK_ARRIVAL_CONTINUE` 后继续；若仍出现旧的 `PRODUCTION_TASK_ABORTED`，说明车上还是旧进程或旧文件。 |

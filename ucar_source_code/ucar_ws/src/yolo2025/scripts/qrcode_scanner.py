@@ -3,7 +3,9 @@
 
 Real-field QR codes carry a full URL; when api_enabled the decoded URL
 itself is GET-requested and the JSON reply ({"code": 200, "result": "<item>"})
-is published on /qr_api_result for the task node to match item names.
+is published on /qr_api_result for the task node to match item names.  When
+one image contains multiple QR codes, every decoded text is published in
+detector order instead of retaining only the first result.
 """
 
 import json
@@ -38,8 +40,8 @@ class QRCodeScanner(object):
         self.api_item_cache = {}
         self.api_lock = threading.Lock()
 
-        self.result_pub = rospy.Publisher("/qr_result", String, queue_size=1)
-        self.api_result_pub = rospy.Publisher("/qr_api_result", String, queue_size=1)
+        self.result_pub = rospy.Publisher("/qr_result", String, queue_size=20)
+        self.api_result_pub = rospy.Publisher("/qr_api_result", String, queue_size=20)
         self.image_sub = rospy.Subscriber(self.image_topic, Image, self.image_callback, queue_size=1)
         self.enable_sub = rospy.Subscriber("/qrcode_start_flag", Int8, self.enable_callback, queue_size=1)
 
@@ -73,20 +75,23 @@ class QRCodeScanner(object):
             rospy.logwarn_throttle(2.0, "QR image conversion failed: %s", error)
             return
 
-        decoded_text = self.decode(image)
-        if not decoded_text:
+        decoded_texts = self.decode(image)
+        if not decoded_texts:
             return
 
-        now = time.monotonic()
-        if decoded_text == self.last_text and now - self.last_publish_time < self.same_code_cooldown_sec:
-            return
-        self.last_text = decoded_text
-        self.last_publish_time = now
-        self.result_pub.publish(decoded_text)
-        rospy.loginfo("QR detected: %s", decoded_text)
+        for decoded_text in decoded_texts:
+            now = time.monotonic()
+            if (decoded_text == self.last_text and
+                    now - self.last_publish_time <
+                    self.same_code_cooldown_sec):
+                continue
+            self.last_text = decoded_text
+            self.last_publish_time = now
+            self.result_pub.publish(decoded_text)
+            rospy.loginfo("QR detected: %s", decoded_text)
 
-        if self.api_enabled:
-            self.query_api_async(decoded_text)
+            if self.api_enabled:
+                self.query_api_async(decoded_text)
 
     @staticmethod
     def image_message_to_bgr(message):
@@ -117,18 +122,19 @@ class QRCodeScanner(object):
         if self.wechat_detector is not None:
             try:
                 results, _ = self.wechat_detector.detectAndDecode(image)
-                if results:
-                    for result in results:
-                        if result:
-                            return result.strip()
+                decoded = [result.strip() for result in results if result]
+                if decoded:
+                    return decoded
             except Exception as error:
                 rospy.logwarn_throttle(2.0, "WeChat QR detection failed: %s", error)
         try:
-            text, _, _ = self.open_cv_detector.detectAndDecode(image)
-            return text.strip() if text else ""
+            found, texts, _, _ = self.open_cv_detector.detectAndDecodeMulti(image)
+            if not found:
+                return []
+            return [text.strip() for text in texts if text]
         except cv2.error as error:
             rospy.logwarn_throttle(2.0, "OpenCV QR detection failed: %s", error)
-            return ""
+            return []
 
     def query_api_async(self, decoded_text):
         url = decoded_text.strip()

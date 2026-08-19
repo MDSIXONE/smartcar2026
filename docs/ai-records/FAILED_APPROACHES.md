@@ -1,5 +1,21 @@
 # 已放弃方案
 
+## 2026-08-19｜直接解压 V29 后未恢复 lane_follow.py 执行位
+
+- **原方案**：将 Windows 侧 V29 压缩包解压/复制到车端后直接启动。
+- **停止原因**：车端 `lane_follow.py` 权限为 `644`，虽然文件、shebang 和 `rospack` 路径均正确，
+  ROS 仍报 `Cannot locate node of type`。
+- **替代方案**：部署后明确执行 `chmod +x ~/ucar_ws/src/lane_proto/scripts/lane_follow.py`，
+  再用 `test -x` 和无运动启动解析验收。
+
+## 2026-08-19｜部署工作区旧 lane_proto 而非用户指定 V29 压缩包
+
+- **原方案**：直接把工作区当前 `lane_proto` 文件上传到车端，未先核对用户指定的最新压缩包。
+- **停止原因**：`tmp/lane_proto_v29.zip` 内核心文件哈希不同，且 V29 不包含上一版临时
+  `goal_control_mode` 接口；旧部署不满足“最新 V29 接入”。
+- **替代方案**：以 V29 压缩包覆盖本地运行包，按 V29 参数接口重写主流程，再整体部署并用
+  远端哈希验收。
+
 ## 2026-08-18｜OCR 停车阶段切换 CymPlanner body_projection
 
 - **原方案**：OCR 内墙停车前把 local inflation 降到 `0.10m`，并将 CymPlanner 从 `point` 切换到 `body_projection`，停车结束再切回 `point`。

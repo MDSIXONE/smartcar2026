@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<library path="lib/libcym_planner">
+  <class name="cym_planner/CymPlanner"
+         type="cym_planner::CymPlanner"
+         base_class_type="nav_core::BaseLocalPlanner">
+    <description>CYM local planner.</description>
+  </class>
+  <class name="cym_planner/InflationRecovery"
+         type="cym_planner::InflationRecovery"
+         base_class_type="nav_core::RecoveryBehavior">
+    <description>Lower local and global inflation before replanning.</description>
+  </class>
+</library>
