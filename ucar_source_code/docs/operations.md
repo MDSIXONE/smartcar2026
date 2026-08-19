@@ -246,7 +246,7 @@ ssh "ucar@$CAR_IP" 'cd ~/ucar_ws && source /opt/ros/melodic/setup.bash && catkin
 
 ## OCR 识别后内墙停车坐标
 
-OCR 识别并完成墙面交点测量后，三套 2026 主流程通过 `ocr_stop_offset_m` 计算内墙交点向场内的停车坐标。当前值为 `0.25m`；生产网格的 `square_side_m=0.5` 不变。
+OCR 识别并完成墙面交点测量后，三套 2026 主流程通过 `ocr_stop_offset_m` 计算内墙交点向场内的停车坐标。当前值为 `0.40m`；生产网格的 `square_side_m=0.5` 不变。到达该停车点后，车辆从墙面法向 `+45°` 向 `-45°` 连续旋转，在这个范围内进行二次 OCR 确认。
 
 该参数位于三个包的 `launch/2026.launch`，只修改参数不需要编译，但必须重启对应主流程后生效。部署前在 `ucar_source_code` 目录执行本地核对：
 
@@ -262,8 +262,8 @@ files = [
 for path in files:
     ET.parse(str(path))
     text = path.read_text(encoding='utf-8')
-    assert 'ocr_stop_offset_m' in text and 'value="0.25"' in text
-print('OCR stop offset: 0.25m')
+    assert 'ocr_stop_offset_m' in text and 'value="0.40"' in text
+print('OCR stop offset: 0.40m; recheck sweep: +45deg to -45deg')
 '@ | python -
 ~~~
 
@@ -380,7 +380,7 @@ OCR 对准完成并确认底盘停止后，任务会把当时的 `map -> base_li
 ~~~xml
 <param name="processing_parking_profile_enabled" value="true"/>
 <param name="processing_parking_inflation_radius_m" value="0.07"/>
-<param name="ocr_stop_offset_m" value="0.25"/>
+<param name="ocr_stop_offset_m" value="0.40"/>
 <param name="global_costmap_inflation_layer"
        value="/move_base/global_costmap/inflation_layer"/>
 <param name="pre_point_3_global_costmap_inflation_radius_m" value="0.21"/>

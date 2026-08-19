@@ -3514,6 +3514,8 @@ class ProductionTask2026(object):
             if parking_profile_enabled:
                 self.exit_processing_parking_profile()
         self.stop_motion()
+        self.confirm_processing_stop_ocr(
+            observation, category, parking_yaw)
         if announce:
             self.publish_state("PROCESSING_ANNOUNCE_%03d" % wall_number)
             rospy.loginfo(
@@ -3523,6 +3525,102 @@ class ProductionTask2026(object):
                 self.log_safe_text(category))
             self.speak_wait(u"已将%s放入%s" % (item, category))
         return observation
+
+    def confirm_processing_stop_ocr(
+            self, observation, category, wall_facing_yaw):
+        """Sweep from +45 to -45 degrees and confirm the OCR category."""
+        wall_number = observation["wall_point_number"]
+        capture_label = "PROCESSING_RECHECK_%03d" % wall_number
+        self.publish_state(capture_label)
+        camera_started = False
+        if self.use_ros_camera_for_ocr and not self.camera_streaming:
+            self.start_ros_camera_and_wait(capture_label)
+            camera_started = True
+        start_yaw = normalize_angle(
+            float(wall_facing_yaw) + math.radians(45.0))
+        self.rotate_in_place_to_yaw(
+            start_yaw, capture_label + " start_plus_45")
+        direction = -1.0
+        required_progress = max(
+            0.0, math.pi / 2.0 - self.ocr_alignment_yaw_tolerance)
+        previous_yaw = self.current_odom_yaw(
+            capture_label + " sweep start")
+        progress = 0.0
+        rechecks = []
+        confirmed = None
+        try:
+            for attempt in range(1, self.ocr_alignment_attempts + 1):
+                current_yaw = self.current_odom_yaw(
+                    capture_label + " sweep before capture")
+                progress += positive_turn_increment(
+                    previous_yaw, current_yaw, direction)
+                previous_yaw = current_yaw
+                if progress >= required_progress:
+                    break
+                response = self.capture_ocr_while_turning(
+                    -abs(self.ocr_scan_rotation_speed),
+                    capture_label, attempt)
+                detection = response.get("detection")
+                detected_category = None
+                if detection is not None:
+                    detected_category = normalize_production_category(
+                        detection.get("text"))
+                recheck = {
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "image_path": response.get("image_path", ""),
+                    "text": detection.get("text", "")
+                    if detection is not None else "",
+                    "confidence": float(
+                        detection.get("confidence", -1.0))
+                    if detection is not None else -1.0,
+                    "bbox": list(detection.get("bbox", []))
+                    if detection is not None else [],
+                    "category": detected_category,
+                    "wall_facing_yaw": float(current_yaw),
+                    "yaw_offset_deg": math.degrees(
+                        normalize_angle(current_yaw - wall_facing_yaw)),
+                }
+                rechecks.append(recheck)
+                if detected_category == category:
+                    confirmed = recheck
+                    self.stop_motion()
+                    self.wait_for_chassis_stop(
+                        capture_label + " confirmed")
+                    break
+                current_yaw = self.current_odom_yaw(
+                    capture_label + " sweep after capture")
+                progress += positive_turn_increment(
+                    previous_yaw, current_yaw, direction)
+                previous_yaw = current_yaw
+                rospy.loginfo(
+                    "PRODUCTION_PROCESSING_RECHECK wall_point=%d "
+                    "attempt=%d yaw_offset_deg=%.1f category=%s "
+                    "confidence=%.1f image=%s",
+                    wall_number, attempt, recheck["yaw_offset_deg"],
+                    self.log_safe_text(detected_category),
+                    recheck["confidence"], recheck["image_path"])
+            self.stop_motion()
+            self.wait_for_chassis_stop(capture_label + " sweep complete")
+            final_yaw = self.current_odom_yaw(
+                capture_label + " sweep settled")
+            progress += positive_turn_increment(
+                previous_yaw, final_yaw, direction)
+        finally:
+            self.stop_motion()
+            if camera_started:
+                self.stop_ros_camera_streaming(required=True)
+        if confirmed is None and progress < required_progress:
+            raise MissionAbort(
+                "processing stop OCR sweep at wall %d did not reach "
+                "the -45 degree endpoint (progress=%.3f required=%.3f)" %
+                (wall_number, progress, required_progress))
+        if confirmed is None:
+            raise MissionAbort(
+                "processing stop OCR did not confirm category %s at wall %d "
+                "within the +/-45 degree sweep" % (
+                    self.log_safe_text(category), wall_number))
+        observation["processing_stop_rechecks"] = rechecks
+        observation["processing_stop_recheck"] = confirmed
 
     def new_target_guard_monitor(self, target_number, guard_points=None):
         """Start a new guard epoch; old scans may not affect a new target."""

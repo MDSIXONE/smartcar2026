@@ -9,7 +9,7 @@
 | --- | --- | --- | --- |
 | `OCR常规点局部膨胀`、`OCR普通点局部膨胀`、`常规局部膨胀` | `inflation_radius=0.224` | 常规 OCR 点附近的局部代价地图膨胀半径，影响车辆离障碍物的安全距离。 | `ucar_nav/config/testnav20260721/local_costmap_common.yaml` |
 | `OCR停车膨胀`、`内墙停车膨胀` | `processing_parking_inflation_radius_m=0.07` | OCR 最后靠内墙停车阶段 local/global 同步使用的临时膨胀半径，不是常规点膨胀。 | `ucar_2026/launch/2026.launch` |
-| `OCR停车距离`、`内墙停车偏移` | `ocr_stop_offset_m=0.25` | OCR 识别后，车辆停在内墙交点向场内偏移的距离。 | `ucar_2026/launch/2026.launch` |
+| `OCR停车距离`、`内墙停车偏移` | `ocr_stop_offset_m=0.40` | OCR 识别后，车辆停在内墙交点向场内偏移 40cm，并在墙面法向 +45° 到 -45° 范围内二次识别。 | `ucar_2026/launch/2026.launch` |
 | `点3前全局膨胀` | `pre_point_3_global_costmap_inflation_radius_m=0.21` | 到达点 3 之前使用的全局代价地图膨胀半径。 | `ucar_2026/launch/2026.launch` |
 | `点3后全局膨胀`、`全局常态膨胀` | `global_costmap_inflation_radius_m=0.224` | 点 3 之后以及常态导航使用的全局膨胀半径。 | `ucar_2026/launch/2026.launch` |
 | `OCR路线`、`常规生产路线`、`扫码点顺序` | `production_route_numbers`、`production_observation_headings_deg` | 决定常规生产任务依次访问哪些点，以及到点时使用的观察朝向。 | `ucar_2026/launch/2026.launch` |
@@ -51,7 +51,7 @@
 
 | 参数 | 当前值 / 说明 |
 | --- | --- |
-| `ocr_stop_offset_m` | `0.25 m`，OCR 识别后停在内墙交点向场内偏移的位置 |
+| `ocr_stop_offset_m` | `0.40 m`，OCR 识别后停在内墙交点向场内偏移的位置，并在墙面法向 +45° 到 -45° 范围内二次识别 |
 | `processing_parking_profile_enabled` | `true`，启用 OCR 停车阶段的局部膨胀切换 |
 | `processing_parking_inflation_radius_m` | `0.07 m`，OCR 最终内墙停车阶段 local/global 同步使用 |
 | `production_route_numbers` | `11,12,13,14,15,16,17,18,19,20,30,29,28,27,26,25,24,23,22,21` |
