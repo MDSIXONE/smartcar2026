@@ -1,4 +1,11 @@
 <launch>
+    <!-- 省赛备用方案一入口（基于实车验证的 17b39b3 版 2026.launch 同构）：
+        任务节点改用 production_task_2026_alt1.py，其 OCR 连续对齐采用独立对齐
+        入口一致的行为——15s 墙钟超时（ocr_alignment_timeout）、固定 30px 容差、
+        发散两次仅重置 PD 导数继续、空检测继续边转抓帧；且任务节点直接发布
+        /cmd_vel 到底盘驱动，不经 cmd_vel_owner 仲裁。导航/QR/巡线交接/
+        对齐后测距与停车坐标决定等其余逻辑与省赛主流程完全一致。 -->
+
     <!-- 真机运行：use_sim_time 必须为 false。此处不再声明，
          交由 ucar_bringup.launch 设为 false（避免 ROS 时间卡在 0 导致 TF/定位停摆）。 -->
 
@@ -172,10 +179,11 @@
             <arg name="api_enabled" value="true"/>
         </include>
 
-        <node pkg="ucar_2026" type="production_task_2026.py"
-              name="production_task_2026" output="screen" required="false"
+        <node pkg="ucar_2026" type="production_task_2026_alt1.py"
+              name="production_task_2026_alt1" output="screen" required="false"
               launch-prefix="$(find ucar_2026)/scripts/run_melodic_python2.sh">
-            <param name="cmd_vel_topic" value="/cmd_vel/navigation"/>
+            <!-- 直发 /cmd_vel 到底盘驱动，不经 cmd_vel_owner 仲裁。 -->
+            <param name="cmd_vel_topic" value="/cmd_vel"/>
             <param name="grid_path"
                    value="$(find ucar_2026)/config/production_full_grid_all_numbered.json"/>
             <param name="start_delay" value="$(arg task_start_delay)"/>
@@ -388,6 +396,8 @@
                  zone so protected alignment actually turns (0.073 rad/s
                  stalled at 0.004 rad in 2.5 s on 2026-08-06). -->
             <param name="ocr_alignment_min_speed" value="0.12"/>
+            <!-- 对齐预算从帧数改为固定墙钟超时（与独立对齐入口一致）。 -->
+            <param name="ocr_alignment_timeout" value="15.0"/>
             <param name="front_scan_half_angle_deg" value="3.0"/>
             <param name="lidar_forward_offset_m" value="0.0"/>
             <!-- Front range must agree with the geometric wall-ray distance. -->
@@ -401,7 +411,7 @@
             <param name="target_guard_precheck_timeout" value="1.0"/>
             <param name="target_guard_scan_max_age" value="1.0"/>
             <param name="result_directory"
-                   value="$(env HOME)/.ros/ucar_2026_observations"/>
+                   value="$(env HOME)/.ros/ucar_2026_alt1"/>
         </node>
     </group>
 </launch>

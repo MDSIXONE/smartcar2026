@@ -21,6 +21,17 @@ inline double finiteClamp(double value, double minimum, double maximum)
     return std::max(minimum, std::min(value, maximum));
 }
 
+inline double applyMinimumSpeed(double command, double minimum_speed)
+{
+    if(!std::isfinite(command) || !std::isfinite(minimum_speed) ||
+       minimum_speed <= 0.0 || command == 0.0 ||
+       std::abs(command) >= minimum_speed)
+    {
+        return command;
+    }
+    return std::copysign(minimum_speed, command);
+}
+
 struct PlannerTuning
 {
     PlannerTuning()
@@ -30,6 +41,8 @@ struct PlannerTuning
           angular_kd(0.0),
           max_vel_x(0.0),
           max_vel_theta(0.0),
+          min_vel_x(0.06),
+          min_vel_theta(0.12),
           final_yaw_gain(0.0),
           final_yaw_max_vel(0.0),
           final_yaw_tolerance(0.10),
@@ -54,6 +67,8 @@ struct PlannerTuning
     double angular_kd;
     double max_vel_x;
     double max_vel_theta;
+    double min_vel_x;
+    double min_vel_theta;
     double final_yaw_gain;
     double final_yaw_max_vel;
     double final_yaw_tolerance;

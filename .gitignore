@@ -68,3 +68,7 @@ output.png
 
 # Local calibration and backup snapshots
 *.before_*
+
+# Local scratch and tool config
+/tmp/
+/.opencode/

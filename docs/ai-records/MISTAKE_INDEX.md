@@ -25,8 +25,8 @@
 | 主题 | 涉及日期文件 |
 | ---- | ---- |
 | 跨 Shell 引号 / 变量展开 / 命令组合（PowerShell/WSL/SSH/Bash 嵌套 `$()`、`$pid`、here-string、awk/sed、引号破坏、组合超时） | 07-27、07-28、07-29、08-03、08-04、08-06、08-11、08-18 |
-| 文本编码与换行（CRLF/`\r`、GBK、UTF-8、shebang、中文乱码、Python 2 ASCII、stdin 管道编码） | 07-27、07-28、08-03、08-04、08-06 |
-| Python 2/3 差异（math.isfinite、time.monotonic、to_sec、json.dumps/loginfo 中文、unittest 跳过、mock 契约、IndentationError） | 07-26、07-27、07-28、07-29、08-03、08-04、08-06、08-07、08-18 |
+| 文本编码与换行（CRLF/`\r`、GBK、UTF-8、shebang、中文乱码、Python 2 ASCII、stdin 管道编码） | 07-27、07-28、08-03、08-04、08-06、08-20 |
+| Python 2/3 差异（math.isfinite、time.monotonic、to_sec、json.dumps/loginfo 中文、unittest 跳过、mock 契约、IndentationError） | 07-26、07-27、07-28、07-29、08-03、08-04、08-06、08-07、08-18、08-20 |
 | 底盘 / 串口 / IMU / USB 硬件链路（CRC、短读、sensor inactive、odom stale、USB Hub 枚举、断电、旋转死区、设备身份识别） | 07-27、07-28、08-04、08-05、08-06、08-07、08-10、08-14、08-19 |
 | NaN / TF / 定位与安全门（TF_NAN_INPUT、固定初值重启、TF 外推、map→base_link、安全门锁死） | 07-27、07-28、07-29、08-03、08-04、08-07 |
 | 构建 / 测试（catkin_make、CTest、gtest main、白名单、test_results、--force-cmake、pytest、ROS 单测初始化、WSL 9P、参数断言同步、旧 XML 汇总） | 07-26、07-27、07-28、07-29、08-03、08-04、08-07、08-10、08-11、08-12、08-14、08-19、08-20 |
@@ -52,6 +52,8 @@
 - catkin_test_results 读取旧 XML 造成车端测试结果误判
 - OCR 目标类别豁免去重导致同一单点反复对准
 - 地图墙交点只做距离校验、未使用实测命中点导致局部地图偏差直接进入停车坐标
+- Windows 默认编码读取 UTF-8 launch 测试失败
+- 车端 Python2 单测中的中文断言触发 ASCII 解码
 - 恢复列表只在序列开头清除两次导致后续阶段沿用旧代价地图
 - make_plan 预检查绕过 move_base 恢复状态机
 

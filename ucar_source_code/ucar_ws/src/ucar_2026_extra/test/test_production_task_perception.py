@@ -155,15 +155,6 @@ class ProductionTaskPerceptionTest(unittest.TestCase):
         self.assertAlmostEqual(hit[0], 0.0, places=6)
         self.assertAlmostEqual(hit[1], 1.5, places=6)
 
-    def test_oblique_measured_hit_can_be_compared_with_map_intersection(self):
-        walls = {154: (-2.5, 1.5), 164: (2.5, 1.5),
-                 165: (-2.5, -0.5), 175: (2.5, -0.5)}
-        pose = (0.0, 0.0, math.radians(30.0))
-        map_distance, map_hit = forward_ray_wall_intersection(pose, walls)
-        measured_hit = projected_wall_hit(pose, map_distance)
-        self.assertAlmostEqual(measured_hit[0], map_hit[0], places=6)
-        self.assertAlmostEqual(measured_hit[1], map_hit[1], places=6)
-
     def test_processing_results_deduplicate_categories(self):
         observations = [
             {"processing_category": u"日用品", "wall_point_number": 297,

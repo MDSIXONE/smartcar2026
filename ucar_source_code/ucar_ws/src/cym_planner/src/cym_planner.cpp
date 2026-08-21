@@ -115,6 +115,8 @@ cym_planner::PlannerTuning pointDefaults()
     tuning.angular_kd = 0.4;
     tuning.max_vel_x = 0.5;
     tuning.max_vel_theta = 1.0;
+    tuning.min_vel_x = 0.06;
+    tuning.min_vel_theta = 0.12;
     tuning.final_yaw_gain = 2.0;
     tuning.final_yaw_max_vel = 1.0;
     tuning.final_yaw_tolerance = 0.10;
@@ -138,6 +140,8 @@ cym_planner::PlannerTuning bodyProjectionDefaults()
     tuning.angular_kd = 0.2;
     tuning.max_vel_x = 0.22;
     tuning.max_vel_theta = 0.55;
+    tuning.min_vel_x = 0.06;
+    tuning.min_vel_theta = 0.12;
     tuning.final_yaw_gain = 1.5;
     tuning.final_yaw_max_vel = 0.35;
     tuning.final_yaw_tolerance = 0.10;
@@ -160,6 +164,8 @@ cym_planner::PlannerTuning sprintDefaults()
     tuning.angular_kd = 0.4;
     tuning.max_vel_x = 2.5;
     tuning.max_vel_theta = 0.80;
+    tuning.min_vel_x = 0.06;
+    tuning.min_vel_theta = 0.12;
     tuning.final_yaw_gain = 2.0;
     tuning.final_yaw_max_vel = 1.0;
     tuning.final_yaw_tolerance = 0.10;
@@ -211,6 +217,12 @@ void readTuning(
     readPlannerParam(primary, canonical, legacy,
                      prefix + "/max_vel_theta",
                      tuning.max_vel_theta, defaults.max_vel_theta);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/min_vel_x",
+                     tuning.min_vel_x, defaults.min_vel_x);
+    readPlannerParam(primary, canonical, legacy,
+                     prefix + "/min_vel_theta",
+                     tuning.min_vel_theta, defaults.min_vel_theta);
     readPlannerParam(primary, canonical, legacy,
                      prefix + "/final_yaw_gain",
                      tuning.final_yaw_gain, defaults.final_yaw_gain);
@@ -280,6 +292,8 @@ void sanitizeTuning(cym_planner::PlannerTuning& tuning)
     tuning.angular_kd = std::max(0.0, tuning.angular_kd);
     tuning.max_vel_x = std::max(0.0, tuning.max_vel_x);
     tuning.max_vel_theta = std::max(0.0, tuning.max_vel_theta);
+    tuning.min_vel_x = std::max(0.0, tuning.min_vel_x);
+    tuning.min_vel_theta = std::max(0.0, tuning.min_vel_theta);
     tuning.final_yaw_gain = std::max(0.0, tuning.final_yaw_gain);
     tuning.final_yaw_max_vel =
         std::max(0.0, tuning.final_yaw_max_vel);
@@ -520,10 +534,12 @@ void CymPlanner::initialize(std::string name, tf2_ros::Buffer* /* tf */,
 
     initialized_ = true;
     ROS_WARN(
-        "cym_planner initialized | mode1 point max %.2f m/s %.2f rad/s | "
+        "cym_planner initialized | mode1 point min/max %.2f/%.2f m/s "
+        "%.2f/%.2f rad/s | "
         "mode2 body max %.2f m/s %.2f rad/s turn_scale %.2f | "
         "debug images %s | escape %s | elastic path %s (%.2f m band)",
-        point_tuning_.max_vel_x, point_tuning_.max_vel_theta,
+        point_tuning_.min_vel_x, point_tuning_.max_vel_x,
+        point_tuning_.min_vel_theta, point_tuning_.max_vel_theta,
         body_projection_tuning_.max_vel_x,
         body_projection_tuning_.max_vel_theta,
         body_projection_tuning_.heading_slowdown_min_scale,
@@ -1546,8 +1562,11 @@ bool CymPlanner::computeEscapeCommand(
             return false;
         }
 
-        cmd_vel.linear.x = escape_direction_base_x_ * escape_speed_;
-        cmd_vel.linear.y = escape_direction_base_y_ * escape_speed_;
+        const PlannerTuning& tuning = activeTuning();
+        cmd_vel.linear.x = applyMinimumSpeed(
+            escape_direction_base_x_ * escape_speed_, tuning.min_vel_x);
+        cmd_vel.linear.y = applyMinimumSpeed(
+            escape_direction_base_y_ * escape_speed_, tuning.min_vel_x);
         cmd_vel.angular.z = 0.0;
         return true;
     }
@@ -1645,8 +1664,11 @@ bool CymPlanner::computeEscapeCommand(
         escape_step_distance_, escape_speed_,
         escape_attempts_ + 1, escape_max_attempts_);
 
-    cmd_vel.linear.x = escape_direction_base_x_ * escape_speed_;
-    cmd_vel.linear.y = escape_direction_base_y_ * escape_speed_;
+    const PlannerTuning& tuning = activeTuning();
+    cmd_vel.linear.x = applyMinimumSpeed(
+        escape_direction_base_x_ * escape_speed_, tuning.min_vel_x);
+    cmd_vel.linear.y = applyMinimumSpeed(
+        escape_direction_base_y_ * escape_speed_, tuning.min_vel_x);
     cmd_vel.angular.z = 0.0;
     return true;
 }
@@ -1819,6 +1841,10 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
             std::abs(final_yaw) < tuning.final_yaw_tolerance;
         const bool final_position_reached =
             final_distance <= tuning.goal_position_tolerance;
+        cmd_vel.angular.z = final_yaw_reached ? 0.0 :
+            applyMinimumSpeed(cmd_vel.angular.z, tuning.min_vel_theta);
+        cmd_vel.linear.x = final_position_reached ? 0.0 :
+            applyMinimumSpeed(cmd_vel.linear.x, tuning.min_vel_x);
         if(final_yaw_reached && final_position_reached)
         {
             cmd_vel = geometry_msgs::Twist();
@@ -1871,6 +1897,11 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
         cmd_vel.angular.z = clampValue(
             final_pose_yaw * tuning.angular_gain * motion_scale,
             -maximum_angular, maximum_angular);
+        cmd_vel.linear.y = applyMinimumSpeed(
+            cmd_vel.linear.y, tuning.min_vel_x);
+        cmd_vel.angular.z = std::abs(final_pose_yaw) <
+            tuning.final_yaw_tolerance ? 0.0 :
+            applyMinimumSpeed(cmd_vel.angular.z, tuning.min_vel_theta);
         if(!commandIsFinite(cmd_vel))
         {
             cmd_vel = geometry_msgs::Twist();
@@ -1907,6 +1938,8 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
          heading_derivative * tuning.angular_kd) * motion_scale,
         -maximum_angular_velocity,
         maximum_angular_velocity);
+    cmd_vel.angular.z = applyMinimumSpeed(
+        cmd_vel.angular.z, tuning.min_vel_theta);
 
     const double linear_error = target_pose.pose.position.x;
     if(!std::isfinite(linear_error))
@@ -1946,6 +1979,8 @@ bool CymPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
          linear_derivative * tuning.linear_x_kd) *
             motion_scale * turn_speed_scale,
         0.0, maximum_linear_velocity);
+    cmd_vel.linear.x = applyMinimumSpeed(
+        cmd_vel.linear.x, tuning.min_vel_x);
     cmd_vel.linear.y = 0.0;
     if(!commandIsFinite(cmd_vel) ||
        (body_projection_enabled_ &&

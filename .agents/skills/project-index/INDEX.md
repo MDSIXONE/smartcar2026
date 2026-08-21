@@ -1,6 +1,6 @@
 # SmartCar 2026 结构索引
 
-- 更新时间：2026-08-13
+- 更新时间：2026-08-20
 
 统一仓库：仿真环境（Gazebo）+ 实车 ROS 源码一体管理。比赛项目（2026 生产任务：导航 + QR/OCR 识别 + 抓取搬运 + 巡线交接）。
 
@@ -39,7 +39,7 @@ simulationforreal/
 | 仿真局部规划器 | `simulation/src/cym_planner/` | 自定义 BaseLocalPlanner：巡线控制 + costmap/激光判障，支持 carry_mode | |
 | 仿真导航装配 | `simulation/src/gazebo_nav/launch/gazebo_nav.launch` | map_server + move_base（global_planner + cym_planner），无 amcl（静态 map→odom） | |
 | 仿真地图 | `simulation/src/gazebo_map/map/ros_map_thin.{yaml,pgm}` | 栅格地图（分辨率 0.01185） | |
-| 实车主流程 2026 | `ucar_source_code/ucar_ws/src/ucar_2026/` | 2026 比赛主包：production_task_2026.py 状态机（导航→扫 QR→分类→OCR 取物→交接巡线）；主入口 `launch/2026.launch` | |
+| 实车主流程 2026 | `ucar_source_code/ucar_ws/src/ucar_2026/` | 2026 比赛主包：production_task_2026.py 状态机（导航→扫 QR→分类→OCR 取物→交接巡线）；主入口 `launch/2026.launch`；独立 OCR 单功能调试入口 `launch/ocr_search.launch` | |
 | 实车局部规划器 | `ucar_source_code/ucar_ws/src/cym_planner/` | 实车版 CymPlanner（C++，直连 /scan_filtered 激光避障，6 单测） | |
 | 底盘驱动 | `ucar_source_code/ucar_ws/src/ucar_controller/` | base_driver.cpp 串口驱动（CRC、里程计/电池/速度服务）+ odom EKF | |
 | 导航 | `ucar_source_code/ucar_ws/src/ucar_nav/` | amcl + move_base 配置集（omni 多版本）+ 历届比赛地图 | |

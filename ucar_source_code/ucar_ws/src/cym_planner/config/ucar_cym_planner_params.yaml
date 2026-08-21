@@ -27,6 +27,9 @@ cym_planner/CymPlanner:
     angular_gain: 2.5
     angular_kd: 0.4
     max_vel_theta: 0.80
+    # 实车底盘死区托底：非零控制量低于此值时提升到此值；零命令保持为零。
+    min_vel_x: 0.06
+    min_vel_theta: 0.12
     heading_slowdown_min_scale: 0.00
     goal_position_tolerance: 0.07
     command_sweep_time: 0.00
@@ -51,6 +54,8 @@ cym_planner/CymPlanner:
     angular_gain: 2.0
     angular_kd: 0.2
     max_vel_theta: 0.35
+    min_vel_x: 0.06
+    min_vel_theta: 0.12
     heading_slowdown_min_scale: 0.15
     # 按实际 (linear.x, linear.y, angular.z) 对未来 0.4 s 车体姿态做扫掠。
     command_sweep_time: 0.40
@@ -116,6 +121,8 @@ cym_planner/CymPlanner:
     angular_gain: 10.0
     angular_kd: 0.4
     max_vel_theta: 0.80
+    min_vel_x: 0.06
+    min_vel_theta: 0.12
     heading_slowdown_min_scale: 0.00
     command_sweep_time: 0.00
     command_sweep_step: 0.025

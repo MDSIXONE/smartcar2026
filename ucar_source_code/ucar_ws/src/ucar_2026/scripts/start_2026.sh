@@ -169,7 +169,7 @@ case "$launch_mode" in
     echo "正在启动无自动目标的导航任务（小车本机 ROS Master）……"
     run_launch ucar_2026 2026.launch
     ;;
-  mission)
+  mission|mission_alt1|mission_alt2)
     echo "任务前确认：lidar_loc 定位初值固定为起点 (-0.25, 2.75, 0)，"
     echo "车辆不在起点时启动会产生错误的地图位姿。"
     read -r -p '是否已把车放回起点？输入 yes 继续，其他输入将取消启动: ' \
@@ -181,9 +181,18 @@ case "$launch_mode" in
         exit 2
         ;;
     esac
-    echo "正在启动自动生产任务：ROS Master 在小车，电脑只提供仿真 HTTP 服务……"
+    launch_file="2026.launch"
+    launch_note="省赛主流程"
+    if [[ "$launch_mode" == "mission_alt1" ]]; then
+      launch_file="2026_alt1.launch"
+      launch_note="省赛备用方案一（超时连续对准版）"
+    elif [[ "$launch_mode" == "mission_alt2" ]]; then
+      launch_file="2026_alt2.launch"
+      launch_note="省赛备用方案二（8 方位定点扫描版）"
+    fi
+    echo "正在启动自动生产任务（$launch_note）：ROS Master 在小车，电脑只提供仿真 HTTP 服务……"
     echo "任务节点启动后会等待语音指令：请说“小飞小飞”，再完整说出任务命令。"
-    run_launch ucar_2026 2026.launch task_enabled:=true \
+    run_launch ucar_2026 "$launch_file" task_enabled:=true \
       simulation_host:="$SIMULATION_HOST"
     ;;
   full)
@@ -191,7 +200,7 @@ case "$launch_mode" in
     run_launch yolo2025 2026.launch full_task_enabled:=true
     ;;
   *)
-    echo "错误：模式只能是 check、manual、mission 或 full，当前为 '$launch_mode'。" >&2
+    echo "错误：模式只能是 check、manual、mission、mission_alt1 或 full，当前为 '$launch_mode'。" >&2
     exit 2
     ;;
 esac

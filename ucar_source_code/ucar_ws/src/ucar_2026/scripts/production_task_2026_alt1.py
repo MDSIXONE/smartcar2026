@@ -2,6 +2,13 @@
 # -*- coding: utf-8 -*-
 """Fail-safe ROS state machine for the requested 2026 production mission.
 
+省赛备用方案一：基于实车验证的 17b39b3（完善 OCR 对准与导航恢复流程）复制，
+与 production_task_2026.py 相同的完整主流程，唯一区别是 observe_wall 的 OCR
+连续对齐改为与独立对齐入口一致的行为——固定 15s 墙钟预算（ocr_alignment_timeout）、
+固定 30px 容差、发散两次仅重置 PD 导数继续对准而不中止任务、空检测继续边转抓帧。
+任务节点直接发布 /cmd_vel 速度到底盘驱动，不经 cmd_vel_owner 仲裁。对齐成功后的
+前向激光测距、墙体射线交点、墙点匹配与停车坐标决定逻辑保持不变。
+
 Flow:
   1. Navigate to centre 52.
   2. From 52, face QR observation points 262, 232, 295, 61, 41, and 43
@@ -104,6 +111,10 @@ class MissionAbort(RuntimeError):
     pass
 
 
+class OcrAlignmentTimeout(MissionAbort):
+    """The continuous OCR alignment budget expired while capturing a frame."""
+
+
 NON_NAVIGABLE_TARGET_GUARD_POINTS = frozenset(
     (446, 447, 448, 449, 450, 451))
 
@@ -128,29 +139,6 @@ class ProductionTask2026(object):
         self.grid_path = rospy.get_param("~grid_path")
         self.staging_point_number = int(
             rospy.get_param("~staging_point_number", 52))
-        self.sprint_enabled = bool(
-            rospy.get_param("~sprint_enabled", False))
-        self.sprint_start_point_number = int(
-            rospy.get_param("~sprint_start_point_number", 70))
-        self.sprint_end_point_number = int(
-            rospy.get_param("~sprint_end_point_number", 288))
-        self.sprint_end_x = rospy.get_param("~sprint_end_x", "")
-        self.sprint_end_y = rospy.get_param("~sprint_end_y", "")
-        self.sprint_arrival_tolerance = float(
-            rospy.get_param("~sprint_arrival_tolerance", 0.30))
-        self.sprint_end_xy = None
-        if (str(self.sprint_end_x).strip() and
-                str(self.sprint_end_y).strip()):
-            self.sprint_end_xy = (
-                float(self.sprint_end_x), float(self.sprint_end_y))
-        # 冲刺段朝向（度）：起点→70 的到达朝向与 70→冲刺终点的运动方向。
-        # 实车 2026-08-16 反馈 180° 偏一点，改 175 微调。
-        self.sprint_yaw_deg = float(
-            rospy.get_param("~sprint_yaw_deg", 180.0))
-        # 冲刺段横向平移实验：true 时切换 CymPlanner transverse 模式
-        # （车头保持 90°，linear.y 横向平移过坡），false 走原前进冲刺。
-        self.sprint_transverse_enabled = bool(
-            rospy.get_param("~sprint_transverse_enabled", False))
         self.qr_observation_numbers = [
             int(value) for value in
             rospy.get_param(
@@ -223,8 +211,6 @@ class ProductionTask2026(object):
             "~lane_owner_service", "/cmd_vel_owner/set_lane_mode"))
         self.lane_state_topic = str(rospy.get_param(
             "~lane_state_topic", "/lane_proto/state"))
-        self.lane_result_topic = str(rospy.get_param(
-            "~lane_result_topic", "/lane_proto/result"))
         self.lane_handoff_timeout = float(rospy.get_param(
             "~lane_handoff_timeout", 360.0))
         self.tf_lookup_retry_seconds = float(rospy.get_param(
@@ -411,6 +397,8 @@ class ProductionTask2026(object):
             rospy.get_param("~ocr_alignment_turn_timeout", 2.5))
         self.ocr_alignment_min_speed = abs(float(
             rospy.get_param("~ocr_alignment_min_speed", 0.12)))
+        self.ocr_alignment_timeout = float(
+            rospy.get_param("~ocr_alignment_timeout", 15.0))
         self.front_scan_half_angle = math.radians(float(
             rospy.get_param("~front_scan_half_angle_deg", 3.0)))
         self.front_scan_timeout = float(
@@ -445,7 +433,7 @@ class ProductionTask2026(object):
             1, int(rospy.get_param("~stopped_odom_samples", 3)))
         self.result_directory = os.path.expanduser(str(
             rospy.get_param(
-                "~result_directory", "~/.ros/ucar_2026_national_observations")))
+                "~result_directory", "~/.ros/ucar_2026_observations")))
         # Spark Xunfei QR-text classification.  A helper subprocess owns the
         # network call so the mission thread is never blocked; classification
         # failure never aborts the task (local keyword map is the fallback).
@@ -476,12 +464,6 @@ class ProductionTask2026(object):
         self.spark_helper_ready_timeout = float(
             rospy.get_param("~spark_helper_ready_timeout", 10.0))
 
-        arrival_tolerance_values = (
-            self.arrival_tolerance, self.sprint_arrival_tolerance)
-        if (not all(is_finite(value) for value in arrival_tolerance_values) or
-                any(value <= 0.0 for value in arrival_tolerance_values)):
-            raise TaskDefinitionError(
-                "arrival tolerances must be finite and positive")
         if self.qr_rotation_speed <= 0.0:
             raise TaskDefinitionError("qr_rotation_speed must be positive")
         if self.fixed_heading_rotation_speed <= 0.0:
@@ -513,8 +495,7 @@ class ProductionTask2026(object):
         if (self.lane_handoff_enabled and not all((
                 self.lane_activate_service.strip(),
                 self.lane_owner_service.strip(),
-                self.lane_state_topic.strip(),
-                self.lane_result_topic.strip()))):
+                self.lane_state_topic.strip()))):
             raise TaskDefinitionError(
                 "lane activation, owner, and state endpoints must be set")
         self.simulation_host = self.resolve_simulation_host()
@@ -566,6 +547,10 @@ class ProductionTask2026(object):
         if self.ocr_alignment_turn_timeout <= 0.0:
             raise TaskDefinitionError(
                 "ocr_alignment_turn_timeout must be positive")
+        if (not is_finite(self.ocr_alignment_timeout) or
+                self.ocr_alignment_timeout <= 0.0):
+            raise TaskDefinitionError(
+                "ocr_alignment_timeout must be positive")
         ocr_scan_values = (
             self.ocr_scan_rotation_speed,
             self.ocr_scan_poll_period,
@@ -622,9 +607,6 @@ class ProductionTask2026(object):
              if self.post_qr_waypoint_number else []) +
             ([self.post_qr_waypoint_heading_point_number]
              if self.post_qr_waypoint_heading_point_number else []))
-        if self.sprint_enabled:
-            all_required_numbers += [self.sprint_start_point_number,
-                                     self.sprint_end_point_number]
         self.points = load_numbered_points(self.grid_path)
         require_points(self.points, all_required_numbers)
         self.production_navigation_legs = [
@@ -691,9 +673,9 @@ class ProductionTask2026(object):
         self.navigation_mode_pub = rospy.Publisher(
             "/ucar/navigation_mode", String, queue_size=1, latch=True)
         self.state_pub = rospy.Publisher(
-            "/ucar_2026_national/task_state", String, queue_size=1, latch=True)
+            "/ucar_2026/task_state", String, queue_size=1, latch=True)
         self.result_pub = rospy.Publisher(
-            "/ucar_2026_national/task_result", String, queue_size=1, latch=True)
+            "/ucar_2026/task_result", String, queue_size=1, latch=True)
 
         self.lock = threading.RLock()
         self.latest_odom_receipt = None
@@ -747,7 +729,6 @@ class ProductionTask2026(object):
         self.served_wall_points = set()
         self._ocr_turn_stop_flag = False
         self.lane_state = ""
-        self.lane_result = ""
         self.lane_state_event = threading.Event()
 
         rospy.Subscriber(
@@ -768,8 +749,6 @@ class ProductionTask2026(object):
             "/rosout_agg", Log, self.rosout_cb, queue_size=100)
         rospy.Subscriber(
             self.lane_state_topic, String, self.lane_state_cb, queue_size=10)
-        rospy.Subscriber(
-            self.lane_result_topic, String, self.lane_result_cb, queue_size=10)
         rospy.on_shutdown(self.shutdown)
 
         self.publish_state("WAITING_START")
@@ -871,11 +850,6 @@ class ProductionTask2026(object):
     def lane_state_cb(self, message):
         with self.lock:
             self.lane_state = message.data.strip()
-        self.lane_state_event.set()
-
-    def lane_result_cb(self, message):
-        with self.lock:
-            self.lane_result = message.data.strip()
         self.lane_state_event.set()
 
     def qr_result_cb(self, message):
@@ -1064,50 +1038,8 @@ class ProductionTask2026(object):
             staging = self.points[self.staging_point_number]
             first_observation = self.points[self.qr_observation_numbers[0]]
             staging_yaw = bearing(staging, first_observation)
-            sprint_enabled = bool(getattr(self, "sprint_enabled", False))
-            if sprint_enabled:
-                sprint_start = self.points[self.sprint_start_point_number]
-                if getattr(self, "sprint_end_xy", None) is not None:
-                    sprint_end = self.sprint_end_xy
-                    sprint_end_label = (
-                        "sprint end midpoint (%.3f, %.3f)" % sprint_end)
-                else:
-                    sprint_end = self.points[self.sprint_end_point_number]
-                    sprint_end_label = "sprint end point %d" % (
-                        self.sprint_end_point_number)
-                # 180 deg: after arriving at the start point the chassis
-                # faces the y=1.75 corridor used for the sprint leg.
-                sprint_yaw = math.radians(
-                    float(getattr(self, "sprint_yaw_deg", 180.0)))
-                self.publish_state(
-                    "STAGING_%d" % self.sprint_start_point_number)
-                self.navigate_coordinates(
-                    sprint_start[0], sprint_start[1], sprint_yaw,
-                    "sprint start point %d" % self.sprint_start_point_number,
-                    require_plan=True)
-                rospy.loginfo(
-                    "PRODUCTION_SPRINT_LEG %d -> %d yaw=%.3f",
-                    self.sprint_start_point_number,
-                    self.sprint_end_point_number, sprint_yaw)
-                self.publish_state(
-                    "SPRINT_%d_%d" % (
-                        self.sprint_start_point_number,
-                        self.sprint_end_point_number))
-                if bool(getattr(self, "sprint_transverse_enabled", False)):
-                    self.switch_navigation_mode("transverse")
-                else:
-                    self.switch_navigation_mode("sprint")
-                self.navigate_coordinates(
-                    sprint_end[0], sprint_end[1], sprint_yaw,
-                    sprint_end_label,
-                    require_plan=True,
-                    arrival_tolerance_override=self.sprint_arrival_tolerance)
-                self.switch_navigation_mode("point")
-                self.navigate_to(
-                    self.staging_point_number, staging_yaw, "STAGING_52")
-            else:
-                self.navigate_to(
-                    self.staging_point_number, staging_yaw, "STAGING_52")
+            self.navigate_to(
+                self.staging_point_number, staging_yaw, "STAGING_52")
 
             self.publish_state("QR_SEQUENCE")
             self.move_base.cancel_all_goals()
@@ -1350,7 +1282,7 @@ class ProductionTask2026(object):
             self.log_safe_text(missing_categories))
 
     def finish_at_destination(self, reason):
-        """Navigate near the final area, finish radar parking, then publish success."""
+        """Navigate to the handoff point, publish success, and start lane mode."""
         if self.destination_midpoint_point_numbers:
             first = self.points[
                 self.destination_midpoint_point_numbers[0]]
@@ -1377,14 +1309,13 @@ class ProductionTask2026(object):
             destination[0], destination[1], destination_yaw,
             "destination %s" % destination_label,
             require_plan=True)
-        # Navigation only brings the vehicle to the final-area handoff point.
-        # The task is not successful until the resident lane node reports the
-        # radar corner controller's GOAL result.
-        self.handoff_to_lane()
         self.publish_state("SUCCEEDED")
         self.publish_result(
-            True, "%s; arrived and parked at destination %s" %
-            (reason, destination_label))
+            True, "%s; arrived at destination %s" % (reason, destination_label))
+        # The successful navigation action is the boundary.  Do not add a
+        # parking command here: activate the already-warm lane node and
+        # switch command ownership directly.
+        self.handoff_to_lane()
         rospy.signal_shutdown("lane following completed")
 
     @staticmethod
@@ -2108,7 +2039,7 @@ class ProductionTask2026(object):
         return response
 
     def capture_ocr_while_turning(
-            self, signed_speed, capture_label, attempt):
+            self, signed_speed, capture_label, attempt, deadline=None):
         """Capture one fresh OCR frame while continuously turning in place.
 
         The OCR helper runs in a worker while this supervisor keeps publishing
@@ -2116,6 +2047,10 @@ class ProductionTask2026(object):
         return deliberately leaves the command active: the caller either
         immediately requests the next frame with an updated speed or sends
         zero after the image is aligned.  Any failure path stops first.
+
+        ``deadline`` bounds the whole continuous-alignment budget; when it is
+        given, expiry raises :class:`OcrAlignmentTimeout` so the caller can
+        stop gracefully instead of aborting the mission.
         """
         speed = float(signed_speed)
         if speed == 0.0:
@@ -2135,11 +2070,16 @@ class ProductionTask2026(object):
             self.cmd_vel_pub.publish(command)
             task = self.start_async_motion_ocr(
                 "%s_moving_%02d" % (capture_label, attempt))
-            deadline = time.time() + self.ocr_capture_timeout + 2.0
+            capture_deadline = time.time() + self.ocr_capture_timeout + 2.0
+            if deadline is not None:
+                capture_deadline = min(capture_deadline, float(deadline))
             rate = rospy.Rate(self.rotation_control_rate)
             while not task["done"].is_set():
                 self.require_safe()
-                if time.time() >= deadline:
+                if time.time() >= capture_deadline:
+                    if deadline is not None:
+                        raise OcrAlignmentTimeout(
+                            "OCR alignment time budget expired")
                     raise MissionAbort(
                         "continuous OCR capture %s timed out" %
                         capture_label)
@@ -2506,14 +2446,9 @@ class ProductionTask2026(object):
         while not rospy.is_shutdown() and time.time() < deadline:
             with self.lock:
                 lane_state = self.lane_state
-                lane_result = self.lane_result
             if lane_state == "STOPPED":
-                if lane_result in ("ABORT", "ESTOP", "CONFIG"):
-                    raise MissionAbort(
-                        "lane parking stopped with result %s" % lane_result)
-                if lane_result == "GOAL":
-                    rospy.loginfo("PRODUCTION_LANE_HANDOFF_COMPLETED result=GOAL")
-                    return
+                rospy.loginfo("PRODUCTION_LANE_HANDOFF_COMPLETED")
+                return
             self.lane_state_event.wait(0.10)
             self.lane_state_event.clear()
         raise MissionAbort(
@@ -4404,48 +4339,46 @@ class ProductionTask2026(object):
         aligned = False
         image_width = self.camera_width
         attempt_image_paths = []
+        start_time = time.time()
+        deadline = start_time + self.ocr_alignment_timeout
+        attempt = 0
 
-        for attempt in range(1, self.ocr_alignment_attempts + 1):
+        while not rospy.is_shutdown() and time.time() < deadline:
             self.require_safe()
+            attempt += 1
+            capture_time = time.time()
             if alignment_speed is None:
                 response = self.capture_ocr(observation_label, attempt)
             else:
-                response = self.capture_ocr_while_turning(
-                    alignment_speed, observation_label, attempt)
-            # Python 2.7 on the vehicle has no time.monotonic().  The PD
-            # derivative only needs elapsed time between adjacent parked
-            # captures; ROS wall time is sufficient and Python 2-compatible.
-            capture_time = time.time()
+                try:
+                    response = self.capture_ocr_while_turning(
+                        alignment_speed, observation_label, attempt,
+                        deadline=deadline)
+                except OcrAlignmentTimeout:
+                    break
             image_path = response["image_path"]
             attempt_image_paths.append(image_path)
             image_width = int(response["width"])
             detection = response.get("detection")
             if detection is None:
-                # We cannot steer safely without a current text box.  Return
-                # to a stationary capture before the next attempt.
-                self.stop_motion()
-                self.wait_for_chassis_stop(
-                    observation_label + " OCR empty")
-                alignment_speed = None
                 rospy.logwarn(
-                    "PRODUCTION_OCR_EMPTY point=%d attempt=%d/%d",
+                    "PRODUCTION_ALT1_OCR_EMPTY point=%d attempt=%d "
+                    "elapsed=%.1f/%.1f",
                     route_point_number, attempt,
-                    self.ocr_alignment_attempts)
+                    capture_time - start_time, self.ocr_alignment_timeout)
                 continue
             best_detection = detection
             best_path = image_path
             error = horizontal_pixel_error(detection, image_width)
             alignment_tolerance_px = self.ocr_alignment_tolerance_px
-            if attempt > 5:
-                alignment_tolerance_px += (
-                    self.ocr_alignment_retry_tolerance_increment_px)
             rospy.loginfo(
-                "PRODUCTION_OCR_BOX point=%d attempt=%d text=%s "
+                "PRODUCTION_ALT1_OCR_BOX point=%d attempt=%d text=%s "
                 "confidence=%.1f horizontal_error_px=%.1f "
-                "tolerance_px=%.1f",
+                "tolerance_px=%.1f elapsed=%.1f/%.1f",
                 route_point_number, attempt,
                 json.dumps(detection["text"], ensure_ascii=True),
-                detection["confidence"], error, alignment_tolerance_px)
+                detection["confidence"], error, alignment_tolerance_px,
+                capture_time - start_time, self.ocr_alignment_timeout)
             if abs(error) <= alignment_tolerance_px:
                 aligned = True
                 self.stop_motion()
@@ -4458,10 +4391,13 @@ class ProductionTask2026(object):
             else:
                 divergence_count = 0
             if divergence_count >= 2:
-                raise MissionAbort(
-                    "OCR PD alignment diverged twice at point %d; "
-                    "check camera yaw sign and frame freshness" %
-                    route_point_number)
+                rospy.logwarn(
+                    "PRODUCTION_ALT1_OCR_ALIGNMENT_DIVERGED point=%d "
+                    "attempt=%d; reset PD derivative",
+                    route_point_number, attempt)
+                previous_error = None
+                previous_capture_time = None
+                divergence_count = 0
             elapsed = (
                 capture_time - previous_capture_time
                 if previous_capture_time is not None else None)
@@ -4473,7 +4409,7 @@ class ProductionTask2026(object):
                 alignment_speed = self.ocr_alignment_min_speed * (
                     1.0 if alignment_speed >= 0.0 else -1.0)
             rospy.loginfo(
-                "PRODUCTION_OCR_ALIGNMENT_CONTINUOUS point=%d "
+                "PRODUCTION_ALT1_OCR_ALIGNMENT_CONTINUOUS point=%d "
                 "attempt=%d speed=%.3f error_px=%.1f",
                 route_point_number, attempt, alignment_speed, error)
             previous_error = error
@@ -4497,8 +4433,9 @@ class ProductionTask2026(object):
             self.wait_for_chassis_stop(
                 observation_label + " OCR alignment incomplete")
             rospy.logwarn(
-                "PRODUCTION_OCR_NOT_ALIGNED point=%d text=%s",
-                route_point_number,
+                "PRODUCTION_ALT1_OCR_NOT_ALIGNED point=%d timeout=%.1f "
+                "text=%s; proceed without alignment",
+                route_point_number, self.ocr_alignment_timeout,
                 json.dumps(observation["text"], ensure_ascii=True))
             return observation
 
@@ -4636,22 +4573,9 @@ class ProductionTask2026(object):
             os.fsync(handle.fileno())
         os.rename(temporary, target)
 
-    def switch_to_point_mode(self):
-        """Lock all task navigation legs to CymPlanner's front point mode."""
-        self.switch_navigation_mode("point")
-
-    def switch_to_destination_mode(self):
-        """Use the tighter CymPlanner profile only for the 441 approach."""
-        self.switch_navigation_mode("destination")
-
     def switch_navigation_mode(self, mode):
-        """Switch the CymPlanner parameter set at runtime.
-
-        Supports "point" and "sprint" (the national 70->288 acceleration
-        leg).  The latched command is repeated so delivery is observable and
-        robust to a connection that completed at the edge of the wait loop.
-        """
-        if mode not in ("point", "destination", "sprint", "transverse"):
+        """Switch CymPlanner mode and verify that the command was delivered."""
+        if mode not in ("point", "destination"):
             raise TaskDefinitionError(
                 "unsupported navigation mode %r" % mode)
         self.publish_state("SET_%s_NAVIGATION_MODE" % mode.upper())
@@ -4666,11 +4590,22 @@ class ProductionTask2026(object):
         if self.navigation_mode_pub.get_num_connections() <= 0:
             raise MissionAbort(
                 "CymPlanner is not connected to /ucar/navigation_mode")
+        # Repeat the latched command so the delivery is observable and robust
+        # to a connection that completed at the edge of the wait loop.
         for _index in range(3):
-            self.navigation_mode_pub.publish(String(data=mode))
+            self.navigation_mode_pub.publish(
+                String(data=mode))
             rospy.sleep(0.1)
         rospy.loginfo(
             "PRODUCTION_TASK navigation mode switched to %s", mode)
+
+    def switch_to_point_mode(self):
+        """Lock normal task navigation legs to point mode."""
+        self.switch_navigation_mode("point")
+
+    def switch_to_destination_mode(self):
+        """Use the tighter CymPlanner profile only for the 441 approach."""
+        self.switch_navigation_mode("destination")
 
     def set_local_costmap_inflation_radius(self, radius, stage):
         """Apply and verify one local inflation radius via dynamic reconfigure."""
@@ -4991,14 +4926,8 @@ class ProductionTask2026(object):
             self, x_value, y_value, yaw, label, require_plan,
             abort_on_navigation_failure=True,
             require_action_success=False, guard_callback=None,
-            arrival_tolerance_override=None, goal_timeout=None):
+            goal_timeout=None):
         self.require_safe()
-        arrival_tolerance = self.arrival_tolerance
-        if arrival_tolerance_override is not None:
-            arrival_tolerance = float(arrival_tolerance_override)
-            if not is_finite(arrival_tolerance) or arrival_tolerance <= 0.0:
-                raise TaskDefinitionError(
-                    "arrival_tolerance_override must be finite and positive")
         if not require_plan:
             current = self.current_map_pose(label + " same-position check")
             if position_error(current, (x_value, y_value)) <= self.arrival_tolerance:
@@ -5057,13 +4986,13 @@ class ProductionTask2026(object):
                         "status %d" % (label, status))
                 pose = self.current_map_pose(label + " aborted arrival")
                 arrival_error = position_error(pose, (x_value, y_value))
-                if arrival_error <= arrival_tolerance:
+                if arrival_error <= self.arrival_tolerance:
                     rospy.logwarn(
                         "PRODUCTION_TASK_GOAL_ACCEPTED label=%s "
                         "move_base_status=%d arrival_error=%.3f m "
                         "limit=%.3f m",
                         label, status, arrival_error,
-                        arrival_tolerance)
+                        self.arrival_tolerance)
                     return True
                 if not abort_on_navigation_failure:
                     rospy.logwarn(
@@ -5076,7 +5005,7 @@ class ProductionTask2026(object):
 
             pose = self.current_map_pose(label + " arrival")
             arrival_error = position_error(pose, (x_value, y_value))
-            if arrival_error <= arrival_tolerance:
+            if arrival_error <= self.arrival_tolerance:
                 # move_base has completed the action; do not add a task-layer
                 # zero-speed burst between navigation goals.
                 rospy.loginfo(
@@ -5090,14 +5019,14 @@ class ProductionTask2026(object):
                     "error=%.3f m limit=%.3f m; resending goal without "
                     "task abort",
                     label, attempt + 1, retry_limit + 1, arrival_error,
-                    arrival_tolerance)
+                    self.arrival_tolerance)
                 continue
             if self.continue_on_arrival_error:
                 rospy.logwarn(
                     "PRODUCTION_TASK_ARRIVAL_CONTINUE label=%s "
                     "error=%.3f m limit=%.3f m after %d attempts; "
                     "continuing without explicit task stop",
-                    label, arrival_error, arrival_tolerance,
+                    label, arrival_error, self.arrival_tolerance,
                     retry_limit + 1)
                 return True
             self.stop_motion()
@@ -5105,11 +5034,11 @@ class ProductionTask2026(object):
                 rospy.logwarn(
                     "PRODUCTION_TASK_NAVIGATION_WARNING label=%s "
                     "arrival_error=%.3f m limit=%.3f m; continuing mission",
-                    label, arrival_error, arrival_tolerance)
+                    label, arrival_error, self.arrival_tolerance)
                 return False
             raise MissionAbort(
                 "%s stopped %.3f m from target (limit %.3f m)" %
-                (label, arrival_error, arrival_tolerance))
+                (label, arrival_error, self.arrival_tolerance))
         raise MissionAbort("%s navigation retry loop ended unexpectedly" % label)
 
     def wait_for_plan(
@@ -5246,11 +5175,11 @@ class ProductionTask2026(object):
 
 
 if __name__ == "__main__":
-    rospy.init_node("production_task_2026")
+    rospy.init_node("production_task_2026_alt1")
     try:
         ProductionTask2026()
     except TaskDefinitionError as exc:
         rospy.logfatal("Invalid production task configuration: %s", exc)
         raise
-    rospy.loginfo("2026 production task node started.")
+    rospy.loginfo("2026 production task (alt1) node started.")
     rospy.spin()

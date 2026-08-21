@@ -1,0 +1,78 @@
+<launch>
+    <!--
+      独立 OCR 8 方位定点扫描 + 连续对齐验证入口。
+
+      复用底盘、定位、地图、相机，但关闭省赛任务节点。
+      本节点不导航，在当前车辆姿态按 8 个方位逐一停靠扫描：每方位停约 1 秒
+      抓帧，发现候选后连续原地对齐最多 15 秒，并直接发布 /cmd_vel 速度到底盘
+      驱动（不经 cmd_vel_owner 仲裁）；成功后发布 ALIGNMENT_COMPLETED 并播报
+      “对齐完成”。
+    -->
+    <arg name="initial_pose_x" default="-0.25"/>
+    <arg name="initial_pose_y" default="2.75"/>
+    <arg name="initial_pose_a" default="0"/>
+    <arg name="camera_device" default="/dev/ucar_camera"/>
+
+    <include file="$(find ucar_2026)/launch/2026.launch">
+        <arg name="initial_pose_x" value="$(arg initial_pose_x)"/>
+        <arg name="initial_pose_y" value="$(arg initial_pose_y)"/>
+        <arg name="initial_pose_a" value="$(arg initial_pose_a)"/>
+        <arg name="camera_device" value="$(arg camera_device)"/>
+        <arg name="camera_start_suspended" value="false"/>
+        <arg name="task_enabled" value="false"/>
+        <arg name="scan_relay_enabled" value="true"/>
+    </include>
+
+    <node pkg="ucar_2026" type="ocr_alignment.py" name="ocr_alignment"
+          output="screen"
+          launch-prefix="$(find ucar_2026)/scripts/run_melodic_python2.sh">
+        <param name="cmd_vel_topic" value="/cmd_vel"/>
+        <param name="odom_timeout" value="3.0"/>
+        <param name="stop_confirmation_timeout" value="4.0"/>
+        <param name="stopped_odom_speed_epsilon" value="0.02"/>
+        <param name="stopped_odom_samples" value="3"/>
+        <param name="rotation_control_rate" value="20.0"/>
+
+        <param name="camera_image_topic" value="/usb_cam/image_raw"/>
+        <param name="camera_width" value="640"/>
+        <param name="camera_height" value="480"/>
+        <param name="camera_warmup_frames" value="8"/>
+        <param name="camera_frame_timeout" value="1.0"/>
+        <param name="camera_device" value="$(arg camera_device)"/>
+        <param name="camera_mirror" value="true"/>
+
+        <param name="ocr_python" value="/usr/bin/python3"/>
+        <param name="ocr_helper_path"
+               value="$(find ucar_2026)/scripts/production_camera_ocr.py"/>
+        <param name="live_ppocr_path"
+               value="/home/ucar/ocr3/ppocr_trt/python/live_ppocr.py"/>
+        <param name="ppocr_root" value="/home/ucar/ocr3/ppocr_trt"/>
+        <param name="ocr_side" value="640"/>
+        <param name="ocr_helper_ready_timeout" value="90.0"/>
+        <param name="ocr_capture_timeout" value="24.0"/>
+        <param name="ocr_min_confidence" value="0.30"/>
+
+        <param name="alignment_timeout" value="15.0"/>
+        <param name="alignment_tolerance_px" value="30.0"/>
+        <param name="alignment_kp" value="0.0025"/>
+        <param name="alignment_kd" value="0.00035"/>
+        <param name="alignment_max_speed" value="0.22"/>
+        <param name="alignment_min_speed" value="0.12"/>
+
+        <!-- 8 方位定点扫描：每个方位转到位停 1 秒抓帧，转速 1.5 rad/s。 -->
+        <param name="ocr_scan_rotation_speed" value="1.5"/>
+        <param name="ocr_scan_positions" value="8"/>
+        <param name="ocr_scan_dwell_seconds" value="1.0"/>
+        <param name="ocr_scan_candidate_confidence" value="60.0"/>
+        <param name="ocr_candidate_min_bbox_area_px" value="1000.0"/>
+        <param name="rotation_timeout_scale" value="3.5"/>
+        <param name="rotation_completion_tolerance_rad" value="0.03"/>
+
+        <param name="tts_enabled" value="true"/>
+        <param name="tts_python" value="/usr/bin/python3"/>
+        <param name="tts_helper_path" value="/home/ucar/wake/tts_say.py"/>
+        <param name="tts_timeout" value="15.0"/>
+        <param name="result_directory"
+               value="$(env HOME)/.ros/ucar_2026_ocr_alignment"/>
+    </node>
+</launch>

@@ -84,7 +84,6 @@ from production_task_geometry import (
     require_points,
     shortest_yaw_delta,
     stop_point_for_wall_point,
-    stop_point_for_measured_wall_hit,
 )
 from production_task_perception import (
     alignment_angular_speed,
@@ -96,7 +95,6 @@ from production_task_perception import (
     normalize_production_category,
     ocr_detection_bbox_area,
     odom_velocity_is_stopped,
-    projected_wall_hit,
     select_three_processing_observations,
     target_guard_scan_matches,
 )
@@ -622,12 +620,6 @@ class ProductionTask2026(object):
                 self.ocr_stop_offset_m <= 0.0):
             raise TaskDefinitionError(
                 "ocr_stop_offset_m must be finite and positive")
-        self.ocr_recheck_backoff_m = float(rospy.get_param(
-            "~ocr_recheck_backoff_m", 0.25))
-        if (not is_finite(self.ocr_recheck_backoff_m) or
-                self.ocr_recheck_backoff_m <= 0.0):
-            raise TaskDefinitionError(
-                "ocr_recheck_backoff_m must be finite and positive")
         if (not is_finite(self.processing_parking_inflation_radius_m) or
                 self.processing_parking_inflation_radius_m <= 0.0 or
                 self.processing_parking_inflation_radius_m >=
@@ -3477,21 +3469,20 @@ class ProductionTask2026(object):
                 self.log_safe_text(category))
         wall_number = observation["wall_point_number"]
         wall_coordinate = observation["wall_point_coordinate"]
-        map_intersection = observation["forward_ray_wall_intersection_map"]
-        measured_hit = observation["measured_wall_hit_map"]
-        stop_x, stop_y = stop_point_for_measured_wall_hit(
-            measured_hit, map_intersection, self.ocr_stop_offset_m,
+        intersection = observation.get(
+            "forward_ray_wall_intersection_map", wall_coordinate)
+        stop_x, stop_y = stop_point_for_wall_point(
+            intersection, self.ocr_stop_offset_m,
             self.middle_zone_bounds)
-        # The map hit selects the wall side; the measured hit selects the
-        # physical along-wall location and the final parking heading.
+        # Park with the chassis front facing the measured wall intersection.
         parking_yaw = normalize_angle(
-            bearing((stop_x, stop_y), measured_hit))
+            bearing((stop_x, stop_y), intersection))
         self.publish_state("PROCESSING_STOP_%03d" % wall_number)
         rospy.loginfo(
             "PRODUCTION_PROCESSING_STOP wall_point=%d wall_coordinate=%s "
-            "map_intersection=%s measured_hit=%s stop=%.3f,%.3f item=%s",
-            wall_number, wall_coordinate, map_intersection, measured_hit,
-            stop_x, stop_y, self.log_safe_text(item))
+            "intersection=%s stop=%.3f,%.3f item=%s",
+            wall_number, wall_coordinate, intersection, stop_x, stop_y,
+            self.log_safe_text(item))
         route_point_number = observation["route_point_number"]
         ocr_aligned_pose = observation["ocr_aligned_pose_map"]
         parking_profile_enabled = getattr(
@@ -3517,34 +3508,6 @@ class ProductionTask2026(object):
                 stop_x, stop_y, parking_yaw,
                 "processing stop point %d" % wall_number,
                 require_plan=True)
-            self.stop_motion()
-            final_parking = self.confirm_processing_stop_ocr(
-                observation, category, parking_yaw, stop_x, stop_y)
-            final_stop_x = final_parking["stop_x"]
-            final_stop_y = final_parking["stop_y"]
-            final_wall_facing_yaw = final_parking["wall_facing_yaw"]
-            final_parking_yaw = final_parking["parking_yaw"]
-            observation["processing_stop_final_parking_yaw"] = (
-                final_parking_yaw)
-            rospy.loginfo(
-                "PRODUCTION_PROCESSING_FINAL_PARK wall_point=%d "
-                "point=(%.3f,%.3f) yaw=%.3f tail_toward_wall=true "
-                "correction_applied=%s",
-                wall_number, final_stop_x, final_stop_y, final_parking_yaw,
-                final_parking["correction_applied"])
-            # Approach the final coordinate with the proven wall-facing yaw.
-            # Asking move_base to solve the 180-degree tail-facing orientation
-            # at the 25cm wall clearance can leave the local planner in
-            # recovery.  The final yaw is owned by the measured in-place turn.
-            self.navigate_coordinates(
-                final_stop_x, final_stop_y, final_wall_facing_yaw,
-                "processing final approach point %d" % wall_number,
-                require_plan=True)
-            self.stop_motion()
-            self.rotate_in_place_to_yaw(
-                final_parking_yaw,
-                "processing final tail-to-wall rotation %d" % wall_number)
-            self.stop_motion()
         finally:
             if parking_profile_enabled:
                 self.exit_processing_parking_profile()
@@ -3558,187 +3521,6 @@ class ProductionTask2026(object):
                 self.log_safe_text(category))
             self.speak_wait(u"已将%s放入%s" % (item, category))
         return observation
-
-    def confirm_processing_stop_ocr(
-            self, observation, category, wall_facing_yaw, stop_x, stop_y):
-        """Navigate to a 25cm rear verification point, then sweep OCR."""
-        wall_number = observation["wall_point_number"]
-        capture_label = "PROCESSING_RECHECK_%03d" % wall_number
-        self.publish_state(capture_label)
-        backoff_distance = self.ocr_recheck_backoff_m
-        backoff_x = float(stop_x) - backoff_distance * math.cos(
-            float(wall_facing_yaw))
-        backoff_y = float(stop_y) - backoff_distance * math.sin(
-            float(wall_facing_yaw))
-        # This is a normal forward navigation goal behind the original stop;
-        # it deliberately does not issue a negative cmd_vel reverse command.
-        self.navigate_coordinates(
-            backoff_x, backoff_y,
-            normalize_angle(float(wall_facing_yaw) + math.pi),
-            capture_label + " backoff",
-            require_plan=True)
-        self.stop_motion()
-        self.wait_for_chassis_stop(capture_label + " backoff complete")
-        camera_started = False
-        if self.use_ros_camera_for_ocr and not self.camera_streaming:
-            self.start_ros_camera_and_wait(capture_label)
-            camera_started = True
-        start_yaw = normalize_angle(
-            float(wall_facing_yaw) - math.radians(45.0))
-        self.rotate_in_place_to_yaw(
-            start_yaw, capture_label + " start_minus_45")
-        direction = 1.0
-        required_progress = max(
-            0.0, math.pi / 2.0 - self.ocr_alignment_yaw_tolerance)
-        previous_yaw = self.current_odom_yaw(
-            capture_label + " sweep start")
-        progress = 0.0
-        rechecks = []
-        confirmed = None
-        try:
-            for attempt in range(1, self.ocr_alignment_attempts + 1):
-                current_yaw = self.current_odom_yaw(
-                    capture_label + " sweep before capture")
-                progress += positive_turn_increment(
-                    previous_yaw, current_yaw, direction)
-                previous_yaw = current_yaw
-                if progress >= required_progress:
-                    break
-                response = self.capture_ocr_while_turning(
-                    abs(self.ocr_scan_rotation_speed),
-                    capture_label, attempt)
-                detection = response.get("detection")
-                detected_category = None
-                if detection is not None:
-                    detected_category = normalize_production_category(
-                        detection.get("text"))
-                recheck = {
-                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                    "image_path": response.get("image_path", ""),
-                    "text": detection.get("text", "")
-                    if detection is not None else "",
-                    "confidence": float(
-                        detection.get("confidence", -1.0))
-                    if detection is not None else -1.0,
-                    "bbox": list(detection.get("bbox", []))
-                    if detection is not None else [],
-                    "category": detected_category,
-                    "wall_facing_yaw": float(current_yaw),
-                    "yaw_offset_deg": math.degrees(
-                        normalize_angle(current_yaw - wall_facing_yaw)),
-                    "capture_requested_pose_map": list(
-                        response["capture_requested_pose_map"]),
-                }
-                rechecks.append(recheck)
-                if detected_category == category:
-                    confirmed = recheck
-                    self.stop_motion()
-                    self.wait_for_chassis_stop(
-                        capture_label + " confirmed")
-                    break
-                current_yaw = self.current_odom_yaw(
-                    capture_label + " sweep after capture")
-                progress += positive_turn_increment(
-                    previous_yaw, current_yaw, direction)
-                previous_yaw = current_yaw
-                rospy.loginfo(
-                    "PRODUCTION_PROCESSING_RECHECK wall_point=%d "
-                    "attempt=%d yaw_offset_deg=%.1f category=%s "
-                    "confidence=%.1f image=%s",
-                    wall_number, attempt, recheck["yaw_offset_deg"],
-                    self.log_safe_text(detected_category),
-                    recheck["confidence"], recheck["image_path"])
-            self.stop_motion()
-            self.wait_for_chassis_stop(capture_label + " sweep complete")
-            final_yaw = self.current_odom_yaw(
-                capture_label + " sweep settled")
-            progress += positive_turn_increment(
-                previous_yaw, final_yaw, direction)
-        finally:
-            self.stop_motion()
-            if camera_started:
-                self.stop_ros_camera_streaming(required=True)
-        if confirmed is None and progress < required_progress:
-            raise MissionAbort(
-                "processing stop OCR sweep at wall %d did not reach "
-                "the +45 degree endpoint (progress=%.3f required=%.3f)" %
-                (wall_number, progress, required_progress))
-        if confirmed is None:
-            raise MissionAbort(
-                "processing stop OCR did not confirm category %s at wall %d "
-                "within the -45 to +45 degree sweep" % (
-                    self.log_safe_text(category), wall_number))
-        observation["processing_stop_rechecks"] = rechecks
-        observation["processing_stop_recheck"] = confirmed
-        correction = self.processing_stop_correction_from_recheck(
-            observation, confirmed, wall_facing_yaw, stop_x, stop_y)
-        observation["processing_stop_correction"] = correction
-        return correction
-
-    def processing_stop_correction_from_recheck(
-            self, observation, confirmed, original_wall_facing_yaw,
-            original_stop_x, original_stop_y):
-        """Snap a recheck ray to the numbered 0.25m wall grid if it moved."""
-        capture_pose = confirmed.get("capture_requested_pose_map")
-        if capture_pose is None or len(capture_pose) != 3:
-            raise MissionAbort(
-                "processing stop recheck has no capture map pose for "
-                "grid correction")
-        wall_intersection = forward_ray_wall_intersection(
-            capture_pose, self.wall_reference_points)
-        if wall_intersection is None:
-            raise MissionAbort(
-                "processing stop recheck ray does not meet a wall boundary")
-        _ray_distance, wall_hit = wall_intersection
-        match = nearest_numbered_point(
-            wall_hit, self.wall_reference_points)
-        if match is None:
-            raise MissionAbort(
-                "processing stop recheck has no numbered wall grid point")
-        corrected_wall_number, corrected_wall_coordinate, match_error = match
-        if match_error > self.wall_match_max_error:
-            raise MissionAbort(
-                "processing stop recheck wall grid match error %.3f m "
-                "exceeds %.3f m" %
-                (match_error, self.wall_match_max_error))
-        original_wall_number = observation["wall_point_number"]
-        if int(corrected_wall_number) == int(original_wall_number):
-            final_wall_facing_yaw = normalize_angle(
-                float(original_wall_facing_yaw))
-            final_stop_x = float(original_stop_x)
-            final_stop_y = float(original_stop_y)
-            correction_applied = False
-        else:
-            final_stop_x, final_stop_y = stop_point_for_wall_point(
-                corrected_wall_coordinate, self.ocr_stop_offset_m,
-                self.middle_zone_bounds)
-            final_wall_facing_yaw = normalize_angle(
-                bearing((final_stop_x, final_stop_y),
-                        corrected_wall_coordinate))
-            correction_applied = True
-            rospy.logwarn(
-                "PRODUCTION_PROCESSING_CORRECTION wall_point=%d->%d "
-                "wall_hit=(%.3f,%.3f) snapped=(%.3f,%.3f) "
-                "stop=(%.3f,%.3f) grid=0.250",
-                original_wall_number, corrected_wall_number,
-                wall_hit[0], wall_hit[1], corrected_wall_coordinate[0],
-                corrected_wall_coordinate[1], final_stop_x, final_stop_y)
-        final_parking_yaw = normalize_angle(
-            final_wall_facing_yaw + math.pi)
-        return {
-            "correction_applied": correction_applied,
-            "grid_spacing_m": 0.25,
-            "original_wall_point_number": int(original_wall_number),
-            "corrected_wall_point_number": int(corrected_wall_number),
-            "corrected_wall_point_coordinate": list(
-                corrected_wall_coordinate),
-            "recheck_wall_hit_map": list(wall_hit),
-            "wall_match_error_m": float(match_error),
-            "stop_x": float(final_stop_x),
-            "stop_y": float(final_stop_y),
-            "wall_facing_yaw": float(final_wall_facing_yaw),
-            "parking_yaw": float(final_parking_yaw),
-        }
 
     def new_target_guard_monitor(self, target_number, guard_points=None):
         """Start a new guard epoch; old scans may not affect a new target."""
@@ -4647,24 +4429,19 @@ class ProductionTask2026(object):
             laser_pose, candidate_wall_points)
         if ray_intersection is None:
             raise MissionAbort("forward lidar ray does not meet a wall boundary")
-        ray_distance, map_hit = ray_intersection
+        ray_distance, hit = ray_intersection
         measured_distance = float(distance) + self.lidar_forward_offset
-        measured_hit = projected_wall_hit(
-            laser_pose, distance, self.lidar_forward_offset)
         range_residual = abs(measured_distance - ray_distance)
-        wall_hit_disagreement = position_error(measured_hit, map_hit)
-        match = nearest_numbered_point(measured_hit, candidate_wall_points)
+        match = nearest_numbered_point(hit, candidate_wall_points)
         if match is None:
             raise MissionAbort("grid has no wall reference candidates")
         wall_number, wall_coordinate, match_error = match
         observation.update({
             "front_distance_m": float(distance),
             "laser_pose_map": list(laser_pose),
-            "forward_ray_wall_intersection_map": list(map_hit),
-            "measured_wall_hit_map": list(measured_hit),
+            "forward_ray_wall_intersection_map": list(hit),
             "forward_ray_wall_distance_m": float(ray_distance),
             "range_residual_m": float(range_residual),
-            "wall_hit_disagreement_m": float(wall_hit_disagreement),
             "wall_point_number": int(wall_number),
             "wall_point_coordinate": list(wall_coordinate),
             "wall_match_error_m": float(match_error),
@@ -4676,21 +4453,12 @@ class ProductionTask2026(object):
                 route_point_number, wall_number, range_residual,
                 self.ray_range_agreement)
             observation.pop("wall_point_number", None)
-        elif match_error > self.wall_match_max_error:
-            rospy.logwarn(
-                "PRODUCTION_WALL_MATCH_REJECTED route_point=%d candidate=%d "
-                "match_error=%.3f limit=%.3f measured_hit=(%.3f,%.3f)",
-                route_point_number, wall_number, match_error,
-                self.wall_match_max_error, measured_hit[0], measured_hit[1])
-            observation.pop("wall_point_number", None)
         else:
             rospy.loginfo(
                 "PRODUCTION_WALL_RAY route_point=%d wall_point=%d "
-                "text=%s measured_hit=(%.3f,%.3f) map_hit=(%.3f,%.3f) "
-                "distance=%.3f ray_distance=%.3f residual=%.3f",
+                "text=%s distance=%.3f ray_distance=%.3f residual=%.3f",
                 route_point_number, wall_number,
                 json.dumps(observation["text"], ensure_ascii=True),
-                measured_hit[0], measured_hit[1], map_hit[0], map_hit[1],
                 distance, ray_distance, range_residual)
         return observation
 

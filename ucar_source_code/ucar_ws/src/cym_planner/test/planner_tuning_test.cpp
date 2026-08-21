@@ -76,6 +76,24 @@ TEST(PlannerTuning, NonFiniteClampFailsClosedToZero)
     EXPECT_DOUBLE_EQ(0.5, cym_planner::finiteClamp(0.5, -1.0, 1.0));
 }
 
+TEST(PlannerTuning, FloorsNonzeroCommandsAtChassisDeadZone)
+{
+    EXPECT_DOUBLE_EQ(
+        0.06, cym_planner::applyMinimumSpeed(0.014, 0.06));
+    EXPECT_DOUBLE_EQ(
+        -0.06, cym_planner::applyMinimumSpeed(-0.014, 0.06));
+    EXPECT_DOUBLE_EQ(
+        0.06, cym_planner::applyMinimumSpeed(0.06, 0.06));
+    EXPECT_DOUBLE_EQ(
+        0.08, cym_planner::applyMinimumSpeed(0.08, 0.06));
+    EXPECT_DOUBLE_EQ(
+        0.0, cym_planner::applyMinimumSpeed(0.0, 0.06));
+    EXPECT_DOUBLE_EQ(
+        0.12, cym_planner::applyMinimumSpeed(0.078, 0.12));
+    EXPECT_DOUBLE_EQ(
+        -0.12, cym_planner::applyMinimumSpeed(-0.078, 0.12));
+}
+
 int main(int argc, char** argv)
 {
     testing::InitGoogleTest(&argc, argv);

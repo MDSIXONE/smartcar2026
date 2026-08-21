@@ -2,6 +2,36 @@
 
 > 此文件由项目记忆技能维护。仅记录本项目 AI 辅助完成的源代码、配置或资源改动。
 
+## 2026-08-20｜8 方位定点 OCR 扫描（ocr_search / ocr_alignment / 备用方案二）（改动完成）
+
+- 状态：独立 OCR 搜索与对齐入口（`ocr_search.py`、`ocr_alignment.py`）从 360° 连续旋转改为
+  8 方位定点停靠扫描（每 45° 一个方位，转到位停 1 秒抓帧，转速 `1.5rad/s`）；对齐失败继续扫描
+  剩余方位，不再跳过当前路线点。新增备用方案二 `production_task_2026_alt2.py` + `2026_alt2.launch`，
+  在完整任务中采用相同的 8 方位定点扫描（其余逻辑与 alt1 完全一致）。原主流程
+  `production_task_2026.py` / `2026.launch` 未改动。
+- 验证：本地 py_compile/XML 解析/135 项 unittest 全部通过；车端 11 个文件 SHA-256 与本地一致、
+  Python2 AST 与 launch XML 通过、chmod +x 已设置、三个相关 unittest 通过；未启动 ROS、未发送运动指令。
+
+## 2026-08-20｜三套 2026 主流程统一回退到 17b39b3（改动完成）
+
+- 状态：`ucar_2026`、`ucar_2026_national`、`ucar_2026_extra` 三套的
+  `production_task_2026.py`、`2026.launch`、`production_task_geometry.py` 及对应测试
+  统一回退到实车验证版 `17b39b3`（完善 OCR 对准与导航恢复流程），三套保持一致：均无
+  OCR 后退 25cm 复核、无墙点吸附纠正、无尾向朝挡板停车，`cmd_vel_topic=/cmd_vel/navigation`。
+- 验证：本地三套 geometry（104/105/120）与 perception（13/13/13）全部通过；车端 10 个
+  文件 SHA-256 与本地一致、Python2 语法与 XML 解析通过、三套 launch 均确认无
+  `ocr_recheck_backoff_m`；未启动 ROS、未发送运动指令。
+
+## 2026-08-20｜省赛主流程回退到 17b39b3 并重建备用方案一（改动完成）
+
+- 状态：省赛 `production_task_2026.py`、`2026.launch`、`production_task_geometry.py` 及对应测试回退到实车验证版 `17b39b3`（完善 OCR 对准与导航恢复流程，无 OCR 后退 25cm 复核/墙点吸附纠正/尾向停车）。alt1 基于回退版重建（15s 墙钟超时、固定 30px、发散重置、空检测边转、直发 `/cmd_vel`）。
+- 验证：本地 geometry 104 / perception 13 / alt1 4 / ocr_alignment 4 / ocr_search 5 全部通过；车端 7 文件 SHA-256 与本地一致、Python2 语法/XML 解析通过、主流程已确认回退（无 `ocr_recheck_backoff_m`、`cmd_vel_topic=/cmd_vel/navigation`）、`roslaunch --nodes ... task_enabled:=true` 解析出 alt1 节点；未启动 ROS、未发送运动指令。
+
+## 2026-08-20｜省赛备用方案一：超时连续对准版生产任务（改动完成）
+
+- 状态：新增 `production_task_2026_alt1.py` 与 `2026_alt1.launch`，原 `production_task_2026.py`/`2026.launch` 未改动。observe_wall 对齐改为 15s 墙钟超时、固定 30px 容差、发散两次重置 PD 导数继续、空检测继续边转抓帧；任务节点直发 `/cmd_vel`。对齐后的测距/墙点匹配/停车坐标逻辑不变。
+- 验证：本地 13 项回归测试通过（alt1 4 + ocr_alignment 4 + ocr_search 5）、Python AST/launch XML/`git diff --check` 通过；车端 4 文件 SHA-256 与本地一致、Python2 语法与 XML 解析通过、`roslaunch --nodes ... task_enabled:=true` 可解析 alt1 节点；`start_2026.sh` 新增 `mission_alt1` 模式并同步车端（bash -n 通过、SHA-256 一致）；未启动 ROS、未发送运动指令。
+
 ## 2026-08-20｜OCR 纠正墙点重新吸附网格并拆分尾向停车（改动完成）
 
 - 状态：三套主流程已部署复核纠正与两段式最终停车；纠正墙点重新吸附 `0.25m` 网格，最终先车头朝墙导航，再原地转为车尾朝挡板。

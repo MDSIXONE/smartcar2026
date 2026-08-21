@@ -8,8 +8,12 @@ catkin_package()
 catkin_install_python(PROGRAMS
   scripts/cmd_vel_owner.py
   scripts/navigation_scan_relay.py
+  scripts/ocr_alignment.py
+  scripts/ocr_search.py
   scripts/production_camera_ocr.py
   scripts/production_task_2026.py
+  scripts/production_task_2026_alt1.py
+  scripts/production_task_2026_alt2.py
   scripts/production_task_geometry.py
   scripts/production_task_perception.py
   scripts/yolo_dataset_capture.py
@@ -31,6 +35,10 @@ install(DIRECTORY config launch urdf rviz
 if(CATKIN_ENABLE_TESTING)
   catkin_add_nosetests(test/test_production_task_geometry.py)
   catkin_add_nosetests(test/test_production_task_perception.py)
+  catkin_add_nosetests(test/test_ocr_alignment_launch.py)
+  catkin_add_nosetests(test/test_ocr_search_launch.py)
+  catkin_add_nosetests(test/test_2026_alt1_launch.py)
+  catkin_add_nosetests(test/test_2026_alt2_launch.py)
   add_test(
     NAME production_camera_ocr_py3
     COMMAND /usr/bin/python3
