@@ -319,6 +319,41 @@ def select_category_cluster(detection, image_width, category):
     return matching[0][0]
 
 
+def any_production_cluster_candidate(response, minimum_confidence,
+                                     minimum_bbox_area_px=0.0):
+    """alt3 (A3): merged-or-per-cluster entry gate for the OCR scan turn.
+
+    A frame that shows two signs concatenates into one pseudo-sign for the
+    helper's classify(); its merged confidence can then dip below the scan
+    gate even though one sign alone is strong, and the whole frame would be
+    discarded.  Accept the frame when either the legacy merged detection
+    qualifies or any single per-sign cluster does; the per-cluster
+    candidate loop afterwards picks which sign to process.
+    """
+    if is_navigation_ocr_candidate(
+            response, minimum_confidence, minimum_bbox_area_px):
+        return True
+    if not isinstance(response, dict) or not response.get("ok"):
+        return False
+    detection = response.get("detection")
+    if not isinstance(detection, dict):
+        return False
+    try:
+        width = int(response.get("width", 640))
+    except (TypeError, ValueError):
+        width = 640
+    for _category, candidate in production_cluster_candidates(
+            detection, width, minimum_bbox_area_px):
+        text = (candidate.get("text") or u"").strip()
+        try:
+            confidence = float(candidate.get("confidence", -1.0))
+        except (TypeError, ValueError):
+            continue
+        if text and confidence >= float(minimum_confidence):
+            return True
+    return False
+
+
 class ProductionTask2026(object):
     def __init__(self):
         self.grid_path = rospy.get_param("~grid_path")
@@ -4251,7 +4286,7 @@ class ProductionTask2026(object):
                     response = self.finish_async_motion_ocr(completed_task)
                     self.log_small_ocr_candidate(
                         response, label, self.ocr_scan_candidate_confidence)
-                    if is_navigation_ocr_candidate(
+                    if any_production_cluster_candidate(
                             response, self.ocr_scan_candidate_confidence,
                             self.ocr_candidate_min_bbox_area_px):
                         rospy.loginfo(
@@ -4295,7 +4330,7 @@ class ProductionTask2026(object):
                         self.log_small_ocr_candidate(
                             response, label,
                             self.ocr_scan_candidate_confidence)
-                        if is_navigation_ocr_candidate(
+                        if any_production_cluster_candidate(
                                 response,
                                 self.ocr_scan_candidate_confidence,
                                 self.ocr_candidate_min_bbox_area_px):
