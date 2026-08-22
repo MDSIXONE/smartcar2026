@@ -11,6 +11,9 @@
      按邻近关系聚成“每块牌一簇”（union-find 连通分量）；对准/记类只用
      目标类别所在簇的 bbox 与文本；PD 对准发散两次、测距/墙点匹配失败
      降级为放弃当前候选（rejected），不再终止整个任务。
+  全扫描——转圈 OCR 默认完整转满 360°（ocr_scan_complete_revolution=true），
+     即使本圈已记录到全部所需类别，也把周围扫完再继续；关掉该参数可恢复
+     “记满即停”的旧行为。
 
 Flow:
   1. Navigate to centre 52.
@@ -465,6 +468,11 @@ class ProductionTask2026(object):
         # target then costs at most this long before it is skipped.
         self.route_goal_timeout = float(rospy.get_param(
             "~route_goal_timeout", 0.0))
+        # alt3: complete the full 360-degree OCR revolution even after
+        # every requested category is already recorded, so each stop
+        # scans everything around it.  False restores stop-when-found.
+        self.ocr_scan_complete_revolution = bool(rospy.get_param(
+            "~ocr_scan_complete_revolution", True))
         self.goal_cancel_timeout = float(
             rospy.get_param("~goal_cancel_timeout", 3.0))
         self.arrival_tolerance = float(
@@ -4118,7 +4126,9 @@ class ProductionTask2026(object):
                                     observation["wall_point_number"]
                                     for existing in self.observations):
                                 self.observations.append(observation)
-                            if all_required_categories_recorded():
+                            if (all_required_categories_recorded()
+                                    and not
+                                    self.ocr_scan_complete_revolution):
                                 self._ocr_turn_stop_flag = True
                             event["outcome"] = (
                                 "processing_category_recorded")
@@ -4148,7 +4158,9 @@ class ProductionTask2026(object):
                         # A single wall can expose multiple recordable
                         # categories.  Keep turning until all categories
                         # required by this scan have been recorded.
-                        if all_required_categories_recorded():
+                        if (all_required_categories_recorded()
+                                and not
+                                self.ocr_scan_complete_revolution):
                             self._ocr_turn_stop_flag = True
                         event["outcome"] = "processing_category_recorded"
                         rospy.loginfo(

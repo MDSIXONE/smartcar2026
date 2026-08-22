@@ -195,6 +195,9 @@
                  goal_timeout(180)。被锥桶堵死的点最多消耗该时长后跳过
                  而不是终止任务；想更快放弃可改为 60。 -->
             <param name="route_goal_timeout" value="0"/>
+            <!-- alt3：转圈 OCR 完整转满 360°，即使目标类别已找到也把周围
+                 全部扫描完再继续；false 恢复“记满即停”。 -->
+            <param name="ocr_scan_complete_revolution" value="true"/>
             <!-- 2026-08-19：任务层位置到点验收放宽为 12cm，避免
                  控制器已报告到达但复核偏差导致任务中止。 -->
             <param name="arrival_tolerance" value="0.12"/>
